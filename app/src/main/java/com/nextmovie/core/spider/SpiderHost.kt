@@ -52,6 +52,8 @@ class SpiderHost(
     /** home 的原始 JSON 按站点缓存：分类 Tab 与首页列表来自同一次请求，避免重复打源站。 */
     private val homeRequests = com.nextmovie.core.cache.RequestCache<String, JSONObject>(120_000, 32)
 
+    suspend fun preconnect() = client.preconnect()
+
     suspend fun clearCache() { homeRequests.clear() }
 
     suspend fun home(site: Site): List<Vod> = withContext(Dispatchers.IO) {

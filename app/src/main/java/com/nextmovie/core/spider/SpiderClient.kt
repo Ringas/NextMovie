@@ -79,6 +79,8 @@ class SpiderClient(private val context: Context) {
         }
     }
 
+    suspend fun preconnect() { ensureConnected() }
+
     private suspend fun ensureConnected(): Boolean {
         inbound?.let { return true }
         synchronized(lock) {

@@ -118,19 +118,37 @@ fun HomeScreen(
     val rowState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
 
-    LaunchedEffect(site.key) {
-        cats = runCatching { repo.categories(site) }.getOrDefault(emptyList())
+    val initialReloadSignal = remember(site.runtimeKey) { reloadSignal }
+    val initialSnapshot = remember(site.runtimeKey) {
+        kotlinx.coroutines.CompletableDeferred<List<Vod>?>()
+    }
+    LaunchedEffect(site.runtimeKey) {
+        initialSnapshot.complete(repo.cachedHome(site))
+    }
+    val backgroundReady = remember(site.runtimeKey) { kotlinx.coroutines.CompletableDeferred<Unit>() }
+    LaunchedEffect(site.runtimeKey) {
+        // Bind in parallel with reading the snapshot. Binding doesn't initialize a source.
+        repo.connectPluginHost(site)
+        if (initialSnapshot.await() != null) delay(2_500)
+        backgroundReady.complete(Unit)
+    }
+    LaunchedEffect(site.runtimeKey) {
+        backgroundReady.await()
+        cats = try { repo.categories(site) }
+        catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (_: Exception) { emptyList() }
         if (tab > cats.size) tab = 0
     }
 
     LaunchedEffect(site.runtimeKey, tab, reloadTick, reloadSignal) {
         loading = true
         error = null
-        if (tab == 0 && reloadTick == 0) {
-            repo.cachedHome(site)?.let { saved ->
+        if (tab == 0 && reloadTick == 0 && reloadSignal == initialReloadSignal) {
+            initialSnapshot.await()?.let { saved ->
                 vods = repo.prepareForList(saved)
                 loading = false
                 android.util.Log.i("NextMovieTiming", "home-snapshot-ready " + (System.nanoTime() - screenStartedAt) / 1_000_000 + "ms")
+                backgroundReady.await()
             }
         }
         continueList = repo.history.continueWatching(10).filter { it.siteKey == site.key }

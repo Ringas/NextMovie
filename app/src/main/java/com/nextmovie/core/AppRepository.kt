@@ -168,6 +168,10 @@ class AppRepository(private val context: Context) {
     fun siteByKey(key: String): Site? = sites.firstOrNull { it.key == key }
 
     /** 站点分类导航（CMS 走 ac=list 的 class 数组；插件站点暂不提供） */
+    suspend fun connectPluginHost(site: Site) {
+        if (site.isSpider && site.isPlayable) spiderHost.preconnect()
+    }
+
     suspend fun categories(site: Site): List<Pair<String, String>> =
         (if (site.isCms) CmsSiteClient(http, site).categories() else spiderHost.categories(site)).also { warmSites.add(site.runtimeKey) }
 
@@ -253,6 +257,9 @@ class AppRepository(private val context: Context) {
     /** Speculation stays on the focused item of an already initialized source, at most one request. */
     fun prefetchDetail(site: Site, vod: Vod) {
         if (site.runtimeKey !in warmSites || vod.id.isBlank() || vod.action.isNotBlank() || vod.tag == "folder") return
+        if (vod.id.startsWith("action://", true)) return
+        val sourceLabel = "${site.api} ${site.name}"
+        if (listOf("wogg", "网盘", "玩偶", "夸克", "alist", "netdisk").any { sourceLabel.contains(it, true) }) return
         if (!prefetchSlot.tryAcquire()) return
         prefetchScope.launch {
             try { detail(site, vod.id, vod.name) }
@@ -292,13 +299,17 @@ class AppRepository(private val context: Context) {
         onFirstPlayable: (DetailHit) -> Unit = {}
     ): DetailHit? {
         val keyword = vod.name.trim()
-        val primary = withTimeoutOrNull(5_000) {
+        val primaryBudgetMs = if (site.isSpider && site.runtimeKey !in warmSites) 9_000L else 5_000L
+        val primary = withTimeoutOrNull(primaryBudgetMs) {
             detailAttempt {
                 val id = if (preferSearch) matchingVideo(site, keyword, vod.displayYear)?.id else vod.id
                 id?.let { detail(site, it, altId = vod.name) }
             }
         }
-        if (primary != null && primary.lines.isNotEmpty()) return DetailHit(site, primary)
+        if (primary != null && primary.lines.isNotEmpty()) {
+            warmSites.add(site.runtimeKey)
+            return DetailHit(site, primary)
+        }
         if (keyword.isBlank()) return primary?.let { DetailHit(site, it) }
 
         val targets = sites.filter { it.isPlayable && it.searchable }
