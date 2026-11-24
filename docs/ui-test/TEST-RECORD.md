@@ -2,8 +2,9 @@
 
 - 日期：2026-11-25
 - 版本：0.6.12-dev / versionCode 28
-- 代码基线：`9c84e5a`（已合并远端 “Prioritize detail requests during cached startup”；本地 UI 改动仍未提交）
-- 构建：`:app:assembleTv64Debug`（arm64-v8a，15 MB）
+- 代码基线：`afa20e1`（已合并远端 “Prioritize detail requests during cached startup”，UI 与文档已推送到 origin/main）
+- 构建：`:app:assembleTv64Debug`（arm64-v8a，15 MB）+ `:app:assembleTvDebug`（armeabi-v7a，14 MB），
+  产物在 `dist/`，脚本 `scripts/build-tv.sh`（不带参数即同时出两个 ABI）
 
 ## 一、设计语言 → Compose 映射
 
@@ -24,7 +25,8 @@
 | 设备 A | Android 11 模拟器 `emulator-5556`（API 30，1920×1080，density 320，abilist 含 arm64-v8a） |
 | 设备 B（备份） | ONEPLUS A3010 真机（API 28，arm64-v8a），`wm size 1920x1080`、`wm density 320`、横屏，用于模拟电视视口 |
 | 配置 | `in.bmp`（50 个站点 / 50 个插件，其中 32 个可搜索） |
-| 播放验证 | 本地 CMS 测试源 + 公开 HLS 测试流（不含任何版权内容） |
+| 播放验证 | 64 位：本地 CMS 测试源 + 公开 HLS 测试流；32 位：真实 `in.bmp` 插件源（糯米\|秒播） |
+| 32 位实测 | 同一台 ONEPLUS A3010 安装 `armeabi-v7a` 包，`dumpsys package` 显示 `primaryCpuAbi=armeabi-v7a` |
 
 > 说明：本轮后半程模拟器 `qemu-system-x86_64-headless` 崩溃后 HVF 持续返回
 > `HVF Unknown error 0xfae94007`，无法再启动 Android 11 模拟器，因此除 `09-emulator11-home.jpg`
@@ -44,6 +46,8 @@
 | 8 | 播放器控制条：继续 / ±10 秒 / 倍速 / 返回详情，焦点金环 | 通过（本轮修复焦点崩溃） | 04-player-hud.jpg |
 | 9 | 搜索页：当前源不可搜索 → 就地挑选可搜索源 | 通过（本轮新增） | 06-search-source-picker.jpg |
 | 10 | 搜索页：自绘九宫格键盘输入 | 通过（本轮修复 IME 遮挡） | 07-search-keyboard.jpg |
+| 11 | 32 位包（armeabi-v7a）冷启动到 50 站首页 | 通过 | 10-arm32-home.jpg |
+| 12 | 32 位包播放真实插件源 + HUD 控制条 | 通过 | 11-arm32-player-hud.jpg |
 
 ## 四、本轮修复的问题
 
@@ -60,4 +64,15 @@
 
 - 部分 Guard 插件源的 `ProxyOrigin` 在本机抛异常，HLS 代理返回非 m3u8 内容（源侧问题，已保留 `NextMoviePlay` 日志便于定位）。
 - `in.bmp` 中 3 个 drpy2 JS 源仍不可用（QuickJS 2024 内核语法 + async，未换引擎）。
-- 本轮改动尚未 commit / push。
+- 64 位下部分插件源仍受 Guard 代理阻塞；32 位下同类源已验证可播，后续以 32 位为主要验收 ABI。
+
+## 六、双 ABI 产物
+
+| ABI | 文件 | 说明 |
+| --- | --- | --- |
+| arm64-v8a | `dist/NextMovie-0.6.12-dev-vc28-arm64-v8a.apk` | 64 位电视盒子 / 模拟器 |
+| armeabi-v7a | `dist/NextMovie-0.6.12-dev-vc28-armeabi-v7a.apk` | 32 位盒子；Guard 插件 `libnmabi.so` 为 32 位 ELF，此 ABI 下插件链路更完整 |
+
+32 位包实测：`home-snapshot-ready 1058ms` / `home-ready 2297ms`；进入详情 `detail-ready 4171ms`；
+播放时插件给出**有效本地代理端口**（`127.0.0.1:37463/proxy?do=m3u8`，不再是 `-1`），ExoPlayer 正常起播，
+HUD 显示 `00:29 / 1:53:55 / -1:53:26` 与「下一集：20261022-02」。截图见 `10-arm32-home.jpg`、`11-arm32-player-hud.jpg`。
