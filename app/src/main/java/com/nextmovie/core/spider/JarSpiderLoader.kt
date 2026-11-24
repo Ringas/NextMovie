@@ -70,6 +70,9 @@ class JarSpiderLoader(
         // 只会在宿主 classpath 里找，找不到就直接 abort（MuMu 上表现为插件进程闪退）。
         val libDir = File(context.filesDir, "spider-libs/" + jarFile.nameWithoutExtension).apply { mkdirs() }
         val nativeFile = extractNativeLib(jarFile, libDir)
+        // Guard 的二级 dex 加密体（assets/ftyshinidie.guard）也落盘：
+        // 部分插件的 <混淆名>(File) 入口要的是这个 payload，而不是 jar 自身。
+        val guardFile = extractAssetEntry(jarFile, ".guard", libDir, "payload.guard")
         val bridgeDex = ensureBridgeDex()
 
         val loader = classLoaders.getOrPut(site.key) {
@@ -166,21 +169,30 @@ class JarSpiderLoader(
                     if (!java.lang.reflect.Modifier.isStatic(m.modifiers)) return@forEach
                     if (m.parameterTypes.isEmpty() || m.parameterTypes.size > 2) return@forEach
                     val lname = m.name.lowercase()
-                    if (!(lname.contains("init") || lname.contains("load") || lname.contains("prepare") || lname.contains("guard"))) return@forEach
-                    val args: Array<Any?> = when {
-                        m.parameterTypes[0] == Context::class.java && m.parameterTypes.size == 1 -> arrayOf(context)
+                    // 只吃一个 File 的方法几乎就是「解密二级 dex」的入口，名字全是混淆字符
+                    // （oOoOoOoOoOoOoO0o），按名字过滤会永远漏掉它，detail/play 就只能拿到空串。
+                    val fileEntry = m.parameterTypes.size == 1 && m.parameterTypes[0] == File::class.java
+                    if (!fileEntry && !(lname.contains("init") || lname.contains("load") || lname.contains("prepare") || lname.contains("guard"))) return@forEach
+                    val attempts: List<Array<Any?>> = when {
+                        fileEntry -> buildList {
+                            add(arrayOf<Any?>(jarFile))
+                            guardFile?.let { add(arrayOf<Any?>(it)) }
+                        }
+                        m.parameterTypes[0] == Context::class.java && m.parameterTypes.size == 1 -> listOf(arrayOf<Any?>(context))
                         m.parameterTypes[0] == Context::class.java && m.parameterTypes[1] == String::class.java ->
-                            arrayOf(context, jarFile.absolutePath)
+                            listOf(arrayOf<Any?>(context, jarFile.absolutePath))
                         m.parameterTypes[0] == Context::class.java && m.parameterTypes[1].name == "boolean" ->
-                            arrayOf(context, true)
-                        m.parameterTypes[0] == File::class.java -> arrayOf(jarFile)
-                        m.parameterTypes[0] == File::class.java && m.parameterTypes.size == 2 -> arrayOf(jarFile, context)
-                        m.parameterTypes[0] == String::class.java -> arrayOf(jarFile.absolutePath)
+                            listOf(arrayOf<Any?>(context, true))
+                        m.parameterTypes[0] == File::class.java && m.parameterTypes.size == 2 -> listOf(arrayOf<Any?>(jarFile, context))
+                        m.parameterTypes[0] == String::class.java -> listOf(arrayOf<Any?>(jarFile.absolutePath))
                         else -> return@forEach
                     }
-                    val r = runCatching { m.isAccessible = true; m.invoke(null, *args) }
                     val tag = m.name + "(" + m.parameterTypes.joinToString(",") { it.simpleName } + ")"
-                    results += tag + " = " + if (r.isSuccess) "ok" else "fail: " + rootCause(r.exceptionOrNull()!!).take(80)
+                    attempts.forEachIndexed { i, args ->
+                        val r = runCatching { m.isAccessible = true; m.invoke(null, *args) }
+                        val who = if (attempts.size > 1) tag + "#" + (if (i == 0) "jar" else "payload") else tag
+                        results += who + " = " + if (r.isSuccess) "ok" else "fail: " + rootCause(r.exceptionOrNull()!!).take(80)
+                    }
                 }
             }
             PluginDiag.saveInit(context, results.joinToString("\n"))
@@ -285,6 +297,17 @@ class JarSpiderLoader(
 
     private fun md5(bytes: ByteArray): String =
         MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { b -> "%02x".format(b) }
+
+    /** 从 jar 里按后缀取一个资源落盘（assets 里的 .guard 这类加密负载）。 */
+    private fun extractAssetEntry(jarFile: File, suffix: String, dir: File, name: String): File? = runCatching {
+        ZipFile(jarFile).use { zip ->
+            val entry = zip.entries().asSequence().firstOrNull { it.name.endsWith(suffix) && it.size > 0 }
+                ?: return@use null
+            val out = File(dir, name)
+            zip.getInputStream(entry).use { input -> out.outputStream().use { input.copyTo(it) } }
+            out
+        }
+    }.getOrNull()
 
     /** 从 jar 的 assets 里挑出与本进程 ABI 匹配的那个 .so，落到私有目录。 */
     private fun extractNativeLib(jarFile: File, dir: File): File? = runCatching {
