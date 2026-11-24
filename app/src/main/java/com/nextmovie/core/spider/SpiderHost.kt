@@ -37,16 +37,32 @@ class SpiderHost(
 
     private val client = SpiderClient(context.applicationContext)
 
-    fun release() = client.close()
+    @Volatile private var cancelledLogin = false
+    fun cancelPlayback() { cancelledLogin = true }
+    suspend fun preparePlayback() {
+        if (cancelledLogin) {
+            client.restartForLogin()
+            cancelledLogin = false
+            homeRequests.clear()
+        }
+    }
+
+    fun release() { homeRequests.close(); client.close() }
 
     /** home 的原始 JSON 按站点缓存：分类 Tab 与首页列表来自同一次请求，避免重复打源站。 */
-    private val homeCache = java.util.concurrent.ConcurrentHashMap<String, JSONObject>()
+    private val homeRequests = com.nextmovie.core.cache.RequestCache<String, JSONObject>(120_000, 32)
+
+    suspend fun clearCache() { homeRequests.clear() }
 
     suspend fun home(site: Site): List<Vod> = withContext(Dispatchers.IO) {
         ensureSpider(site, "home")
         val obj = requestHome(site)
-        homeCache[site.key] = obj
-        VodParser.list(obj).map(::withSyntheticId).also {
+        val listed = VodParser.list(obj)
+        val firstCategory = obj.optJSONArray("class")?.optJSONObject(0)?.optString("type_id").orEmpty()
+        val content = if (listed.isEmpty() && firstCategory.isNotBlank()) {
+            category(site, firstCategory, 1, false, "")
+        } else listed
+        content.also {
             android.util.Log.d("NextMovieHome", "ids=" + it.take(3).joinToString(" | ") { v -> v.id })
         }
     }
@@ -54,7 +70,7 @@ class SpiderHost(
     /** 插件源的分类：TVBox 的 `class` 数组（type_id / type_name）。 */
     suspend fun categories(site: Site): List<Pair<String, String>> = withContext(Dispatchers.IO) {
         ensureSpider(site, "home")
-        val obj = homeCache[site.key] ?: requestHome(site).also { homeCache[site.key] = it }
+        val obj = requestHome(site)
         val arr = obj.optJSONArray("class") ?: return@withContext emptyList()
         (0 until arr.length()).mapNotNull { i ->
             val o = arr.optJSONObject(i) ?: return@mapNotNull null
@@ -64,11 +80,11 @@ class SpiderHost(
         }
     }
 
-    private suspend fun requestHome(site: Site): JSONObject {
+    private suspend fun requestHome(site: Site): JSONObject = homeRequests.get(site.runtimeKey) {
         // 不再吞掉异常：插件加载失败（如「只有 ARM 原生库」）必须让用户看到原因，
         // 否则首页只会显示「这个源暂时没有返回内容」，等于把可诊断的问题变成玄学。
         val raw = client.request(ACTION_HOME, site)
-        return runCatching { JSONObject(raw) }.getOrElse {
+        runCatching { JSONObject(raw) }.getOrElse {
             android.util.Log.w("NextMovieHome", "插件源 home 返回无法解析：${raw.take(120)}")
             JSONObject()
         }
@@ -117,6 +133,7 @@ class SpiderHost(
         val raw = client.request(ACTION_SEARCH, site) {
             putString(KEY_ARG1, keyword)
             putString(KEY_ARG2, "1")
+            putBoolean(KEY_FILTER, site.quickSearch)
         }
         VodParser.list(JSONObject(raw))
     }
@@ -124,18 +141,25 @@ class SpiderHost(
     suspend fun play(site: Site, flag: String, id: String, vip: List<String> = emptyList()): PlayResult? =
         withContext(Dispatchers.IO) {
             ensureSpider(site, "play")
-            val raw = client.request(ACTION_PLAY, site) {
+            val raw = client.request(ACTION_PLAY, site, timeoutMs = 325_000) {
                 putString(KEY_ARG1, flag)
                 putString(KEY_ARG2, id)
             }
-            PlayResult.fromJson(JSONObject(raw))
+            val result = JSONObject(raw)
+            PlayResult.fromJson(result) ?: run {
+                val note = result.optString("errMsg").ifBlank { result.optString("msg") }.ifBlank { "来源未返回播放地址" }
+                // Guard cloud clients can remember a dismissed login for the lifetime of their class loader.
+                // Reset only the isolated runtime on the next explicit play; preserve all persisted credentials.
+                if (note.contains("登录") || note.contains("login", true)) cancelledLogin = true
+                throw SpiderClient.SpiderException(note)
+            }
         }
 
     private fun ensureSpider(site: Site, action: String) {
         when {
             // 插件源（加壳 jar）与 JS 源都由 :spider 进程加载，这里只放行，具体能力由服务端判断
             site.api.startsWith("csp_") || site.api.endsWith(".jar") -> Unit
-            site.api.endsWith(".js") || site.api.endsWith(".mjs") -> Unit
+            site.isJavaScript -> Unit
             site.api.endsWith(".py") ->
                 throw UnsupportedSource("Python 插件计划在 P2 支持：${site.name}")
             site.api.startsWith("node:") ->

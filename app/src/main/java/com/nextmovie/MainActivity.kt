@@ -8,7 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import com.nextmovie.ui.common.tvClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -26,6 +26,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -55,8 +57,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         repo = AppRepository(applicationContext)
         setContent {
-            NextMovieTheme {
-                AppRoot(repo)
+            com.nextmovie.ui.theme.TvDisplay {
+                NextMovieTheme { AppRoot(repo) }
             }
         }
     }
@@ -88,7 +90,7 @@ class MainActivity : ComponentActivity() {
 
 sealed interface Route {
     data object Home : Route
-    data class Detail(val vod: Vod) : Route
+    data class Detail(val vod: Vod, val siteKey: String? = null) : Route
     data class Player(val req: PlayRequest) : Route
     data object Search : Route
     data object Settings : Route
@@ -125,18 +127,30 @@ private fun AppRoot(repo: AppRepository) {
     var route by remember { mutableStateOf<Route>(Route.Home) }
     // 首页海报行的焦点索引放在这里，跨页面存活，回来时能复原位置
     var homeFocusIndex by remember { mutableStateOf(0) }
+    var homeTab by remember { mutableStateOf(0) }
     var booting by remember { mutableStateOf(false) }
+    var resolving by remember { mutableStateOf(false) }
+    var playJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     // 冷启动时把上次保存的配置自动载入，否则每次重启都会停在「还没有导入数据源」
     LaunchedEffect(Unit) {
         if (repo.currentSite == null && repo.configUrl().isNotBlank()) {
-            booting = true
-            val r = runCatching { repo.loadConfig(repo.configUrl()) }
+            val savedUrl = repo.configUrl()
+            val restored = repo.restoreCachedConfig()
+            booting = !restored
+            if (restored) {
+                if (repo.configSnapshotIsFresh()) return@LaunchedEffect
+                kotlinx.coroutines.delay(3_000)
+                if (route != Route.Home || repo.configUrl() != savedUrl) return@LaunchedEffect
+            }
+            val r = runCatching { repo.loadConfig(savedUrl) }
             booting = false
+            if (restored) return@LaunchedEffect
             // 冷启动自动载入同样要给结果反馈：成功报站点数，失败报原因，避免"黑屏几秒像卡死"
             r.onSuccess { n ->
                 Toast.makeText(context, "已加载 $n 个站点", Toast.LENGTH_SHORT).show()
             }.onFailure {
+                if (it is kotlinx.coroutines.CancellationException) return@onFailure
                 Toast.makeText(
                     context,
                     "数据源载入失败：" + (it.message ?: it.javaClass.simpleName).take(60),
@@ -151,11 +165,17 @@ private fun AppRoot(repo: AppRepository) {
         runCatching { repo.tuneTmdbSilently() }
     }
 
-    BackHandler(enabled = route != Route.Home) {
+    BackHandler(enabled = resolving || route != Route.Home) {
+        if (resolving) { playJob?.cancel(); resolving = false; return@BackHandler }
         route = when (val current = route) {
-            is Route.Player -> Route.Detail(current.req.backTo)
+            is Route.Player -> Route.Detail(current.req.backTo, current.req.siteKey)
             else -> Route.Home
         }
+    }
+
+    var accountGeneration by remember { mutableStateOf(0) }
+    val accountLauncher = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) {
+        scope.launch { repo.invalidateContent(); accountGeneration++ }
     }
 
     val site = repo.currentSite
@@ -192,14 +212,26 @@ private fun AppRoot(repo: AppRepository) {
             Toast.makeText(context, "还没有选择数据源", Toast.LENGTH_SHORT).show()
             return
         }
-        scope.launch {
-            val result = runCatching { repo.resolvePlay(activeSite, line.name, episode.url) }.getOrNull()
+        playJob?.cancel()
+        playJob = scope.launch {
+            resolving = true
+            try {
+                val result = try {
+                    repo.preparePlayback(activeSite)
+                    if (activeSite.isCms) repo.resolvePlay(activeSite, line.name, episode.url)
+                    else PluginPlaybackWindow.resolve(context) { repo.resolvePlay(activeSite, line.name, episode.url) }
+                }
+                catch (e: kotlinx.coroutines.CancellationException) { repo.cancelPlayback(activeSite); throw e }
+                catch (e: Exception) {
+                    Toast.makeText(context, e.message ?: "播放解析失败", Toast.LENGTH_LONG).show()
+                    return@launch
+                }
             when {
                 result == null ->
                     Toast.makeText(context, "解析失败，换个线路试试", Toast.LENGTH_SHORT).show()
 
                 result.parse != 0 ->
-                    Toast.makeText(context, "该线路需要网页解析，v0 暂不支持", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "该线路未能取得直链，请换一条线路", Toast.LENGTH_LONG).show()
 
                 else -> route = Route.Player(
                     PlayRequest(
@@ -221,12 +253,13 @@ private fun AppRoot(repo: AppRepository) {
                     )
                 )
             }
+            } finally { resolving = false }
         }
     }
 
     /** 首页「继续观看」：用记录里的地址直接续播，不再走搜索。 */
     fun resume(entry: HistoryEntry) {
-        val activeSite = site
+        val activeSite = repo.siteByKey(entry.siteKey)
         if (activeSite == null) {
             Toast.makeText(context, "还没有选择数据源", Toast.LENGTH_SHORT).show()
             return
@@ -239,7 +272,8 @@ private fun AppRoot(repo: AppRepository) {
                 listOf(Episode(entry.episodeName.ifBlank { "继续观看" }, entry.episodeUrl))
             ),
             episode = Episode(entry.episodeName.ifBlank { "继续观看" }, entry.episodeUrl),
-            startMs = entry.positionMs
+            startMs = entry.positionMs,
+            source = activeSite
         )
     }
 
@@ -263,11 +297,17 @@ private fun AppRoot(repo: AppRepository) {
                 HomeScreen(
                     repo = repo,
                     site = site,
-                    onOpenDetail = { route = Route.Detail(it) },
+                    onOpenDetail = { vod ->
+                        if (vod.action.isNotBlank() || vod.tag == "folder") accountLauncher.launch(PluginActivity.intent(context, site, vod.id, vod.action.takeIf { it.isNotBlank() }))
+                        else route = Route.Detail(vod)
+                    },
                     onOpenSettings = { route = Route.Settings },
                     onSearch = { route = Route.Search },
                     onResume = { resume(it) },
                     initialFocusIndex = homeFocusIndex,
+                    initialTab = homeTab,
+                    reloadSignal = accountGeneration,
+                    onTabChanged = { homeTab = it; homeFocusIndex = 0 },
                     onFocusIndexChanged = { homeFocusIndex = it }
                 )
             }
@@ -275,12 +315,12 @@ private fun AppRoot(repo: AppRepository) {
 
         is Route.Detail -> DetailScreen(
             repo = repo,
-            site = site ?: return,
+            site = repo.siteByKey(current.siteKey.orEmpty()) ?: site ?: return,
             initial = current.vod,
-            onPlay = { source, line, episode, startMs ->
+            onPlay = { source, resolvedVod, line, episode, startMs ->
                 val idx = line.episodes.indexOf(episode)
                 val rest = if (idx >= 0) line.episodes.drop(idx + 1) else emptyList()
-                playEpisode(current.vod, line, episode, startMs, source, rest)
+                playEpisode(resolvedVod, line, episode, startMs, source, rest)
             },
             onBack = { route = Route.Home }
         )
@@ -304,7 +344,7 @@ private fun AppRoot(repo: AppRepository) {
                     queue = current.req.queue.drop(1)
                 )
             },
-            onBack = { route = Route.Detail(current.req.backTo) }
+            onBack = { route = Route.Detail(current.req.backTo, current.req.siteKey) }
         )
 
         Route.Search -> SearchScreen(
@@ -320,10 +360,22 @@ private fun AppRoot(repo: AppRepository) {
             onConfigLoaded = { route = Route.Home }
         )
     }
+    if (resolving) {
+        androidx.compose.ui.window.Dialog(onDismissRequest = { playJob?.cancel(); resolving = false }) {
+            Column(Modifier.clip(RoundedCornerShape(18.dp)).background(Tokens.Surface).padding(28.dp)) {
+                androidx.compose.material3.CircularProgressIndicator(color = Tokens.Accent)
+                Spacer(Modifier.height(16.dp))
+                Text("正在解析播放地址…", color = Tokens.Text)
+                Text("按返回取消", color = Tokens.TextDim)
+            }
+        }
+    }
 }
 
 @Composable
 private fun SetupHint(onOpenSettings: () -> Unit) {
+    val first = remember { FocusRequester() }
+    LaunchedEffect(Unit) { kotlinx.coroutines.delay(100); first.requestFocus() }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -347,7 +399,8 @@ private fun SetupHint(onOpenSettings: () -> Unit) {
                 modifier = Modifier
                     .clip(RoundedCornerShape(10.dp))
                     .background(Tokens.Accent)
-                    .clickable { onOpenSettings() }
+                    .focusRequester(first)
+                    .tvClickable { onOpenSettings() }
                     .padding(horizontal = 28.dp, vertical = 14.dp)
             ) {
                 Text("导入配置", color = Tokens.OnAccent, style = MaterialTheme.typography.labelLarge)

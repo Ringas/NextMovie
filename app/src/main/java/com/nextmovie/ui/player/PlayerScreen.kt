@@ -27,6 +27,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.focus.onFocusChanged
+import com.nextmovie.ui.common.tvClickable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -96,6 +98,7 @@ fun PlayerScreen(
     val player = remember { ExoPlayer.Builder(context).build() }
     val lifecycleOwner = LocalLifecycleOwner.current
     val view = LocalView.current
+    var requestStarted by remember { mutableLongStateOf(0L) }
     var playbackError by remember { mutableStateOf<String?>(null) }
     var resumedHint by remember { mutableStateOf(false) }
     var keyHint by remember { mutableStateOf<String?>(null) }
@@ -108,6 +111,8 @@ fun PlayerScreen(
     var durationMs by remember { mutableLongStateOf(0L) }
     var bufferedMs by remember { mutableLongStateOf(0L) }
     val rootFocus = remember { FocusRequester() }
+    val toolbarFocus = remember { FocusRequester() }
+    var controlsVisible by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     fun flash(msg: String) {
@@ -125,6 +130,9 @@ fun PlayerScreen(
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
+            override fun onRenderedFirstFrame() {
+                if (requestStarted > 0) android.util.Log.i("NextMovieTiming", "first-frame ${(System.nanoTime() - requestStarted) / 1_000_000}ms")
+            }
             override fun onPlayerError(error: PlaybackException) {
                 // 把错误码翻译成用户能行动的一句话，别让电视上只显示英文枚举
                 playbackError = when (error.errorCode) {
@@ -173,6 +181,7 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(url, headers, startPositionMs) {
+        requestStarted = System.nanoTime()
         playbackError = null
         ended = false
         countdown = 0
@@ -182,17 +191,15 @@ fun PlayerScreen(
             playbackError = "该站点给的是播放页而不是直链（parse=$parse），需要网页嗅探才能取到真实地址；可先换一条线路或换源"
             return@LaunchedEffect
         }
-        if (url.contains("127.0.0.1") || url.contains("localhost") || url.contains(":[9][0-9][0-9][0-9]")) {
-            playbackError = "该站点把地址指向本机代理（TVBox 内置服务），NextMovie 不启动那个服务，所以这条线路播不了"
-            return@LaunchedEffect
-        }
         // 注意：不少 CDN 对 Referer 做白名单校验，乱补一个同域 Referer 反而 403，
         // 所以只在源站/插件明确给了 Referer 时才带。
         val dataSourceFactory = PlayerDataSources.factory(headers)
         // 关键：不能只靠 url 后缀判断。CMS 常把 m3u8 藏在没有扩展名的地址后面，
         // 一旦误判成渐进式就会报 PARSING_CONTAINER_UNSUPPORTED。这里先看后缀，
         // 再看响应体开头是不是 #EXTM3U。
-        val isHls = url.contains(".m3u8", ignoreCase = true) || sniffHls(url, headers)
+        val path = runCatching { java.net.URI(url).path.orEmpty().lowercase() }.getOrDefault("")
+        val knownFile = listOf(".mp4", ".mkv", ".webm", ".flv", ".ts", ".mp3", ".m4v").any { path.endsWith(it) }
+        val isHls = url.contains(".m3u8", ignoreCase = true) || (!knownFile && sniffHls(url, headers))
         android.util.Log.d("NextMoviePlay", "url=$url hls=$isHls headers=$headers")
         val item = MediaItem.fromUri(url)
         val mediaSource = if (isHls) {
@@ -200,7 +207,7 @@ fun PlayerScreen(
                 .setAllowChunklessPreparation(false)
                 .createMediaSource(item)
         } else {
-            ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(item)
+            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dataSourceFactory).createMediaSource(item)
         }
         player.setMediaSource(mediaSource)
         if (startPositionMs > 0L) {
@@ -242,7 +249,7 @@ fun PlayerScreen(
     LaunchedEffect(hudVisible, hudSignal, player.isPlaying) {
         if (!hudVisible) return@LaunchedEffect
         delay(4_000)
-        if (player.isPlaying && playbackError == null && !ended) hudVisible = false
+        if (player.isPlaying && playbackError == null && !ended && !controlsVisible) hudVisible = false
     }
 
     fun togglePlay() {
@@ -271,6 +278,7 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(Unit) { runCatching { rootFocus.requestFocus() } }
+    androidx.activity.compose.BackHandler(enabled = controlsVisible) { controlsVisible = false; rootFocus.requestFocus() }
 
     Box(
         modifier = Modifier
@@ -285,13 +293,21 @@ fun PlayerScreen(
                 hudSignal++
                 when (event.key) {
                     Key.Spacebar, Key.Enter, Key.DirectionCenter, Key.P -> {
-                        togglePlay(); true
+                        if (controlsVisible && event.key != Key.Spacebar && event.key != Key.P) false
+                        else { togglePlay(); true }
                     }
                     Key.DirectionLeft -> {
-                        seekBy(-10_000L); true
+                        if (controlsVisible) false else { seekBy(-10_000L); true }
                     }
                     Key.DirectionRight -> {
-                        seekBy(10_000L); true
+                        if (controlsVisible) false else { seekBy(10_000L); true }
+                    }
+                    Key.DirectionUp, Key.DirectionDown -> {
+                        if (controlsVisible) false else {
+                            controlsVisible = true
+                            scope.launch { delay(50); toolbarFocus.requestFocus() }
+                            true
+                        }
                     }
                     Key.S -> {
                         val steps = listOf(1f, 1.25f, 1.5f, 2f)
@@ -314,6 +330,20 @@ fun PlayerScreen(
             },
             modifier = Modifier.fillMaxSize()
         )
+
+        if (controlsVisible) {
+            Row(Modifier.align(Alignment.BottomCenter).padding(bottom = 80.dp).clip(RoundedCornerShape(16.dp)).background(Tokens.Surface).padding(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                com.nextmovie.ui.settings.SettingsButton(if (player.isPlaying) "暂停" else "继续", Modifier.focusRequester(toolbarFocus)) { togglePlay() }
+                com.nextmovie.ui.settings.SettingsButton("后退 10 秒") { seekBy(-10_000L) }
+                com.nextmovie.ui.settings.SettingsButton("前进 10 秒") { seekBy(10_000L) }
+                com.nextmovie.ui.settings.SettingsButton("倍速 $speed×") {
+                    val steps = listOf(1f, 1.25f, 1.5f, 2f)
+                    speed = steps[(steps.indexOf(speed) + 1) % steps.size]
+                    player.setPlaybackSpeed(speed)
+                }
+                com.nextmovie.ui.settings.SettingsButton("返回详情", onClick = onBack)
+            }
+        }
 
         // —— HUD ——
         val duration = durationMs
@@ -361,7 +391,7 @@ fun PlayerScreen(
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
-                                text = "Esc 返回 · 空格暂停 · ←→ 快进退 · S 倍速",
+                                text = "确认键暂停 · 左右快进退 · 上下打开控制栏",
                                 color = Color(0x8FFFFFFF),
                                 style = MaterialTheme.typography.labelSmall,
                                 modifier = Modifier.padding(top = 3.dp)
@@ -553,26 +583,17 @@ private fun fmt(ms: Long): String {
 private suspend fun sniffHls(url: String, headers: Map<String, String>): Boolean =
     withContext(Dispatchers.IO) {
         runCatching {
-            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 8_000
-                readTimeout = 8_000
-                instanceFollowRedirects = true
-                setRequestProperty("User-Agent", Http.UA)
-                setRequestProperty("Range", "bytes=0-2047")
-                headers.forEach { (k, v) -> setRequestProperty(k, v) }
+            val request = okhttp3.Request.Builder().url(url)
+                .header("User-Agent", Http.UA).header("Range", "bytes=0-2047").apply {
+                    headers.forEach { (k, v) -> header(k, v) }
+                }.build()
+            Http.defaultClient().newBuilder().callTimeout(3, java.util.concurrent.TimeUnit.SECONDS).readTimeout(3, java.util.concurrent.TimeUnit.SECONDS).build().newCall(request).execute().use { response ->
+                val head = response.body?.source()?.let { source ->
+                    source.request(512)
+                    source.buffer.clone().readUtf8(minOf(512L, source.buffer.size))
+                }.orEmpty()
+                head.trimStart().startsWith("#EXTM3U")
             }
-            val buf = ByteArray(2048)
-            val head = conn.inputStream.use { stream ->
-                var read = 0
-                while (read < buf.size) {
-                    val n = stream.read(buf, read, buf.size - read)
-                    if (n <= 0) break
-                    read += n
-                }
-                String(buf, 0, read, Charsets.UTF_8)
-            }
-            conn.disconnect()
-            android.util.Log.d("NextMoviePlay", "sniff code=${conn.responseCode} head=${head.take(80).replace("\n", "|")}")
-            head.trimStart().startsWith("#EXTM3U")
+
         }.getOrDefault(false)
     }

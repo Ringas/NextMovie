@@ -38,6 +38,10 @@
             </intent-filter>
         </activity>
 
+        <activity android:name=".PluginActivity" android:process=":spider" android:exported="false" android:screenOrientation="landscape" android:theme="@style/Theme.NextMovie" />
+
+        <activity android:name=".PluginPlaybackHostActivity" android:process=":spider" android:exported="false" android:screenOrientation="landscape" android:theme="@style/Theme.NextMovie" />
+
         <!-- 插件进程：Guard 系插件会加载第三方 native 库，崩溃只影响本进程 -->
         <service
             android:name=".core.spider.SpiderService"

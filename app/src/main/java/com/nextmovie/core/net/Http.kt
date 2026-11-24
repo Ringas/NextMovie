@@ -13,9 +13,9 @@ import java.net.Inet6Address
 import java.util.concurrent.TimeUnit
 
 /** 统一网络出口：超时、UA、明文 HTTP、gzip 兜底解码。 */
-class Http(client: OkHttpClient? = null) {
+class Http(providedClient: OkHttpClient? = null) {
 
-    val client: OkHttpClient = client ?: defaultClient()
+    val client: OkHttpClient by lazy { providedClient ?: defaultClient() }
 
     class HttpError(val code: Int, message: String) : IOException(message)
 
@@ -31,10 +31,24 @@ class Http(client: OkHttpClient? = null) {
         headers.forEach { (k, v) -> if (v.isNotBlank()) builder.header(k, v) }
         if (!referer.isNullOrBlank()) builder.header("Referer", referer)
         val call = clientFor(callTimeoutMs).newCall(builder.build())
-        call.execute().use { response ->
-            if (!response.isSuccessful) throw HttpError(response.code, "HTTP ${response.code} @ $url")
-            val body = response.body ?: throw HttpError(-1, "空响应 @ $url")
-            ConfigDecoder.decode(body.bytes())
+        kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: IOException) {
+                    continuation.resumeWith(Result.failure(e))
+                }
+
+                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                    val decoded = runCatching {
+                        response.use {
+                            if (!it.isSuccessful) throw HttpError(it.code, "HTTP ${it.code} @ $url")
+                            val body = it.body ?: throw HttpError(-1, "空响应 @ $url")
+                            ConfigDecoder.decode(body.bytes())
+                        }
+                    }
+                    continuation.resumeWith(decoded)
+                }
+            })
         }
     }
 

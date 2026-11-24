@@ -39,7 +39,7 @@ object SiteHealth {
     fun kindOf(site: Site): SiteKind {
         val api = site.api
         return when {
-            api.endsWith(".js") || api.endsWith(".mjs") -> SiteKind.JS
+            site.isJavaScript -> SiteKind.JS
             api.endsWith(".py") || api.startsWith("node:") -> SiteKind.UNSUPPORTED
             api.startsWith("csp_") || api.endsWith(".jar") || site.type == 3 -> SiteKind.PLUGIN
             site.isCms -> SiteKind.READY

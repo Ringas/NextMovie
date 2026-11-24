@@ -3,9 +3,10 @@ package com.nextmovie.ui.home
 import com.nextmovie.ui.common.mouseWheel
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
+import kotlinx.coroutines.ensureActive
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import com.nextmovie.ui.common.tvClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +23,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -40,6 +46,11 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import com.nextmovie.ui.common.TvGridNavigation
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -82,8 +93,12 @@ fun HomeScreen(
     onSearch: () -> Unit = {},
     onResume: (HistoryEntry) -> Unit = {},
     initialFocusIndex: Int = 0,
+    initialTab: Int = 0,
+    reloadSignal: Int = 0,
+    onTabChanged: (Int) -> Unit = {},
     onFocusIndexChanged: (Int) -> Unit = {}
 ) {
+    val screenStartedAt = remember { System.nanoTime() }
     var vods by remember { mutableStateOf<List<Vod>>(emptyList()) }
     /** 异步补图结果，按 id 归并；渲染时再和 vods 合并，避免并发写丢更新 */
     var enrichedById by remember { mutableStateOf<Map<String, Vod>>(emptyMap()) }
@@ -96,9 +111,11 @@ fun HomeScreen(
     var reloadTick by remember { mutableIntStateOf(0) }
     /** 分类导航：0 = 最近更新，其余对应 cats[i-1] */
     var cats by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
-    var tab by remember { mutableIntStateOf(0) }
-    val restoreFocus = remember { FocusRequester() }
-    val rowState = rememberLazyListState()
+    var tab by remember { mutableIntStateOf(initialTab) }
+    val posterFocus = remember(vods.map { it.id }) { List(vods.size) { FocusRequester() } }
+    var gridColumns by remember { mutableIntStateOf(5) }
+    val density = LocalDensity.current.density
+    val rowState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(site.key) {
@@ -106,18 +123,26 @@ fun HomeScreen(
         if (tab > cats.size) tab = 0
     }
 
-    LaunchedEffect(site.key, reloadTick) {
+    LaunchedEffect(site.runtimeKey, tab, reloadTick, reloadSignal) {
         loading = true
         error = null
+        if (tab == 0 && reloadTick == 0) {
+            repo.cachedHome(site)?.let { saved ->
+                vods = repo.prepareForList(saved)
+                loading = false
+                android.util.Log.i("NextMovieTiming", "home-snapshot-ready " + (System.nanoTime() - screenStartedAt) / 1_000_000 + "ms")
+            }
+        }
         continueList = repo.history.continueWatching(10).filter { it.siteKey == site.key }
         runCatching {
             // 源头请求失败先自动重连一次（只针对超时/5xx 这类临时故障）
             com.nextmovie.core.net.Retry.once {
-                if (tab == 0) repo.home(site)
+                if (tab == 0) repo.home(site, refresh = reloadTick > 0)
                 else repo.category(site, cats.getOrNull(tab - 1)?.first.orEmpty(), 1)
             }
         }
             .onSuccess { list ->
+                kotlin.coroutines.coroutineContext.ensureActive()
                 android.util.Log.d("NextMovieHome", "home count=${list.size} " + list.take(5).joinToString(" | ") { "${it.name}=>${it.pic.take(60)}" })
                 // L0：先把 URL 尺寸升级掉，首屏立刻能出图，不额外发请求
                 vods = repo.prepareForList(list)
@@ -125,19 +150,22 @@ fun HomeScreen(
                 requested.clear()
                 heroId = null
             }
-            .onFailure { e -> error = com.nextmovie.core.net.FriendlyError.describe(e) }
+            .onFailure { e ->
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (vods.isEmpty()) error = com.nextmovie.core.net.FriendlyError.describe(e)
+            }
         loading = false
     }
 
     // 回到首页时恢复上次停留的位置（索引由 AppRoot 持有，跨页面存活）
-    LaunchedEffect(vods.size) {
+    LaunchedEffect(site.runtimeKey, tab, vods.map { it.id }) {
         // 只在「用户确实离开过第 0 张」时恢复焦点：首次进入不去抢焦点，
         // 否则会把刚固定住的 Hero 顶出去、滚动区自己滑到底。
-        if (vods.isEmpty() || initialFocusIndex <= 0) return@LaunchedEffect
+        if (vods.isEmpty()) return@LaunchedEffect
         val target = initialFocusIndex.coerceIn(0, vods.lastIndex)
-        runCatching { rowState.scrollToItem(target) }
-        delay(40)
-        runCatching { restoreFocus.requestFocus() }
+        if (target > 0) runCatching { rowState.scrollToItem(target + 2 + if (tab == 0 && continueList.isNotEmpty()) 1 else 0) }
+        delay(100)
+        runCatching { posterFocus.getOrNull(target)?.requestFocus() }
     }
 
     // L1：首屏前 4 张并发补图（TMDB 有 Token 时走 TMDB，否则走 B站）
@@ -172,9 +200,20 @@ fun HomeScreen(
 
     val display = remember(vods, enrichedById) { vods.map { enrichedById[it.id] ?: it } }
     val hero = display.firstOrNull { it.id == heroId } ?: display.firstOrNull()
+    // Debounce navigation; never prefetch an entire wall or resolve playback/login speculatively.
+    LaunchedEffect(site.runtimeKey, heroId, cats) {
+        val focused = display.firstOrNull { it.id == heroId } ?: return@LaunchedEffect
+        delay(700)
+        repo.prefetchDetail(site, focused)
+    }
     val backdrop = hero?.displayBackdrop.orEmpty()
+    LaunchedEffect(display.isNotEmpty()) {
+        if (display.isNotEmpty()) android.util.Log.i("NextMovieTiming", "home-ready " + (System.nanoTime() - screenStartedAt) / 1_000_000 + "ms")
+    }
 
-    Box(modifier = Modifier.fillMaxSize().background(Tokens.Bg)) {
+    Box(modifier = Modifier.fillMaxSize().background(Tokens.Bg).onPreviewKeyEvent { event ->
+        if (event.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_MENU && event.type == androidx.compose.ui.input.key.KeyEventType.KeyDown) { onOpenSettings(); true } else false
+    }) {
         // 焦点切换时背景 300ms 交叉淡入，避免硬切闪一下
         Crossfade(
             targetState = backdrop,
@@ -218,96 +257,69 @@ fun HomeScreen(
 
         Column(modifier = Modifier.fillMaxSize().padding(Tokens.ScreenPadding)) {
             TopBar(site = site, status = repo.configStatus(), onSearch = onSearch, onOpenSettings = onOpenSettings)
-
-            // Hero 固定在首屏（不参与滚动），保证进页面第一眼是主推影片；
-            // 下面的分类/继续观看/海报行才纵向滚动（1080p TV 一屏放不下全部）。
             Spacer(Modifier.height(16.dp))
-            if (!loading && site.unavailableReason == null && error == null && display.isNotEmpty()) {
-                HeroInfo(hero) { onOpenDetail(it) }
-                Spacer(Modifier.height(12.dp))
-                if (cats.isNotEmpty()) {
-                    CategoryTabs(
-                        cats = cats,
-                        selected = tab,
-                        onSelect = {
-                            tab = it
-                            scope.launch { rowState.scrollToItem(0) }
-                        }
-                    )
-                    Spacer(Modifier.height(10.dp))
-                }
-            }
-
-            val vState = rememberScrollState()
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .verticalScroll(vState)
-                    .mouseWheel(vState)
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(gridColumns), state = rowState,
+                horizontalArrangement = Arrangement.spacedBy(18.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
+                modifier = Modifier.fillMaxWidth().weight(1f).onSizeChanged { gridColumns = TvGridNavigation.columns(it.width / density) }.mouseWheel(rowState)
             ) {
-            Spacer(Modifier.height(12.dp))
-            when {
-                loading -> HomeSkeleton()
-                site.unavailableReason != null ->
-                    ErrorBlock("站点不可用", site.unavailableReason!!, { reloadTick++ }, onOpenSettings)
-                error != null ->
-                    ErrorBlock("数据源加载失败", error!!, { reloadTick++ }, onOpenSettings)
-                display.isEmpty() ->
-                    ErrorBlock("这个源暂时没有返回内容", "可以重试，或在设置里换一个站点", { reloadTick++ }, onOpenSettings)
-                else -> {
+                item(key = "intro", span = { GridItemSpan(maxLineSpan) }) {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        if (hero != null) Text(hero.name, color = Tokens.Text, style = MaterialTheme.typography.headlineMedium, maxLines = 1)
+                        if (cats.isNotEmpty()) CategoryTabs(cats, tab) { selected ->
+                            tab = selected; onTabChanged(selected)
+                        }
+                    }
+                }
+                if (loading || error != null || site.unavailableReason != null || display.isEmpty()) {
+                    item(key = "state", span = { GridItemSpan(maxLineSpan) }) {
+                        when {
+                            loading -> HomeSkeleton()
+                            site.unavailableReason != null -> ErrorBlock("站点不可用", site.unavailableReason!!, { reloadTick++ }, onOpenSettings)
+                            error != null -> ErrorBlock("来源加载失败", error!!, { reloadTick++ }, onOpenSettings)
+                            else -> ErrorBlock("此分类暂无内容", "可选择其他分类或更换来源", { reloadTick++ }, onOpenSettings)
+                        }
+                    }
+                } else {
                     if (tab == 0 && continueList.isNotEmpty()) {
-                        SectionTitle("继续观看", "全部 ›")
-                        Spacer(Modifier.height(10.dp))
-                        val continueState = rememberLazyListState()
-                        LazyRow(
-                            state = continueState,
-                            horizontalArrangement = Arrangement.spacedBy(14.dp),
-                            modifier = Modifier.mouseWheel(continueState, horizontal = true)
-                        ) {
-                            items(continueList, key = { it.key }) { entry ->
-                                ContinueCard(entry = entry, onClick = { onResume(entry) })
+                        item(key = "continue", span = { GridItemSpan(maxLineSpan) }) {
+                            Column {
+                                SectionTitle("继续观看")
+                                Spacer(Modifier.height(12.dp))
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                    items(continueList, key = { it.key }) { entry -> ContinueCard(entry, { onResume(entry) }) }
+                                }
                             }
                         }
-                        Spacer(Modifier.height(24.dp))
                     }
-
-                    SectionTitle(
-                        text = if (tab == 0) "最近更新" else cats.getOrNull(tab - 1)?.second.orEmpty(),
-                        trailing = "全部 ›",
-                        onPage = { dir ->
-                            val target = (rowState.firstVisibleItemIndex + dir * 3)
-                                .coerceIn(0, (display.size - 1).coerceAtLeast(0))
-                            scope.launch { rowState.animateScrollToItem(target) }
-                        }
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    LazyRow(
-                        state = rowState,
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
-                        modifier = Modifier.mouseWheel(rowState, horizontal = true)
-                    ) {
-                        itemsIndexed(display) { index, vod ->
-                            PosterCard(
-                                vod = vod,
-                                onClick = { onOpenDetail(vod) },
-                                onFocused = {
-                                    heroId = vod.id
-                                    onFocusIndexChanged(index)
-                                },
-                                modifier = if (initialFocusIndex > 0 &&
-                                    index == initialFocusIndex.coerceIn(0, display.lastIndex)
-                                ) {
-                                    Modifier.focusRequester(restoreFocus)
-                                } else {
-                                    Modifier
+                    item(key = "heading", span = { GridItemSpan(maxLineSpan) }) {
+                        SectionTitle(if (tab == 0) "最近更新" else cats.getOrNull(tab - 1)?.second.orEmpty())
+                    }
+                    itemsIndexed(display, key = { index, vod -> "poster|" + vod.id + "|" + index }) { index, vod ->
+                        PosterCard(vod, { onOpenDetail(vod) }, {
+                            heroId = vod.id; onFocusIndexChanged(index)
+                        }, modifier = Modifier.focusRequester(posterFocus[index]).onPreviewKeyEvent { event ->
+                            val key = event.nativeKeyEvent.keyCode
+                            if (event.type != androidx.compose.ui.input.key.KeyEventType.KeyDown || key !in 19..22) false
+                            else {
+                                val target = TvGridNavigation.target(index, gridColumns, display.size, key)
+                                if (target == null) false else {
+                                    if (target != index) scope.launch {
+                                        val gridIndex = target + 2 + if (tab == 0 && continueList.isNotEmpty()) 1 else 0
+                                        if (rowState.layoutInfo.visibleItemsInfo.none { it.index == gridIndex }) {
+                                            rowState.scrollToItem(gridIndex)
+                                            delay(60)
+                                        }
+                                        runCatching { posterFocus[target].requestFocus() }
+                                    }
+                                    true
                                 }
-                            )
-                        }
+                            }
+                        })
                     }
                 }
-            }
-            Spacer(Modifier.height(24.dp))
             }
         }
     }
@@ -335,7 +347,7 @@ private fun TopBar(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
                 .weight(1f)
-                .clickable { onOpenSettings() }
+                .tvClickable { onOpenSettings() }
                 .padding(vertical = 8.dp)
         )
         status?.let {
@@ -352,14 +364,14 @@ private fun TopBar(
             text = "搜索",
             color = Tokens.Text,
             style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.clickable { onSearch() }.padding(8.dp)
+            modifier = Modifier.tvClickable { onSearch() }.padding(8.dp)
         )
         Spacer(Modifier.width(12.dp))
         Text(
             text = "设置",
             color = Tokens.Text,
             style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.clickable { onOpenSettings() }.padding(8.dp)
+            modifier = Modifier.tvClickable { onOpenSettings() }.padding(8.dp)
         )
     }
 }
@@ -421,7 +433,7 @@ private fun HeroButton(text: String, primary: Boolean = false, onClick: () -> Un
             .clip(shape)
             .background(bg)
             .then(if (primary) Modifier else Modifier.border(1.dp, Tokens.Stroke, shape))
-            .clickable { onClick() }
+            .tvClickable { onClick() }
             .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
         Text(text, color = fg, style = MaterialTheme.typography.labelLarge)
@@ -463,7 +475,7 @@ private fun PageArrow(text: String, onClick: () -> Unit) {
         modifier = Modifier
             .clip(RoundedCornerShape(6.dp))
             .background(Tokens.SurfaceHigh)
-            .clickable { onClick() }
+            .tvClickable { onClick() }
             .padding(horizontal = 10.dp, vertical = 2.dp)
     ) {
         Text(text, color = Tokens.TextDim, style = MaterialTheme.typography.titleSmall)
@@ -498,7 +510,7 @@ private fun TabChip(text: String, active: Boolean, onClick: () -> Unit) {
         modifier = Modifier
             .clip(RoundedCornerShape(Tokens.Corner.badge))
             .background(if (active) Tokens.Accent else Tokens.Surface)
-            .clickable { onClick() }
+            .tvClickable { onClick() }
             .padding(horizontal = 14.dp, vertical = 7.dp)
     ) {
         Text(
@@ -598,14 +610,14 @@ private fun ErrorBlock(
                 text = "重试",
                 color = Tokens.Accent,
                 style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.clickable { onRetry() }.padding(vertical = 8.dp, horizontal = 12.dp)
+                modifier = Modifier.tvClickable { onRetry() }.padding(vertical = 8.dp, horizontal = 12.dp)
             )
             Spacer(Modifier.width(16.dp))
             Text(
                 text = "换站点 / 改配置",
                 color = Tokens.Accent,
                 style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.clickable { onOpenSettings() }.padding(vertical = 8.dp, horizontal = 12.dp)
+                modifier = Modifier.tvClickable { onOpenSettings() }.padding(vertical = 8.dp, horizontal = 12.dp)
             )
         }
     }

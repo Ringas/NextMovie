@@ -48,4 +48,16 @@ class SiteHealthTest {
         assertEquals(2, report.unsupported)
         assertEquals(0, report.ready)
     }
+    @Test
+    fun `module and script URLs with query and fragment are JavaScript sources`() {
+        val sites = parse(
+            """{"sites":[
+              {"key":"script","api":"./script.js?v=1"},
+              {"key":"module","api":"./plugin.MJS?v=1#entry"}
+            ]}"""
+        )
+        assertEquals(listOf(3, 3), sites.map { it.type })
+        assertEquals(listOf(true, true), sites.map { it.isSpider && it.isPlayable })
+        assertEquals(2, SiteHealth.audit(sites).js)
+    }
 }

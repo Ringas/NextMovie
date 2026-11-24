@@ -33,7 +33,7 @@ object SharePageResolver {
         if (lower.contains(".m3u8") || lower.contains(".mp4") ||
             lower.contains(".flv") || lower.contains(".mkv") || lower.contains(".ts")
         ) return false
-        return lower.startsWith("http")
+        return lower.startsWith("http") && (lower.contains("/share/") || lower.contains("/play/") || lower.substringBefore('?').endsWith(".html") || lower.contains("/player"))
     }
 
     /** 返回页面里解析出的播放地址；解析不出来返回 null。 */

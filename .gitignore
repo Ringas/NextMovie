@@ -15,3 +15,5 @@ app/build/
 .kotlin/
 libnmabi.so
 *.log
+
+/artifacts/

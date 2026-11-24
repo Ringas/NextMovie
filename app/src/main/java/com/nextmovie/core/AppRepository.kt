@@ -22,8 +22,11 @@ import com.nextmovie.core.poster.PosterCache
 import com.nextmovie.core.poster.PosterResolver
 import com.nextmovie.core.spider.SpiderHost
 import com.nextmovie.core.tmdb.TmdbClient
-import kotlinx.coroutines.async
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
@@ -38,6 +41,17 @@ class AppRepository(private val context: Context) {
     private val spiderHost = SpiderHost(context, http)
     val tmdb = TmdbClient(http)
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    private var parses: List<com.nextmovie.core.config.Parse> = emptyList()
+
+    private val lists = com.nextmovie.core.cache.RequestCache<String, List<Vod>>(120_000, 48, cacheIf = { it.isNotEmpty() })
+    private val details = com.nextmovie.core.cache.RequestCache<String, VodDetail?>(120_000, 128, cacheIf = { it != null && it.lines.isNotEmpty() })
+    private val homeSnapshots = com.nextmovie.core.cache.HomeSnapshotStore(File(context.filesDir, "home-snapshots"))
+    private val warmSites = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val prefetchScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
+    private val prefetchSlot = java.util.concurrent.Semaphore(1)
+    private val configGeneration = java.util.concurrent.atomic.AtomicLong()
+    private val snapshot = File(context.filesDir, "config-snapshot.json")
 
     val history = HistoryStore(File(context.filesDir, "history.json"))
 
@@ -155,7 +169,7 @@ class AppRepository(private val context: Context) {
 
     /** 站点分类导航（CMS 走 ac=list 的 class 数组；插件站点暂不提供） */
     suspend fun categories(site: Site): List<Pair<String, String>> =
-        if (site.isCms) CmsSiteClient(http, site).categories() else spiderHost.categories(site)
+        (if (site.isCms) CmsSiteClient(http, site).categories() else spiderHost.categories(site)).also { warmSites.add(site.runtimeKey) }
 
     fun selectSite(key: String) {
         currentSite = sites.firstOrNull { it.key == key } ?: currentSite
@@ -165,13 +179,18 @@ class AppRepository(private val context: Context) {
     }
 
     suspend fun loadConfig(url: String): Int {
+        val generation = configGeneration.incrementAndGet()
         val bundle: ConfigBundle = try {
-            configRepository.load(url.trim())
+            if (url.trimStart().startsWith("{")) configRepository.loadText(url.trim())
+            else configRepository.load(url.trim().replace("\\:", ":").trimEnd('\\'))
         } catch (e: Throwable) {
             recordConfigResult(false, "✗ 加载失败：" + (e.message ?: e.javaClass.simpleName))
             throw e
         }
+        if (generation != configGeneration.get()) throw kotlinx.coroutines.CancellationException("新的配置已替换此请求")
         sites = bundle.sites
+        parses = bundle.parses
+        withContext(kotlinx.coroutines.Dispatchers.IO) { saveConfigSnapshot(url.trim()) }
         runCatching {
             val byType = sites.groupingBy { it.type }.eachCount()
             android.util.Log.d("NextMovieSites", "types=$byType")
@@ -202,15 +221,47 @@ class AppRepository(private val context: Context) {
             .apply()
     }
 
-    suspend fun home(site: Site = requireSite()): List<Vod> =
-        if (site.isCms) CmsSiteClient(http, site).home() else spiderHost.home(site)
+    /** Display recent content immediately while the regular request refreshes it. Never used for play URLs. */
+    suspend fun cachedHome(site: Site): List<Vod>? = withContext(kotlinx.coroutines.Dispatchers.IO) {
+        homeSnapshots.read(site.runtimeKey, maxAgeMs = 86_400_000)
+    }
+
+    suspend fun home(site: Site = requireSite(), refresh: Boolean = false): List<Vod> {
+        val key = "home|" + site.runtimeKey
+        if (refresh) { lists.invalidate(key); spiderHost.clearCache() }
+        val started = System.nanoTime()
+        val result = lists.get(key) {
+            val saved = if (refresh) null else withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.read(site.runtimeKey) }
+            saved ?: (if (site.isCms) CmsSiteClient(http, site).home() else spiderHost.home(site)).also {
+                withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.write(site.runtimeKey, it) }
+            }
+        }
+        android.util.Log.i("NextMovieTiming", "home ${((System.nanoTime() - started) / 1_000_000)}ms items=${result.size}")
+        return result
+    }
 
     suspend fun category(site: Site, tid: String, page: Int): List<Vod> =
-        if (site.isCms) CmsSiteClient(http, site).category(tid, page) else spiderHost.category(site, tid, page, false, "")
+        lists.get("category|${site.runtimeKey}|$tid|$page") {
+            if (site.isCms) CmsSiteClient(http, site).category(tid, page) else spiderHost.category(site, tid, page, false, "")
+        }
+
+    /** Speculation stays on the focused item of an already initialized source, at most one request. */
+    fun prefetchDetail(site: Site, vod: Vod) {
+        if (site.runtimeKey !in warmSites || vod.id.isBlank() || vod.action.isNotBlank() || vod.tag == "folder") return
+        if (!prefetchSlot.tryAcquire()) return
+        prefetchScope.launch {
+            try { detail(site, vod.id, vod.name) }
+            catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { /* A speculative failure must never affect navigation. */ }
+            finally { prefetchSlot.release() }
+        }
+    }
 
     suspend fun detail(site: Site, id: String, altId: String? = null): VodDetail? =
         // 插件源额外带一个「片名」作为备用 id：部分插件 homeVod 不返回 vod_id
-        if (site.isCms) CmsSiteClient(http, site).detail(id) else spiderHost.detail(site, id, altId)
+        details.get("detail|${site.runtimeKey}|$id") {
+            if (site.isCms) CmsSiteClient(http, site).detail(id) else spiderHost.detail(site, id, altId)
+        }
 
     /**
      * 详情订阅的容错链路：主站点拿不到线路时，按片名去其它站点找同名条目，
@@ -228,54 +279,70 @@ class AppRepository(private val context: Context) {
         val borrowed: Boolean = false
     )
 
-    suspend fun detailPreferring(site: Site, vod: Vod, crossSiteLimit: Int = 6): DetailHit? {
-        val primary = runCatching { detail(site, vod.id, altId = vod.name) }.getOrNull()
-        if (primary != null && primary.lines.isNotEmpty()) return DetailHit(site, primary)
-
+    suspend fun detailPreferring(
+        site: Site,
+        vod: Vod,
+        crossSiteLimit: Int = 12,
+        preferSearch: Boolean = false,
+        onFirstPlayable: (DetailHit) -> Unit = {}
+    ): DetailHit? {
         val keyword = vod.name.trim()
-        if (keyword.isBlank()) return primary?.let { DetailHit(site, it) }
-        val targets = sites.filter { it.key != site.key && it.isPlayable && it.searchable }
-        val cands = searchAcross(targets, keyword, vod.displayYear, crossSiteLimit)
-        if (cands.isEmpty()) return primary?.let { DetailHit(site, it) }
-
-        val working = ArrayList<Pair<Site, VodDetail>>()
-        for ((s, v) in cands) {
-            val d = runCatching { detail(s, v.id, altId = v.name) }.getOrNull() ?: continue
-            if (d.lines.isEmpty()) continue
-            working += s to d
-            if (working.size >= 3) break
+        val primary = withTimeoutOrNull(5_000) {
+            detailAttempt {
+                val id = if (preferSearch) matchingVideo(site, keyword, vod.displayYear)?.id else vod.id
+                id?.let { detail(site, it, altId = vod.name) }
+            }
         }
-        if (working.isEmpty()) return primary?.let { DetailHit(site, it) }
-        val best = working.first()
-        return DetailHit(
-            site = best.first,
-            detail = best.second,
-            alternatives = working.drop(1).map { it.first },
-            borrowed = true
-        )
-    }
+        if (primary != null && primary.lines.isNotEmpty()) return DetailHit(site, primary)
+        if (keyword.isBlank()) return primary?.let { DetailHit(site, it) }
 
-    /** 并发在多个站点搜索同一个片名，只保留标题高分匹配的结果。 */
-    private suspend fun searchAcross(
-        targets: List<Site>,
-        keyword: String,
-        year: String,
-        limit: Int
-    ): List<Pair<Site, Vod>> = coroutineScope {
-        targets.take(limit).map { s ->
-            async {
-                val list = withTimeoutOrNull(12_000L) {
-                    runCatching { search(s, keyword) }.getOrNull()
-                }.orEmpty()
-                s to list.firstOrNull {
-                    TitleMatcher.score(keyword, year, it.name, it.year) >= TitleMatcher.ACCEPT_THRESHOLD
+        val targets = sites.filter { it.isPlayable && it.searchable }
+            .sortedBy { if (it.runtimeKey == site.runtimeKey) 0 else if (it.isCms) 1 else 2 }
+            .filterNot { preferSearch && it.runtimeKey == site.runtimeKey }
+            .take(crossSiteLimit)
+        return coroutineScope {
+            val replies = Channel<DetailHit?>(targets.size.coerceAtLeast(1))
+            val workers = targets.map { candidate ->
+                launch {
+                    val hit = withTimeoutOrNull(8_000) {
+                        detailAttempt {
+                            val match = matchingVideo(candidate, keyword, vod.displayYear)
+                            val resolved = match?.let { detail(candidate, it.id, it.name) }
+                            resolved?.takeIf { it.lines.isNotEmpty() }
+                                ?.let { DetailHit(candidate, it, borrowed = true) }
+                        }
+                    }
+                    replies.send(hit)
                 }
             }
-        }.mapNotNull { deferred ->
-            val hit = deferred.await()
-            val v = hit.second ?: return@mapNotNull null
-            hit.first to v
+            val hits = ArrayList<DetailHit>()
+            try {
+                for (i in targets.indices) {
+                    val hit = replies.receive() ?: continue
+                    hits += hit
+                    if (hits.size == 1) onFirstPlayable(hit)
+                    if (hits.size == 3) break
+                }
+            } finally {
+                workers.forEach { it.cancel() }
+                replies.cancel()
+            }
+            hits.firstOrNull()?.copy(alternatives = hits.drop(1).map { it.site })
+                ?: primary?.let { DetailHit(site, it) }
         }
+    }
+
+    private suspend fun matchingVideo(site: Site, keyword: String, year: String): Vod? =
+        search(site, keyword).firstOrNull {
+            TitleMatcher.score(keyword, year, it.name, it.year) >= TitleMatcher.ACCEPT_THRESHOLD
+        }
+
+    private suspend fun <T> detailAttempt(block: suspend () -> T): T? = try {
+        block()
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
     }
 
     suspend fun search(site: Site, keyword: String): List<Vod> {
@@ -288,13 +355,36 @@ class AppRepository(private val context: Context) {
      * 但也有不少线路给的是一个分享播放页（`/share/<id>`），
      * 这里顺手把页面里的真实地址扒出来，免得用户看到「需要网页解析」。
      */
+    fun cancelPlayback(site: Site) { if (!site.isCms) spiderHost.cancelPlayback() }
+
+    suspend fun preparePlayback(site: Site) { if (!site.isCms) spiderHost.preparePlayback() }
+
     suspend fun resolvePlay(site: Site, flag: String, episodeUrl: String): PlayResult? {
         val raw = if (site.isCms) PlayResult(episodeUrl) else spiderHost.play(site, flag, episodeUrl)
         if (raw == null) return null
-        if (!site.isCms) return raw
-        if (!SharePageResolver.looksLikePage(raw.url)) return raw
-        val real = SharePageResolver.resolve(http, raw.url, raw.headers)
-        return if (real != null) PlayResult(real, raw.headers) else raw
+        if (raw.parse == 0 && (!SharePageResolver.looksLikePage(raw.url) ||
+            runCatching { java.net.URI(raw.url).host in listOf("127.0.0.1", "localhost") }.getOrDefault(false))) return raw
+        // A no-extension HTTP stream can still be direct. Only invoke WebView for explicit parse results.
+        if (site.isCms || raw.parse != 0) {
+            val real = SharePageResolver.resolve(http, raw.url, raw.headers)
+            if (real != null) return PlayResult(real, raw.headers)
+        }
+        if (raw.parse == 0) return raw
+        val direct = com.nextmovie.core.net.WebPlaybackResolver.resolve(context, raw.url, raw.headers)
+        if (direct != null) return direct
+        for (parser in parses.filter { it.type == 0 || it.type == 1 }.take(3)) {
+            if (!parser.url.startsWith("http")) continue
+            val page = parser.url + raw.url
+            if (parser.type == 1) {
+                val parsed = runCatching {
+                    PlayResult.fromJson(org.json.JSONObject(http.text(page)))
+                }.getOrNull()
+                if (parsed != null && parsed.parse == 0) return parsed
+            } else {
+                com.nextmovie.core.net.WebPlaybackResolver.resolve(context, page, raw.headers)?.let { return it }
+            }
+        }
+        throw IllegalStateException("播放页未取得媒体地址，请更换线路；该来源可能需要登录或专用宿主")
     }
 
     /** 列表首屏：只做 L0 URL 尺寸升级，同步返回，不发请求。 */
@@ -305,9 +395,44 @@ class AppRepository(private val context: Context) {
     suspend fun enrichPoster(vod: Vod, detail: Boolean): Vod =
         runCatching { poster.resolve(vod, detail, posterEnhance) }.getOrDefault(vod)
 
+    suspend fun invalidateContent() { lists.clear(); details.clear(); spiderHost.clearCache(); withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.clear() } }
+
     fun release() {
+        prefetchScope.cancel()
+        lists.close()
+        details.close()
         poster.flush()
         spiderHost.release()
+    }
+
+    private fun saveConfigSnapshot(url: String) {
+        val array = org.json.JSONArray()
+        sites.forEach { site -> array.put(org.json.JSONObject(with(com.nextmovie.core.spider.SpiderProtocol) { site.toTransport() })) }
+        val p = org.json.JSONArray()
+        parses.forEach { p.put(org.json.JSONObject().put("name", it.name).put("type", it.type).put("url", it.url)) }
+        val json = org.json.JSONObject().put("url", url).put("sites", array).put("parses", p)
+        val temp = File(snapshot.parentFile, snapshot.name + ".tmp")
+        runCatching { temp.writeText(json.toString()); if (!temp.renameTo(snapshot)) { temp.copyTo(snapshot, overwrite = true); temp.delete() } }
+    }
+
+    suspend fun configSnapshotIsFresh(): Boolean = withContext(kotlinx.coroutines.Dispatchers.IO) {
+        System.currentTimeMillis() - snapshot.lastModified() in 0 until 6 * 60 * 60 * 1000L
+    }
+
+    suspend fun restoreCachedConfig(): Boolean = withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val json = runCatching { org.json.JSONObject(snapshot.readText()) }.getOrNull() ?: return@withContext false
+        if (json.optString("url") != configUrl()) return@withContext false
+        val array = json.optJSONArray("sites") ?: return@withContext false
+        val restored = (0 until array.length()).mapNotNull { i ->
+            runCatching { com.nextmovie.core.spider.SpiderProtocol.siteFromTransport(array.getJSONObject(i).toString()) }.getOrNull()
+        }
+        if (restored.isEmpty()) return@withContext false
+        withContext(kotlinx.coroutines.Dispatchers.Main) {
+            sites = restored
+            parses = com.nextmovie.core.config.ConfigBundle.fromJson(json, "").parses
+            currentSite = SiteSelector.pick(sites, prefs.getString(KEY_SITE_KEY, "").orEmpty(), prefs.getBoolean(KEY_SITE_MANUAL, false))
+        }
+        true
     }
 
     private fun requireSite(): Site =

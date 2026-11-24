@@ -37,36 +37,57 @@ class SpiderService : Service() {
 
     private lateinit var loader: JarSpiderLoader
     private lateinit var jsLoader: JsSpiderLoader
-    private val executor = Executors.newSingleThreadExecutor()
+    private val cancelled = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+    private val proxyInstance = lazy { SpiderProxyServer() }
+    private val proxy by proxyInstance
+    private val watchdog = Executors.newSingleThreadScheduledExecutor()
+    private val siteLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+    private val executor = Executors.newFixedThreadPool(4)
     private val messenger: Messenger by lazy { Messenger(Handler(Looper.getMainLooper()) { onRequest(it); true }) }
 
     override fun onCreate() {
         super.onCreate()
-        val http = Http()
-        loader = JarSpiderLoader(applicationContext, http)
-        jsLoader = JsSpiderLoader(http)
+        val created = System.nanoTime()
+        android.util.Log.i("NextMovieTiming", "plugin-service-create")
+        val engines = PluginRuntime.acquire(applicationContext)
+        loader = engines.jar
+        jsLoader = engines.js
+        android.util.Log.i("NextMovieTiming", "plugin-service-ready ${(System.nanoTime() - created) / 1_000_000}ms")
     }
 
     override fun onBind(intent: Intent?): IBinder = messenger.binder
 
     override fun onDestroy() {
-        runCatching { loader.release() }
-        runCatching { jsLoader.release() }
+        PluginRuntime.release()
         executor.shutdownNow()
+        watchdog.shutdownNow()
+        if (proxyInstance.isInitialized()) proxy.close()
         super.onDestroy()
     }
 
     private fun onRequest(msg: Message) {
         // Message 在 onRequest 返回后会被框架回收（what/arg1/data 清零），
         // 异步线程必须使用副本，否则会读到 what=0 而走到"未知动作"分支。
+        if (msg.what == SpiderProtocol.ACTION_RESTART) {
+            msg.replyTo?.send(Message.obtain(null, SpiderProtocol.ACTION_REPLY).apply { data = okBundle(msg.arg1, "restarting") })
+            Handler(Looper.getMainLooper()).postDelayed({ android.os.Process.killProcess(android.os.Process.myPid()) }, 100)
+            return
+        }
+        if (msg.what == SpiderProtocol.ACTION_CANCEL) { cancelled.add(msg.arg1); return }
         val action = msg.what
         val id = msg.arg1
         val replyTo = msg.replyTo ?: return
         val args = msg.data?.let { Bundle(it) } ?: Bundle()
         android.util.Log.d("NextMovieSpider", "recv action=$action id=$id")
         executor.execute {
+            if (cancelled.remove(id)) return@execute
+            val deadline = watchdog.schedule({ android.os.Process.killProcess(android.os.Process.myPid()) }, if (action == ACTION_PLAY) 330 else 85, java.util.concurrent.TimeUnit.SECONDS)
             val started = System.currentTimeMillis()
-            val result = runCatching { handle(action, args, id) }
+            val result = runCatching {
+                synchronized(siteLocks.getOrPut(args.getString(KEY_SITE).orEmpty()) { Any() }) {
+                    handle(action, args, id)
+                }
+            }
                 .getOrElse {
                     val cls = it.javaClass.simpleName
                     android.util.Log.e(
@@ -81,6 +102,8 @@ class SpiderService : Service() {
                     }
                     errorBundle(id, text)
                 }
+            deadline.cancel(false)
+            cancelled.remove(id)
             android.util.Log.d(
                 "NextMovieSpider",
                 "action=$action ok=${result.getBoolean(SpiderProtocol.KEY_OK)} ${System.currentTimeMillis() - started}ms"
@@ -96,19 +119,26 @@ class SpiderService : Service() {
             .getOrElse { return errorBundle(id, "站点信息解析失败：" + rootCause(it)) }
         android.util.Log.d("NextMovieSpider", "site=${site.name} type=${site.type} api=${site.api}")
         // .js 站点走 QuickJS；其余（csp_* / jar）走 DexClassLoader。两条路径共享同一个 :spider 进程隔离。
-        val isJs = site.api.endsWith(".js") || site.api.endsWith(".mjs")
+        val isJs = site.isJavaScript
+        val loadStarted = System.nanoTime()
         val spider = runBlocking { if (isJs) jsLoader.obtain(site) else loader.obtain(site) }
+
+        android.util.Log.i("NextMovieTiming", "plugin-obtain ${(System.nanoTime() - loadStarted) / 1_000_000}ms")
 
         val raw = when (action) {
             // TVBox 的两段式首页：homeContent 只给分类（class），homeVideoContent 才给视频列表。
             // 合并成一份返回，宿主一次请求就能同时渲染分类 Tab 与海报行。
             ACTION_HOME -> {
+                val homeStarted = System.nanoTime()
                 val home = runCatching { spider.homeContent(true) }
                     .onFailure { android.util.Log.w("NextMovieSpider", "homeContent(true) 失败: " + rootCause(it), it) }
                     .getOrNull()?.takeIf { it.isNotBlank() && it != "{}" }
-                val video = runCatching { spider.homeVideoContent() }
+                android.util.Log.i("NextMovieTiming", "plugin-home-content ${(System.nanoTime() - homeStarted) / 1_000_000}ms")
+                val hasVideos = runCatching { org.json.JSONObject(home.orEmpty()).optJSONArray("list")?.length() ?: 0 }.getOrDefault(0) > 0
+                val video = if (hasVideos) null else runCatching { spider.homeVideoContent() }
                     .onFailure { android.util.Log.w("NextMovieSpider", "homeVideoContent 失败: " + rootCause(it), it) }
                     .getOrNull()?.takeIf { it.isNotBlank() && it != "{}" }
+                android.util.Log.i("NextMovieTiming", "plugin-home-video ${if (hasVideos) "skipped" else "called"} total=${(System.nanoTime() - homeStarted) / 1_000_000}ms")
                 val merged = mergeHome(home, video)
                 if (merged.isBlank()) {
                     (spider as? JsSpider)?.asyncNote()?.let { return errorBundle(id, it) }
@@ -145,16 +175,26 @@ class SpiderService : Service() {
 
             ACTION_SEARCH -> {
                 val keyword = args.getString(KEY_ARG1).orEmpty()
-                val quick = args.getString(KEY_ARG2) ?: "1"
-                runCatching { spider.searchContent(keyword, true, quick) }.getOrNull()
+                val page = args.getString(KEY_ARG2) ?: "1"
+                val quick = args.getBoolean(KEY_FILTER, false)
+                runCatching { spider.searchContent(keyword, quick, page) }.getOrNull()
                     ?.takeIf { it.isNotBlank() && it != "{}" }
-                    ?: runCatching { spider.searchContent(keyword, true) }.getOrNull().orEmpty()
+                    ?: runCatching { spider.searchContent(keyword, quick) }.getOrNull().orEmpty()
             }
 
             ACTION_PLAY -> {
                 val flag = args.getString(KEY_ARG1).orEmpty()
                 val episode = args.getString(KEY_ARG2).orEmpty()
-                val raw = runCatching { spider.playerContent(flag, episode, ArrayList()) }.getOrNull().orEmpty()
+                if (!isJs) loader.bindActivity(site)
+                proxy.activate { params -> if (isJs) spider.proxy(HashMap(params)) else loader.proxy(site, params) }
+                if (!isJs) loader.prepareProxy(site, proxy.port)
+                val original = spider.playerContent(flag, episode, ArrayList()).orEmpty()
+                val raw = runCatching {
+                    org.json.JSONObject(original).apply {
+                        val url = optString("url")
+                        if (url.isNotBlank()) put("url", proxy.rewrite(url))
+                    }.toString()
+                }.getOrDefault(original)
                 PlayRaw.save(applicationContext, raw)
                 if (raw.isBlank()) {
                     (spider as? JsSpider)?.asyncNote()?.let { return errorBundle(id, it) }

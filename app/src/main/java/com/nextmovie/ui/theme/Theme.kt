@@ -31,13 +31,13 @@ object Tokens {
     val Stroke = Color(0x1FFFFFFF)
 
     val PosterRatio = 2f / 3f
-    val FocusScale = 1.06f
+    val FocusScale = 1.035f
     const val MotionMs = 180
 
     val ScreenPadding = 32.dp
     val RowGap = 18.dp
-    val CardWidth = 96.dp
-    val CardHeight = 144.dp
+    val CardWidth = 144.dp
+    val CardHeight = 216.dp
     val Radius = 10.dp
 
     // —— 8pt 间距栅格 ——
@@ -62,9 +62,9 @@ object Tokens {
         val hero = 32.sp
         val title = 20.sp
         val section = 16.sp
-        val body = 13.sp
-        val caption = 11.sp
-        val badge = 10.sp
+        val body = 18.sp
+        val caption = 16.sp
+        val badge = 14.sp
     }
 }
 
@@ -82,14 +82,14 @@ private val PosterColorScheme = darkColorScheme(
 
 private val PosterTypography = Typography(
     displaySmall = TextStyle(fontSize = 30.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.3.sp),
-    headlineMedium = TextStyle(fontSize = 21.sp, fontWeight = FontWeight.SemiBold),
-    titleLarge = TextStyle(fontSize = 17.sp, fontWeight = FontWeight.Medium),
-    bodyLarge = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Normal, lineHeight = 22.sp),
-    bodyMedium = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Normal, lineHeight = 20.sp),
-    labelLarge = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.5.sp),
-    labelSmall = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.Normal, letterSpacing = 0.4.sp),
-    labelMedium = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.Normal, letterSpacing = 0.3.sp),
-    titleSmall = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium)
+    headlineMedium = TextStyle(fontSize = 26.sp, fontWeight = FontWeight.SemiBold),
+    titleLarge = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Medium),
+    bodyLarge = TextStyle(fontSize = 20.sp, fontWeight = FontWeight.Normal, lineHeight = 30.sp),
+    bodyMedium = TextStyle(fontSize = 18.sp, fontWeight = FontWeight.Normal, lineHeight = 28.sp),
+    labelLarge = TextStyle(fontSize = 18.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.5.sp),
+    labelSmall = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.Normal, letterSpacing = 0.4.sp),
+    labelMedium = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.Normal, letterSpacing = 0.3.sp),
+    titleSmall = TextStyle(fontSize = 18.sp, fontWeight = FontWeight.Medium)
 )
 
 @Composable

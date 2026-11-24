@@ -19,6 +19,8 @@ object SpiderProtocol {
     const val ACTION_DETAIL = 4
     const val ACTION_SEARCH = 5
     const val ACTION_PLAY = 6
+    const val ACTION_CANCEL = 7
+    const val ACTION_RESTART = 8
 
     const val KEY_ID = "id"
     const val KEY_OK = "ok"
@@ -38,6 +40,8 @@ object SpiderProtocol {
         put("type", type)
         put("ext", ext)
         put("jar", jar)
+        put("jarHash", jarHash)
+        put("origin", origin)
         put("searchable", searchable)
         put("quickSearch", quickSearch)
         put("filter", filterable)
@@ -45,7 +49,9 @@ object SpiderProtocol {
     }.toString()
 
     fun siteFromTransport(json: String): Site =
-        Site.fromJson(JSONObject(json), origin = "")
+        JSONObject(json).let { obj ->
+            Site.fromJson(obj, origin = obj.optString("origin")).copy(jarHash = obj.optString("jarHash"))
+        }
 
     data class Reply(val ok: Boolean, val data: String, val error: String)
 

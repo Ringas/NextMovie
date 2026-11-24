@@ -3,7 +3,7 @@ package com.nextmovie.ui.common
 import com.nextmovie.ui.common.mouseFocusable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import com.nextmovie.ui.common.tvClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -60,7 +60,7 @@ fun ContinueCard(
             )
             .onFocusChanged { focused = it.isFocused }
             .mouseFocusable()
-            .clickable { onClick() }
+            .tvClickable { onClick() }
     ) {
         Box(modifier = Modifier.fillMaxWidth().height(94.dp)) {
             AsyncImage(

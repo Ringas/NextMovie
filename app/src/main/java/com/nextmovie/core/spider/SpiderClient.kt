@@ -33,6 +33,7 @@ class SpiderClient(private val context: Context) {
 
     private var inbound: Messenger? = null
     private var binding = false
+    private var bound = false
     private val pending = ConcurrentHashMap<Int, CompletableDeferred<SpiderProtocol.Reply>>()
     private val nextId = AtomicInteger(1)
     private val lock = Any()
@@ -78,12 +79,13 @@ class SpiderClient(private val context: Context) {
     private suspend fun ensureConnected(): Boolean {
         inbound?.let { return true }
         synchronized(lock) {
-            if (!binding) {
+            if (!binding && !bound) {
                 binding = context.bindService(
                     Intent(context, SpiderService::class.java),
                     connection,
                     Context.BIND_AUTO_CREATE
                 )
+                bound = binding
                 android.util.Log.i("NextMovieSpider", "bindService -> $binding")
             }
         }
@@ -99,7 +101,7 @@ class SpiderClient(private val context: Context) {
     suspend fun request(
         action: Int,
         site: Site?,
-        timeoutMs: Long = 30_000,
+        timeoutMs: Long = 90_000,
         configure: Bundle.() -> Unit = {}
     ): String {
         if (!ensureConnected()) {
@@ -125,19 +127,37 @@ class SpiderClient(private val context: Context) {
             throw SpiderException("插件进程通讯失败：" + (e.message ?: e.javaClass.simpleName))
         }
 
-        val reply = withTimeoutOrNull(timeoutMs) { deferred.await() }
-        pending.remove(id)
+        val reply = try {
+            withTimeoutOrNull(timeoutMs) { deferred.await() }
+        } finally {
+            pending.remove(id)
+            if (!deferred.isCompleted) runCatching {
+                inbound?.send(Message.obtain(null, SpiderProtocol.ACTION_CANCEL).apply { arg1 = id })
+            }
+        }
         if (reply == null) throw SpiderException("插件响应超时（${timeoutMs / 1000}s），可以重试")
         if (!reply.ok) throw SpiderException(reply.error.ifBlank { "插件调用失败" })
         return reply.data
     }
 
+    /** Called before opening a playback window, after a plugin has retained a cancelled-login state. */
+    suspend fun restartForLogin() {
+        val previous = inbound
+        request(SpiderProtocol.ACTION_RESTART, null, timeoutMs = 5_000)
+        val connected = withTimeoutOrNull(25_000) {
+            while (inbound == null || inbound === previous) delay(100)
+            true
+        } ?: false
+        if (!connected) throw SpiderException("登录运行时重置超时，请重试")
+    }
+
     fun close() {
         inbound = null
         synchronized(lock) {
-            if (binding) {
+            if (bound) {
                 runCatching { context.unbindService(connection) }
                 binding = false
+                bound = false
             }
         }
         failAll("插件进程已关闭")

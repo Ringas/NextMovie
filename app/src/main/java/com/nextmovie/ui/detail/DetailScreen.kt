@@ -1,12 +1,19 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.nextmovie.ui.detail
 
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import kotlinx.coroutines.ensureActive
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import com.nextmovie.ui.common.tvClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,6 +37,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -65,9 +73,10 @@ fun DetailScreen(
     repo: AppRepository,
     site: Site,
     initial: Vod,
-    onPlay: (source: Site, line: PlayLine, episode: Episode, startMs: Long) -> Unit,
+    onPlay: (source: Site, vod: Vod, line: PlayLine, episode: Episode, startMs: Long) -> Unit,
     onBack: () -> Unit
 ) {
+    val screenStartedAt = remember { System.nanoTime() }
     val context = LocalContext.current
     var hit by remember { mutableStateOf<AppRepository.DetailHit?>(null) }
     var detail by remember { mutableStateOf<VodDetail?>(null) }
@@ -76,6 +85,7 @@ fun DetailScreen(
     var loading by remember { mutableStateOf(true) }
     var hint by remember { mutableStateOf("正在读取详情…") }
     var forced by remember { mutableStateOf<Site?>(null) }
+    val playFocus = remember { androidx.compose.ui.focus.FocusRequester() }
     var reload by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(initial.id, site.key, forced?.key, reload) {
@@ -85,14 +95,25 @@ fun DetailScreen(
         detail = null
         error = null
         lineIndex = 0
+        fun showResult(found: AppRepository.DetailHit?) {
+            if (loading) {
+                android.util.Log.i("NextMovieTiming", "detail-ready " + (System.nanoTime() - screenStartedAt) / 1_000_000 + "ms")
+                hit = found
+                detail = found?.detail
+                loading = false
+            } else {
+                hit = found
+            }
+        }
         runCatching {
-            com.nextmovie.core.net.Retry.once { repo.detailPreferring(forced ?: site, initial) }
+            repo.detailPreferring(forced ?: site, initial, preferSearch = forced != null) { found ->
+                showResult(found)
+                hint = "已改用「${found.site.name}」的线路"
+            }
         }
             .onSuccess { found ->
-                hit = found
-                detail = found?.detail?.let {
-                    it.copy(vod = repo.enrichPoster(it.vod, detail = true))
-                }
+                kotlin.coroutines.coroutineContext.ensureActive()
+                showResult(found)
                 when {
                     found == null -> error = "所有站点都没有返回这部片的详情"
                     found.detail.lines.isEmpty() -> error = "「${found.site.name}」没有给出播放线路"
@@ -100,8 +121,15 @@ fun DetailScreen(
                     else -> hint = ""
                 }
             }
-            .onFailure { error = com.nextmovie.core.net.FriendlyError.describe(it) }
+            .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it; error = com.nextmovie.core.net.FriendlyError.describe(it) }
         loading = false
+    }
+
+    // Artwork must never delay the episode list or the play action.
+    LaunchedEffect(detail?.vod?.id) {
+        val current = detail ?: return@LaunchedEffect
+        val enriched = repo.enrichPoster(current.vod, detail = true)
+        if (detail?.vod?.id == current.vod.id) detail = current.copy(vod = enriched)
     }
 
     val active: Site = hit?.site ?: site
@@ -110,8 +138,12 @@ fun DetailScreen(
     val line = lines.getOrElse(lineIndex) { lines.firstOrNull() }
 
     // 本机看过这部片且没看完时，给一个一键续播入口
+    LaunchedEffect(lines.isNotEmpty()) {
+        if (lines.isNotEmpty()) { kotlinx.coroutines.delay(100); runCatching { playFocus.requestFocus() } }
+    }
+
     val resumeEntry = remember(vod.id, detail) {
-        repo.history.find(site.key, vod.id)?.takeIf { it.resumable && it.episodeUrl.isNotBlank() }
+        repo.history.find(active.key, vod.id)?.takeIf { it.resumable && it.episodeUrl.isNotBlank() }
     }
 
     fun resume() {
@@ -119,7 +151,7 @@ fun DetailScreen(
         val target = lines.firstOrNull { it.name == entry.playFrom } ?: line ?: return
         val ep = target.episodes.firstOrNull { it.url == entry.episodeUrl }
             ?: Episode(entry.episodeName.ifBlank { "继续观看" }, entry.episodeUrl)
-        onPlay(active, target, ep, entry.positionMs)
+        onPlay(active, vod, target, ep, entry.positionMs)
     }
 
     Box(modifier = Modifier.fillMaxSize().background(Tokens.Bg)) {
@@ -169,7 +201,7 @@ fun DetailScreen(
                         .clip(RoundedCornerShape(8.dp))
                         .background(Color(0x1AFFFFFF))
                         .mouseFocusable()
-                        .clickable { onBack() }
+                        .tvClickable { onBack() }
                         .padding(horizontal = 14.dp, vertical = 8.dp)
                 )
                 Spacer(Modifier.weight(1f))
@@ -182,13 +214,13 @@ fun DetailScreen(
 
             Spacer(Modifier.height(22.dp))
 
-            Row(modifier = Modifier.fillMaxWidth()) {
+            Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 // —— 左栏 ——
-                Column(modifier = Modifier.width(216.dp)) {
+                Column(modifier = Modifier.width(192.dp).fillMaxHeight().verticalScroll(rememberScrollState())) {
                     Box(
                         modifier = Modifier
-                            .width(216.dp)
-                            .height(290.dp)
+                            .width(192.dp)
+                            .height(264.dp)
                             .clip(RoundedCornerShape(Tokens.Corner.card))
                             .background(Tokens.SurfaceHigh)
                     ) {
@@ -202,9 +234,10 @@ fun DetailScreen(
                     Spacer(Modifier.height(16.dp))
                     PrimaryButton(
                         label = "▶ 播放",
+                        modifier = Modifier.focusRequester(playFocus),
                         enabled = line != null && line.episodes.isNotEmpty(),
                         onClick = {
-                            line?.episodes?.firstOrNull()?.let { onPlay(active, line, it, 0L) }
+                            line?.episodes?.firstOrNull()?.let { onPlay(active, vod, line, it, 0L) }
                         }
                     )
                     if (resumeEntry != null) {
@@ -220,7 +253,7 @@ fun DetailScreen(
                 Spacer(Modifier.width(36.dp))
 
                 // —— 右栏 ——
-                Column(modifier = Modifier.weight(1f)) {
+                Column(modifier = Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState())) {
                     Text(
                         text = vod.name,
                         color = Tokens.Text,
@@ -239,7 +272,7 @@ fun DetailScreen(
                         if (line != null && line.episodes.isNotEmpty()) add("${line.episodes.size} 集")
                         vod.remark.takeIf { it.isNotBlank() }?.let { add(it.take(14)) }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         chips.forEach { MetaChip(it) }
                     }
 
@@ -252,7 +285,7 @@ fun DetailScreen(
                             style = MaterialTheme.typography.bodyMedium,
                             maxLines = 3,
                             overflow = TextOverflow.Ellipsis,
-                            lineHeight = 21.sp
+                            lineHeight = 28.sp
                         )
                     }
 
@@ -297,7 +330,7 @@ fun DetailScreen(
                             }
                             EpisodeGrid(
                                 line = line!!,
-                                onPlay = { ep -> onPlay(active, line, ep, 0L) }
+                                onPlay = { ep -> onPlay(active, vod, line, ep, 0L) }
                             )
                         }
                     }
@@ -312,7 +345,7 @@ private fun MetaChip(text: String) {
     Text(
         text = text,
         color = Tokens.Text,
-        fontSize = 12.sp,
+        fontSize = 16.sp,
         modifier = Modifier
             .clip(RoundedCornerShape(999.dp))
             .background(Tokens.Surface)
@@ -321,21 +354,21 @@ private fun MetaChip(text: String) {
 }
 
 @Composable
-private fun PrimaryButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+private fun PrimaryButton(label: String, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Box(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .height(52.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(if (enabled) Tokens.Accent else Tokens.SurfaceHigh)
             .mouseFocusable()
-            .clickable(enabled = enabled) { onClick() },
+            .tvClickable(enabled = enabled) { onClick() },
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = label,
             color = if (enabled) Tokens.OnAccent else Tokens.TextDim,
-            fontSize = 17.sp,
+            fontSize = 20.sp,
             fontWeight = FontWeight.SemiBold
         )
     }
@@ -346,13 +379,13 @@ private fun GhostButton(label: String, onClick: () -> Unit) {
     Text(
         text = label,
         color = Tokens.Text,
-        fontSize = 14.sp,
+        fontSize = 18.sp,
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(Color(0x26FFFFFF))
             .mouseFocusable()
-            .clickable { onClick() }
+            .tvClickable { onClick() }
             .padding(horizontal = 16.dp, vertical = 14.dp)
     )
 }
@@ -387,7 +420,7 @@ private fun ErrorCard(message: String, onRetry: () -> Unit) {
                 .clip(RoundedCornerShape(8.dp))
                 .background(Tokens.AccentDim)
                 .mouseFocusable()
-                .clickable { onRetry() }
+                .tvClickable { onRetry() }
                 .padding(horizontal = 16.dp, vertical = 8.dp)
         )
     }
@@ -418,7 +451,7 @@ private fun SourceRow(sources: List<Pair<Site, Boolean>>, onPick: (Site) -> Unit
                         .clip(RoundedCornerShape(999.dp))
                         .background(if (current) Tokens.AccentDim else Color(0x14FFFFFF))
                         .mouseFocusable()
-                        .clickable { onPick(s) }
+                        .tvClickable { onPick(s) }
                         .padding(horizontal = 12.dp, vertical = 7.dp)
                 )
             }
@@ -444,7 +477,7 @@ private fun LineTabs(lines: List<PlayLine>, selected: Int, onSelect: (Int) -> Un
                     .clip(RoundedCornerShape(999.dp))
                     .background(if (active) Tokens.AccentDim else Color(0x14FFFFFF))
                     .mouseFocusable()
-                    .clickable { onSelect(index) }
+                    .tvClickable { onSelect(index) }
                     .padding(horizontal = 14.dp, vertical = 7.dp)
             )
         }
@@ -473,23 +506,23 @@ private fun EpisodeGrid(line: PlayLine, onPlay: (Episode) -> Unit) {
             )
         }
         LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = 104.dp),
+            columns = GridCells.Adaptive(minSize = 140.dp),
             state = state,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(154.dp)
+                .height(220.dp)
                 .mouseWheel(state)
         ) {
             itemsIndexed(line.episodes) { _, ep ->
                 Box(
                     modifier = Modifier
-                        .height(46.dp)
+                        .height(56.dp)
                         .clip(RoundedCornerShape(9.dp))
                         .background(Tokens.Surface)
                         .mouseFocusable()
-                        .clickable { onPlay(ep) },
+                        .tvClickable { onPlay(ep) },
                     contentAlignment = Alignment.Center
                 ) {
                     Text(

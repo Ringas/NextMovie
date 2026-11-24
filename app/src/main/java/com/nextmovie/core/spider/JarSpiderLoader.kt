@@ -7,6 +7,8 @@ import com.nextmovie.core.net.Http
 import dalvik.system.DexClassLoader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.security.MessageDigest
 import java.util.zip.ZipFile
@@ -15,7 +17,7 @@ import java.util.zip.ZipFile
  * JAR 插件加载器（独立实现）。
  *
  * 流程：下载 jar → 落盘缓存 → DexClassLoader → 反射实例化 `com.github.catvod.spider.<Name>`。
- * v0 仍在主进程内加载；P1 会迁到 `:spider` 子进程，避免插件崩溃带走 UI。
+ * 由 :spider 服务持有，插件崩溃与主界面隔离。
  */
 class JarSpiderLoader(
     private val context: Context,
@@ -24,22 +26,27 @@ class JarSpiderLoader(
 
     class SpiderLoadException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
+    private val loadLock = Mutex()
     private val jarDir = File(context.filesDir, "spiders").apply { mkdirs() }
     private val dexDir = File(context.codeCacheDir, "spider-dex").apply { mkdirs() }
-    private val instances = HashMap<String, Spider>()
-    private val classLoaders = HashMap<String, ClassLoader>()
+    private val instances = java.util.concurrent.ConcurrentHashMap<String, Spider>()
+    private val classLoaders = java.util.concurrent.ConcurrentHashMap<String, ClassLoader>()
     private val initialized = HashSet<String>()
+    private val initializedProxies = java.util.concurrent.ConcurrentHashMap.newKeySet<Class<*>>()
 
     @Synchronized
     fun release() {
+        instances.values.forEach { runCatching { it.destroy() } }
         instances.clear()
+        initialized.clear()
+        initializedProxies.clear()
         classLoaders.clear()
-        dexDir.listFiles()?.forEach { it.deleteRecursively() }
+        // Keep optimized dex across process restarts; it is disposable code cache, not runtime state.
     }
 
     suspend fun obtain(site: Site): Spider = withContext(Dispatchers.IO) {
         try {
-            obtainInner(site)
+            loadLock.withLock { obtainInner(site) }
         } catch (t: Throwable) {
             PluginDiag.record(context, site.name, site.api, false, t.message)
             throw t
@@ -51,8 +58,9 @@ class JarSpiderLoader(
         if (!api.startsWith("csp_")) {
             throw SpiderLoadException("v0 只支持 csp_ 前缀的 JAR 插件，当前是 $api")
         }
-        instances[site.key]?.let { return@withContext it }
+        instances[site.runtimeKey]?.let { return@withContext it }
 
+        val lifecycleBefore = PluginLifecycle.snapshot(context)
         val jarUrl = site.jar.ifBlank { api }
         if (!jarUrl.startsWith("http://") && !jarUrl.startsWith("https://")) {
             throw SpiderLoadException("站点「${site.name}」没有可下载的插件地址（api=$api）")
@@ -75,7 +83,7 @@ class JarSpiderLoader(
         val guardFile = extractAssetEntry(jarFile, ".guard", libDir, "payload.guard")
         val bridgeDex = ensureBridgeDex()
 
-        val loader = classLoaders.getOrPut(site.key) {
+        val loader = classLoaders.getOrPut(jarFile.absolutePath) {
             val dexPath = if (bridgeDex != null) {
                 jarFile.absolutePath + File.pathSeparator + bridgeDex.absolutePath
             } else {
@@ -101,7 +109,9 @@ class JarSpiderLoader(
         // CatVod 插件自带的 Init.init(Context) 负责把 secondary dex / 动态库准备好，
         // 不调用它，Guard 系插件（csp_*Guard）基本都会构造失败，所以每个 jar 只调一次。
         var initError: Throwable? = null
-        if (initialized.add(jarFile.absolutePath)) {
+        PluginHostState.publishConfig(context, site.origin)
+        val needsInit = !initialized.contains(jarFile.absolutePath)
+        if (needsInit) {
             initError = runCatching {
                 val initClass = Class.forName("com.github.catvod.spider.Init", true, loader)
                 initClass.declaredMethods.forEach {
@@ -154,50 +164,9 @@ class JarSpiderLoader(
             }.exceptionOrNull()
         }
 
-        // Init 的入口签名各家不一样（init(Context) / init(Context, String) / <混淆名>(File)），
-        // 单挑一个试很可能漏掉真正“解二级 dex”的那个。这里把可疑入口全部走一遍，
-        // 结果写盘，配上详情页的原始返回就能确定是哪一步没成。
-        if (initialized.contains(jarFile.absolutePath)) {
-            val results = ArrayList<String>()
-            runCatching {
-                val initClass = Class.forName("com.github.catvod.spider.Init", true, loader)
-                val sig = initClass.declaredMethods.joinToString(", ") { m ->
-                    m.name + "(" + m.parameterTypes.joinToString(",") { it.simpleName } + ")"
-                }
-                results += "签名: " + sig.take(600)
-                initClass.declaredMethods.forEach { m ->
-                    if (!java.lang.reflect.Modifier.isStatic(m.modifiers)) return@forEach
-                    if (m.parameterTypes.isEmpty() || m.parameterTypes.size > 2) return@forEach
-                    val lname = m.name.lowercase()
-                    // 只吃一个 File 的方法几乎就是「解密二级 dex」的入口，名字全是混淆字符
-                    // （oOoOoOoOoOoOoO0o），按名字过滤会永远漏掉它，detail/play 就只能拿到空串。
-                    val fileEntry = m.parameterTypes.size == 1 && m.parameterTypes[0] == File::class.java
-                    if (!fileEntry && !(lname.contains("init") || lname.contains("load") || lname.contains("prepare") || lname.contains("guard"))) return@forEach
-                    val attempts: List<Array<Any?>> = when {
-                        fileEntry -> buildList {
-                            add(arrayOf<Any?>(jarFile))
-                            guardFile?.let { add(arrayOf<Any?>(it)) }
-                        }
-                        m.parameterTypes[0] == Context::class.java && m.parameterTypes.size == 1 -> listOf(arrayOf<Any?>(context))
-                        m.parameterTypes[0] == Context::class.java && m.parameterTypes[1] == String::class.java ->
-                            listOf(arrayOf<Any?>(context, jarFile.absolutePath))
-                        m.parameterTypes[0] == Context::class.java && m.parameterTypes[1].name == "boolean" ->
-                            listOf(arrayOf<Any?>(context, true))
-                        m.parameterTypes[0] == File::class.java && m.parameterTypes.size == 2 -> listOf(arrayOf<Any?>(jarFile, context))
-                        m.parameterTypes[0] == String::class.java -> listOf(arrayOf<Any?>(jarFile.absolutePath))
-                        else -> return@forEach
-                    }
-                    val tag = m.name + "(" + m.parameterTypes.joinToString(",") { it.simpleName } + ")"
-                    attempts.forEachIndexed { i, args ->
-                        val r = runCatching { m.isAccessible = true; m.invoke(null, *args) }
-                        val who = if (attempts.size > 1) tag + "#" + (if (i == 0) "jar" else "payload") else tag
-                        results += who + " = " + if (r.isSuccess) "ok" else "fail: " + rootCause(r.exceptionOrNull()!!).take(80)
-                    }
-                }
-            }
-            PluginDiag.saveInit(context, results.joinToString("\n"))
-            android.util.Log.d("NextMovieInit", results.joinToString(" | "))
-        }
+        // Initialization belongs to the JAR class loader, once only. Re-running arbitrary
+        // load/prepare methods may mutate or destroy a working plugin runtime.
+        if (initError != null) throw SpiderLoadException("插件初始化失败：" + rootCause(initError), initError)
 
         val className = "com.github.catvod.spider." + api.removePrefix("csp_").substringBefore('?')
         val instance = try {
@@ -231,16 +200,85 @@ class JarSpiderLoader(
             )
         }
 
+        initialized.add(jarFile.absolutePath)
+        android.util.Log.i("NextMoviePlugin", "class=" + instance.javaClass.name + " init2=" + instance.javaClass.getMethod("init", Context::class.java, String::class.java).declaringClass.name + " init1=" + instance.javaClass.getMethod("init", Context::class.java).declaringClass.name)
         instance.siteKey = site.key
         try {
-            instance.init(context, site.ext.takeIf { it.isNotBlank() })
+            SpiderInitializer.initialize(instance, context, site.ext)
         } catch (e: Throwable) {
             throw SpiderLoadException("插件 init 失败：$className", e)
         }
 
-        instances[site.key] = instance
+        PluginLifecycle.catchUp(context, lifecycleBefore)
+        instances[site.runtimeKey] = instance
         PluginDiag.record(context, site.name, site.api, true, "Init ok，实例已就绪")
         instance
+    }
+
+    /** Older plugins keep their own Init singleton instead of consulting Spider.getActivity(). */
+    fun bindActivity(site: Site) {
+        val host = PluginDialogs.current() ?: return
+        val loaders = (classLoaders.values + listOfNotNull(instances[site.runtimeKey]?.javaClass?.classLoader)).distinct()
+        val done = java.util.concurrent.CountDownLatch(1)
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            try {
+                for (loader in loaders) for (name in listOf("Init", "InitOrigin", "AwInit")) runCatching {
+                    val cls = Class.forName("com.github.catvod.spider.$name", false, loader)
+                    val instance = runCatching { cls.getDeclaredMethod("get").apply { isAccessible = true }.invoke(null) }.getOrNull()
+                    for (field in cls.declaredFields) runCatching {
+                        val owner = if (java.lang.reflect.Modifier.isStatic(field.modifiers)) null else instance ?: return@runCatching
+                        field.isAccessible = true
+                        when {
+                            android.app.Activity::class.java.isAssignableFrom(field.type) && field.type.isInstance(host) -> field.set(owner, host)
+                            field.type == java.lang.ref.WeakReference::class.java -> {
+                                val old = (field.get(owner) as? java.lang.ref.WeakReference<*>)?.get()
+                                if (old is android.app.Activity || field.name.contains("activity", true)) field.set(owner, java.lang.ref.WeakReference(host))
+                            }
+                        }
+                    }
+                }
+            } finally { done.countDown() }
+        }
+        done.await(3, java.util.concurrent.TimeUnit.SECONDS)
+    }
+
+    private fun proxyLoaders(site: Site): List<ClassLoader> {
+        val roots = listOfNotNull(instances[site.runtimeKey]?.javaClass?.classLoader) + classLoaders.values
+        val all = LinkedHashSet<ClassLoader>()
+        roots.forEach { root ->
+            all.add(root)
+            runCatching {
+                val init = Class.forName("com.github.catvod.spider.Init", false, root)
+                (init.getMethod("classLoader").invoke(null) as? ClassLoader)?.let { all.add(it) }
+            }
+        }
+        return all.toList()
+    }
+
+    /** Publish the callback server before playerContent, which may use it synchronously. */
+    fun prepareProxy(site: Site, port: Int) {
+        for (loader in proxyLoaders(site)) for (name in listOf("Proxy", "ProxyOrigin")) runCatching {
+            val cls = Class.forName("com.github.catvod.spider.$name", false, loader)
+            runCatching { cls.getMethod("set", Int::class.javaPrimitiveType).invoke(null, port) }
+            if (initializedProxies.add(cls)) runCatching { cls.getMethod("init").invoke(null) }
+        }
+    }
+
+    fun proxy(site: Site, params: Map<String, String>): Array<*>? {
+        val instance = instances[site.runtimeKey] ?: return null
+        val direct = runCatching { instance.proxy(HashMap(params)) }
+        direct.getOrNull()?.let { return it }
+        var failure: Throwable? = direct.exceptionOrNull()
+        for (loader in proxyLoaders(site)) {
+            val response = runCatching {
+                val proxy = Class.forName("com.github.catvod.spider.Proxy", true, loader)
+                proxy.getMethod("proxy", Map::class.java).invoke(null, HashMap(params)) as? Array<*>
+            }
+            response.getOrNull()?.let { return it }
+            failure = response.exceptionOrNull() ?: failure
+        }
+        if (failure != null) throw IllegalStateException("来源代理调用失败", failure)
+        return null
     }
 
     private suspend fun ensureJar(raw: String, siteName: String, expected: String = ""): File {
@@ -249,7 +287,7 @@ class JarSpiderLoader(
         // 否则被换包 / 半途截断时表现为“插件崩溃”，排查成本极高。
         val spec = JarSpec.parse(raw)
         val hash = spec.hash.ifBlank { expected }
-        val name = md5(spec.url) + ".jar"
+        val name = md5(spec.url + "|" + hash) + ".jar"
         val target = File(jarDir, name)
         val stamp = File(jarDir, "$name.md5")
         if (target.length() > 0) {
@@ -287,10 +325,8 @@ class JarSpiderLoader(
     private data class JarSpec(val url: String, val hash: String) {
         companion object {
             fun parse(raw: String): JarSpec {
-                val parts = raw.split(';').map { it.trim() }
-                if (parts.size >= 3 && parts[1].equals("md5", ignoreCase = true)) return JarSpec(parts[0], parts[2])
-                if (parts.size == 2 && parts[1].length == 32 && parts[1].all { it.isLetterOrDigit() }) return JarSpec(parts[0], parts[1])
-                return JarSpec(raw.trim(), "")
+                val (url, hash) = com.nextmovie.core.config.PluginArtifact.split(raw)
+                return JarSpec(url, hash)
             }
         }
     }

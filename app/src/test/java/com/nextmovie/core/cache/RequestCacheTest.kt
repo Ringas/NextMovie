@@ -1,0 +1,42 @@
+package com.nextmovie.core.cache
+
+import kotlinx.coroutines.*
+import org.junit.Assert.*
+import org.junit.Test
+import java.util.concurrent.atomic.AtomicInteger
+
+class RequestCacheTest {
+    @Test fun concurrentHomeAndCategoryShareOneRequest() = runBlocking {
+        val calls = AtomicInteger()
+        val entered = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        RequestCache<String, Int>(10000).use { cache ->
+            val a = async { cache.get("same-source") { calls.incrementAndGet(); entered.complete(Unit); finish.await(); 7 } }
+            entered.await()
+            val b = async { cache.get("same-source") { error("duplicate request") } }
+            yield(); finish.complete(Unit)
+            assertEquals(7, a.await()); assertEquals(7, b.await()); assertEquals(1, calls.get())
+            assertEquals(7, cache.get("same-source") { error("warm navigation fetched again") })
+        }
+    }
+    @Test fun cancelledScreenDoesNotCancelSharedWork() = runBlocking {
+        val entered = CompletableDeferred<Unit>(); val finish = CompletableDeferred<Unit>()
+        RequestCache<String, Int>(10000).use { cache ->
+            val a = launch { cache.get("same") { entered.complete(Unit); finish.await(); 42 } }
+            entered.await(); a.cancelAndJoin()
+            val b = async { cache.get("same") { error("must reuse") } }
+            finish.complete(Unit); assertEquals(42, b.await())
+        }
+    }
+    @Test fun expiredEntriesAndFailuresCanRefresh() = runBlocking {
+        var now = 0L
+        RequestCache<String, Int>(100, now = { now }).use { cache ->
+            assertEquals(1, cache.get("k") { 1 })
+            now = 101
+            assertEquals(2, cache.get("k") { 2 })
+            runCatching { cache.get("failure") { error("offline") } }
+            assertEquals(3, cache.get("failure") { 3 })
+            cache.clear(); assertEquals(4, cache.get("k") { 4 })
+        }
+    }
+}

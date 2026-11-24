@@ -7,7 +7,7 @@ import com.nextmovie.core.model.VodDetail
 import com.nextmovie.core.model.VodParser
 import com.nextmovie.core.net.Http
 import org.json.JSONObject
-import java.net.URLEncoder
+import okhttp3.HttpUrl.Companion.toHttpUrl
 
 /**
  * CMS 型站点（type 0 = XML，type 1/4 = JSON）客户端。
@@ -58,51 +58,19 @@ class CmsSiteClient(
             val vod = VodParser.fromJson(item) ?: return null
             return VodDetail(vod, VodParser.playLines(item))
         }
-        val vod = parseXmlVideos(raw).firstOrNull() ?: return null
-        return VodDetail(vod, emptyList())
+        return XmlCmsParser.details(raw).firstOrNull()
     }
 
     private suspend fun query(params: Map<String, String>): List<Vod> {
         val raw = request(params)
         val root = runCatching { JSONObject(raw) }.getOrNull()
         if (root != null) return VodParser.list(root)
-        return parseXmlVideos(raw)
+        return XmlCmsParser.details(raw).map { it.vod }
     }
 
     private suspend fun request(params: Map<String, String>): String {
-        val separator = if (site.api.contains("?")) "&" else "?"
-        val query = params.entries.joinToString("&") { (k, v) ->
-            "$k=" + URLEncoder.encode(v, "UTF-8")
-        }
-        return http.text(site.api + separator + query, site.headers, referer = site.api)
-    }
-
-    /** 极简 XML 兜底解析：v0 不引入 XML 依赖，按 `<video>` 分块抽字段。 */
-    private fun parseXmlVideos(xml: String): List<Vod> {
-        val blocks = Regex("<video>(.*?)</video>", RegexOption.DOT_MATCHES_ALL).findAll(xml)
-        val out = ArrayList<Vod>()
-        for (block in blocks) {
-            val body = block.groupValues[1]
-            fun tag(name: String): String {
-                val m = Regex("<$name>(?:<!\\[CDATA\\[)?(.*?)(?:\\]\\]>)?</$name>", RegexOption.DOT_MATCHES_ALL)
-                    .find(body) ?: return ""
-                return m.groupValues[1].trim()
-            }
-            val name = tag("vod_name").ifEmpty { tag("name") }
-            if (name.isEmpty()) continue
-            out += Vod(
-                id = tag("vod_id").ifEmpty { tag("id") }.ifEmpty { name },
-                name = name,
-                pic = tag("vod_pic"),
-                remark = tag("vod_remarks"),
-                year = tag("vod_year"),
-                area = tag("vod_area"),
-                typeName = tag("vod_class"),
-                actor = tag("vod_actor"),
-                director = tag("vod_director"),
-                content = tag("vod_content").ifEmpty { tag("des") }
-            )
-        }
-        return out
+        val builder = site.api.toHttpUrl().newBuilder()
+        params.forEach { (key, value) -> builder.setQueryParameter(key, value) }
+        return http.text(builder.build().toString(), site.headers, referer = site.api)
     }
 }

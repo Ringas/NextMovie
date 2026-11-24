@@ -8,6 +8,7 @@ import com.quickjs.JSContext
 import com.quickjs.JSObject
 import com.quickjs.JavaCallback
 import com.quickjs.QuickJS
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -26,12 +27,11 @@ import java.util.concurrent.TimeUnit
  * 为什么要独立线程：QuickJS 的 runtime 有线程亲和性，跨线程访问会直接 crash。
  * 这个 spider 的所有 JS 调用都投递到自己的单线程 executor 上执行，宿主那边无论从哪个线程调都安全。
  *
- * 已知边界：drpy2 一类脚本把方法写成 `async`，返回 Promise。QuickJS 这边等不到 Promise 结果，
- * 所以只支持同步脚本；遇到 Promise 会明确报"异步脚本暂不支持"，不假装成功。
  */
 class JsSpider(
     private val site: Site,
-    private val code: String
+    private val code: String,
+    private val scriptUrl: String
 ) : Spider() {
 
     /** 最近一次调用遇到的问题（目前只有「异步脚本」这一种），供服务层转成用户可见的提示。 */
@@ -46,12 +46,8 @@ class JsSpider(
         OkHttpClient.Builder()
             .connectTimeout(12, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
+            .callTimeout(20, TimeUnit.SECONDS)
             .build()
-    }
-
-    override fun init(context: android.content.Context?, extend: String?) {
-        // 脚本初始化放在首次调用时做：那时才在 worker 线程上，避免主线程建 runtime
-        runCatching { ensureContext() }
     }
 
     override fun homeContent(filter: Boolean): String = call("homeContent", filter)
@@ -92,34 +88,44 @@ class JsSpider(
 
     private fun <T> onWorker(timeoutSec: Long = 25, block: (JSContext) -> T): T {
         val task = worker.submit(Callable { block(ensureContext()) })
-        return task.get(timeoutSec, TimeUnit.SECONDS)
+        return try { task.get(timeoutSec, TimeUnit.SECONDS) } finally { if (!task.isDone) task.cancel(true) }
     }
 
     private fun ensureContext(): JSContext {
         context?.let { return it }
         loadNative()
         val rt = QuickJS.createRuntime()
-        val ctx = rt.createContext()
-        registerBridge(ctx)
-        // 脚本自身在顶层执行；它通常只是定义函数与常量，不产生网络请求。
-        // 先按「只改写 export、保留 async/await」的方式加载：QuickJS 原生支持 async，
-        // 保留后 async 函数会返回 Promise，我们就能给出「异步脚本暂不支持」的明确提示，
-        // 而不是把 async 关键字硬删掉、再抛一个莫名的 SyntaxError。
-        var loaded = false
-        var lastError: Exception? = null
-        for (variant in listOf(sanitizeKeepAsync(code), sanitize(code))) {
-            val result = runCatching { ctx.executeScript(variant, site.api) }
-            if (result.isSuccess) { loaded = true; break }
-            lastError = result.exceptionOrNull() as? Exception
-            Log.w("NextMovieJs", "site=${site.name} 脚本加载失败（${variant.length}B）：${lastError?.message}")
-        }
-        if (!loaded) {
-            note = "「${site.name}」脚本无法在本机内核运行：${lastError?.message?.take(120) ?: "未知错误"}"
-            throw lastError ?: IllegalStateException("脚本加载失败")
-        }
-        // 部分脚本把初始化放在 init() 里（例如拼 host / 取配置），先跑一次，失败不影响后续
-        runCatching {
-            ctx.executeStringScript(INIT_SCRIPT, "init")
+        val isModule = scriptUrl.toHttpUrl().encodedPath.endsWith(".mjs", true) ||
+            Regex("""(?m)^\s*import\s+(?!\()""").containsMatchIn(code)
+        val ctx = if (isModule) object : com.quickjs.ES6Module(rt) {
+            override fun convertModuleName(base: String, name: String): String =
+                (base.toHttpUrl().resolve(name) ?: error("不支持的模块地址")).toString()
+
+            override fun getModuleScript(name: String): String {
+                if (name == scriptUrl) return code
+                val request = Request.Builder().url(name).build()
+                return http.newCall(request).execute().use { response ->
+                    check(response.isSuccessful) { "模块请求失败 HTTP ${response.code}" }
+                    response.body?.string().orEmpty()
+                }
+            }
+        } else rt.createContext()
+        try {
+            registerBridge(ctx)
+            if (ctx is com.quickjs.ES6Module) {
+                val entry = JSONObject.quote(scriptUrl)
+                ctx.executeModuleScript(
+                    "import * as plugin from $entry; globalThis.__spider = plugin.default || plugin;",
+                    scriptUrl.toHttpUrl().resolve("./__nextmovie_entry__")!!.toString()
+                )
+            } else ctx.executeVoidScript(sanitizeExports(code), scriptUrl)
+            ctx.set("__nmInitExt", site.ext)
+            ctx.executeVoidScript(INIT_SCRIPT, "init")
+            awaitResult(ctx)
+        } catch (failure: Throwable) {
+            runCatching { ctx.close() }
+            runCatching { rt.close() }
+            throw failure
         }
         Log.i("NextMovieJs", "site=${site.name} 脚本已载入（${code.length}B）")
         runtime = rt
@@ -148,7 +154,7 @@ class JsSpider(
                 return runCatching { fetchSync(url, optJson) }
                     .getOrElse {
                         Log.w("NextMovieJs", "request 失败 $url: ${it.message}")
-                        ""
+                        "{\"code\":0,\"content\":\"\",\"headers\":{}}"
                     }
             }
         }, "__nmRequest")
@@ -181,19 +187,22 @@ class JsSpider(
         if (url.isBlank()) return ""
         val opt = runCatching { if (optJson.isBlank()) JSONObject() else JSONObject(optJson) }
             .getOrDefault(JSONObject())
-        val builder = Request.Builder().url(url)
+        val builder = Request.Builder().url(scriptUrl.toHttpUrl().resolve(url) ?: error("无效的请求地址"))
         val headers = opt.optJSONObject("headers")
         headers?.keys()?.forEach { k -> runCatching { builder.header(k, headers.optString(k, "")) } }
-        val method = opt.optString("method", "GET").uppercase()
+        val method = opt.optString("method", "GET").uppercase(java.util.Locale.ROOT)
         val bodyText = opt.optString("body", "")
-        if (method == "POST") {
+        if (method in setOf("POST", "PUT", "PATCH") || (method == "DELETE" && bodyText.isNotEmpty())) {
             val type = opt.optString("contentType", "application/x-www-form-urlencoded").toMediaTypeOrNull()
-            builder.post(bodyText.toRequestBody(type))
+            builder.method(method, bodyText.toRequestBody(type))
         } else {
-            builder.get()
+            builder.method(method, null)
         }
         http.newCall(builder.build()).execute().use { resp ->
-            return resp.body?.string().orEmpty()
+            return JSONObject().put("code", resp.code)
+                .put("content", resp.body?.string().orEmpty())
+                .put("headers", JSONObject(resp.headers.toMultimap().mapValues { it.value.joinToString("; ") }))
+                .toString()
         }
     }
 
@@ -215,61 +224,49 @@ class JsSpider(
                                 arg.forEach { inner.put(it ?: "") }
                                 put(inner)
                             }
+                            is Map<*, *> -> put(JSONObject(arg))
                             else -> put(arg ?: JSONObject.NULL)
                         }
                     }
                 }.toString()
                 ctx.set("__nmArgs", json)
-                ctx.executeStringScript(
+                ctx.executeVoidScript(
                     SCRIPT_CALL.replace("@NAME@", name).replace("@ALIAS@", aliasOf(name)),
                     "call:$name"
                 )
+                awaitResult(ctx)
             }.let { raw ->
                 if (raw.isBlank()) "" else raw
             }
         }.getOrElse { e ->
-            val msg = e.message.orEmpty()
-            if (msg.contains(ASYNC_MARK)) {
-                note = "「${site.name}」使用异步脚本（drpy2 async），本机 JS 内核只支持同步脚本，" +
-                    "该页面内容无法加载；可换站点或换线路再试。"
-                Log.w("NextMovieJs", "site=${site.name} $name 是异步脚本")
-            } else {
-                Log.w("NextMovieJs", "site=${site.name} $name 失败: $msg", e)
-            }
+            note = "「${site.name}」JS $name 调用失败：${(e.cause ?: e).message.orEmpty().take(140)}"
+            Log.w("NextMovieJs", "JS $name 调用失败", e)
             ""
         }
     }
 
-    companion object {
-        private const val ASYNC_MARK = "__NM_ASYNC__"
+    private fun awaitResult(ctx: JSContext): String {
+        fun readResult() = ctx.executeStringScript("__nmResult || ''", "result").orEmpty()
+        val raw = readResult().ifEmpty { QuickJsJobs.complete(ctx.quickJS, ::readResult) }
+        val result = JSONObject(raw)
+        check(!result.has("error")) { result.optString("error") }
+        return result.optString("value")
+    }
 
+    companion object {
         private val SCRIPT_CALL = """
 (function(){
-  var a = JSON.parse(__nmArgs);
-  var f = null;
-  if (typeof @NAME@ === 'function') f = @NAME@;
-  else if (typeof __spider !== 'undefined' && __spider) {
-    if (typeof __spider['@NAME@'] === 'function') f = __spider['@NAME@'];
-    else if (typeof __spider['@ALIAS@'] === 'function') f = __spider['@ALIAS@'];
+  var args = JSON.parse(__nmArgs);
+  var owner = typeof __spider !== 'undefined' ? __spider : null;
+  var method = owner && (owner['@NAME@'] || owner['@ALIAS@']);
+  var shortDetail = owner && !owner['@NAME@'] && method === owner.detail;
+  if (typeof method !== 'function' && typeof @NAME@ === 'function') {
+    method = @NAME@;
+    owner = null;
   }
-  if (!f) return '';
-  // detail 的入参在生态里几乎全是数组，而脚本签名常写成 detail(id)。
-  // 这里把 [[id]] / [id] 统一压成单值，避免把数组 toString() 拼进 URL（会变成 host[/xx]）。
-  var cargs = a;
-  if (a.length === 1) {
-    var v = a[0];
-    while (v && typeof v === 'object' && typeof v.length === 'number' && v.length > 0) { v = v[0]; }
-    if (v !== a[0]) cargs = [v];
-  }
-  __nmLog('call @NAME@ args=' + JSON.stringify(cargs));
-  var r = null, err = null;
-  try { r = f.apply(null, cargs); } catch (e) { err = e; }
-  if (err) { err = null; try { r = f.apply(null, a); } catch (e2) { err = e2; } }
-  if (err) throw err;
-  if (r && typeof r.then === 'function') throw new Error('$ASYNC_MARK');
-  if (r === undefined || r === null) return '';
-  if (typeof r === 'string') return r;
-  try { return JSON.stringify(r); } catch (e) { return ''; }
+  if (typeof method !== 'function' && typeof @ALIAS@ === 'function') { method = @ALIAS@; shortDetail = true; }
+  if ('@NAME@' === 'detailContent' && shortDetail) args = [args[0][0]];
+  __nmSettle(typeof method === 'function' ? method.apply(owner, args) : null);
 })()
         """.trimIndent()
 
@@ -286,41 +283,38 @@ class JsSpider(
 
         private val INIT_SCRIPT = """
 (function(){
-  var f = null;
-  if (typeof init === 'function') f = init;
-  else if (typeof __spider !== 'undefined' && __spider && typeof __spider.init === 'function') f = __spider.init;
-  if (f) { try { f(); } catch (e) { __nmLog('init failed: ' + String(e)); } }
-  return '';
+  var owner = typeof __spider !== 'undefined' ? __spider : null;
+  if (owner && typeof owner.init === 'function') __nmSettle(owner.init(__nmInitExt));
+  else __nmSettle(typeof init === 'function' ? init(__nmInitExt) : null);
 })()
         """.trimIndent()
 
-        /**
-         * 把 ES module 风格的脚本改写成全局脚本：
-         * - `export default {...}` → `var __spider = {...}`
-         * - 去掉 `export` / `async` / `await`（宿主侧的 req 是同步阻塞的，await 去掉等价）
-         * 这样 QuickJS 的普通 executeScript 就能跑，不需要 module 环境。
-         */
-        /** 只改写模块导出：保留 async/await，让 async 脚本走「Promise 检测」的明确提示。 */
-        private fun sanitizeKeepAsync(src: String): String {
-            var out = src
-            out = Regex("""export\s+default\s+""").replace(out, "var __spider = ")
-            out = Regex("""export\s+(function|class|const|let|var)\s""").replace(out, "\$1 ")
-            out = Regex("""export\s*\{[^}]*\}\s*;?""").replace(out, "")
-            return out
-        }
-
-        private fun sanitize(src: String): String {
-            var out = src
-            out = Regex("""export\s+default\s+""").replace(out, "var __spider = ")
-            out = Regex("""export\s+(function|class|const|let|var)\s""").replace(out, "\$1 ")
-            out = Regex("""\basync\s+function\s""").replace(out, "function ")
-            out = Regex("""\basync\s+""").replace(out, "")
-            out = Regex("""\bawait\s+""").replace(out, "")
-            return out
-        }
+        private fun sanitizeExports(src: String): String = src
+            .replace(Regex("""(?m)^([ \t]*)export[ \t]+default[ \t]+"""), "\$1var __spider = ")
+            .replace(Regex("""(?m)^([ \t]*)export[ \t]+(?=(?:async\s+)?function\b|(?:class|const|let|var)\b)"""), "\$1")
+            .replace(Regex("""(?m)^\s*export\s*\{([^}]*)\}\s*;?""")) { match ->
+                val members = match.groupValues[1].split(',').mapNotNull { member ->
+                    val names = member.trim().split(Regex("""\s+as\s+"""))
+                    if (names.first().isBlank()) null else "${JSONObject.quote(names.last())}:${names.first()}"
+                }
+                "var __spider = {${members.joinToString(",")}};\n"
+            }
 
         /** 给脚本补齐 TVBox 里习以为常的全局函数，缺了它们脚本第一行就报 undefined。 */
         private val BOOTSTRAP = """
+var __nmResult;
+function __nmSettle(value) {
+  __nmResult = null;
+  function finish(result) {
+    __nmResult = JSON.stringify({value: result == null ? '' :
+      typeof result === 'string' ? result : JSON.stringify(result)});
+  }
+  if (value && typeof value.then === 'function') {
+    value.then(finish).catch(function(error) {
+      __nmResult = JSON.stringify({error: String(error)});
+    });
+  } else finish(value);
+}
 var console = {
   log: function(s){ __nmLog(String(s)); },
   error: function(s){ __nmLog('[err] ' + String(s)); },
@@ -342,8 +336,7 @@ var joinUrl = function(base, rel){
   return base.replace(/\/+$/, '') + '/' + rel.replace(/^\/+/, '');
 };
 var request = function(url, opt){
-  var body = __nmRequest(String(url), opt ? JSON.stringify(opt) : '');
-  return { code: 200, content: body, headers: {} };
+  return JSON.parse(__nmRequest(String(url), opt ? JSON.stringify(opt) : ''));
 };
 var fetch = request;
 var req = request;
@@ -354,10 +347,10 @@ var req = request;
 /** 下载脚本并缓存成 [Spider]；`.js` 站点在 `:spider` 进程里走这条路径。 */
 class JsSpiderLoader(private val http: com.nextmovie.core.net.Http) {
 
-    private val cache = HashMap<String, Spider>()
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, Spider>()
 
     suspend fun obtain(site: Site): Spider {
-        cache[site.key]?.let { return it }
+        cache[site.runtimeKey]?.let { return it }
         val url = if (site.api.startsWith("http")) site.api else com.nextmovie.core.net.Urls.resolve(site.origin, site.api) ?: site.api
         val code = runCatching { http.text(url, site.headers) }.getOrElse {
             throw JarSpiderLoader.SpiderLoadException(
@@ -365,11 +358,9 @@ class JsSpiderLoader(private val http: com.nextmovie.core.net.Http) {
             )
         }
         if (code.isBlank()) throw JarSpiderLoader.SpiderLoadException("「${site.name}」JS 脚本内容为空")
-        // 简单识别：drpy2 的主入口是 async，直接给出结论，别让它跑到 Promise 上再报空数据
-        val async = Regex("""function\s+(homeContent|categoryContent)\s*\([^)]*\)\s*\{""").containsMatchIn(code)
-        val spider = JsSpider(site, code)
-        cache[site.key] = spider
-        Log.i("NextMovieJs", "site=${site.name} 脚本 ${code.length}B async候选=$async url=$url")
+        val spider = JsSpider(site, code, url)
+        cache[site.runtimeKey] = spider
+        Log.i("NextMovieJs", "site=${site.name} 脚本 ${code.length}B")
         return spider
     }
 

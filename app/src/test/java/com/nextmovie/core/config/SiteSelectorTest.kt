@@ -112,7 +112,7 @@ class SiteSelectorTest {
         assertEquals("https://b.com/y.jar", Site.spiderJar(JSONObject("""{"spider":{"jar":"https://b.com/y.jar"}}""")))
         assertEquals("", Site.spiderJar(JSONObject("""{"sites":[]}""")))
 
-        assertEquals("https://a.com/x.jpg" to "abc", Site.splitJarSpec("https://a.com/x.jpg;md5;abc"))
+        assertEquals("https://a.com/x.jpg" to "252d4d890b6e61a4cd29c3b67f4b8a30", Site.splitJarSpec("https://a.com/x.jpg;md5;252d4d890b6e61a4cd29c3b67f4b8a30"))
         assertEquals("https://a.com/x.jpg" to "", Site.splitJarSpec("https://a.com/x.jpg"))
     }
 

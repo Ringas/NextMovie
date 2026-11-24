@@ -2,7 +2,7 @@ package com.nextmovie.ui.search
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import com.nextmovie.ui.common.tvClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -93,7 +93,7 @@ fun SearchScreen(
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 val native = event.nativeKeyEvent
                 when (native.keyCode) {
-                    android.view.KeyEvent.KEYCODE_ENTER -> { submit(); true }
+                    android.view.KeyEvent.KEYCODE_ENTER -> { if (fieldFocused) { submit(); true } else false }
                     android.view.KeyEvent.KEYCODE_DEL -> {
                         if (fieldFocused) false else { keyword = keyword.dropLast(1); true }
                     }
@@ -113,7 +113,7 @@ fun SearchScreen(
                 text = "返回",
                 color = Tokens.TextDim,
                 style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.clickable { onBack() }.padding(8.dp)
+                modifier = Modifier.tvClickable { onBack() }.padding(8.dp)
             )
             Spacer(Modifier.width(16.dp))
             Text(
@@ -159,7 +159,7 @@ fun SearchScreen(
 
         Spacer(Modifier.height(6.dp))
         Text(
-            text = "外接键盘可直接输入字母/数字/空格，回车搜索；鼠标可直接点键盘按键",
+            text = "方向键选择字符，确认键输入；也可使用系统输入法",
             color = Tokens.TextDim,
             style = MaterialTheme.typography.labelSmall
         )
@@ -185,7 +185,7 @@ fun SearchScreen(
         Spacer(Modifier.height(12.dp))
 
         LazyVerticalGrid(
-            columns = GridCells.Fixed(6),
+            columns = GridCells.Adaptive(148.dp),
             horizontalArrangement = Arrangement.spacedBy(20.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
             state = gridState,
@@ -236,7 +236,7 @@ private fun Keypad(
 @Composable
 private fun KeyCap(
     text: String,
-    width: androidx.compose.ui.unit.Dp = 64.dp,
+    width: androidx.compose.ui.unit.Dp = 60.dp,
     accent: Boolean = false,
     onClick: () -> Unit
 ) {
@@ -255,7 +255,7 @@ private fun KeyCap(
                 RoundedCornerShape(8.dp)
             )
             .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() },
+            .tvClickable { onClick() },
         contentAlignment = Alignment.Center
     ) {
         Text(

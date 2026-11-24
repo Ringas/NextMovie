@@ -6,7 +6,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import com.nextmovie.ui.common.tvClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -87,11 +87,11 @@ fun PosterCard(
                 scaleY = scale
             }
             .mouseFocusable()
-            .clickable { onClick() }
             .onFocusChanged {
                 focused = it.isFocused
                 if (it.isFocused) onFocused()
-            },
+            }
+            .tvClickable { onClick() },
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(

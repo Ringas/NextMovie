@@ -1,5 +1,10 @@
 package com.nextmovie.ui.common
 
+import androidx.compose.ui.composed
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.hoverable
@@ -29,13 +34,8 @@ import kotlinx.coroutines.launch
 /** 鼠标悬停时自动把焦点挪到该控件，让放大/描边高亮跟着鼠标走。 */
 @Composable
 fun Modifier.mouseFocusable(): Modifier {
-    val requester = remember { FocusRequester() }
-    val source = remember { MutableInteractionSource() }
-    val hovered by source.collectIsHoveredAsState()
-    LaunchedEffect(hovered) {
-        if (hovered) runCatching { requester.requestFocus() }
-    }
-    return this.focusRequester(requester).hoverable(source)
+    // Hover must not steal focus from the remote. Pointer clicks still work.
+    return this
 }
 
 /** 滚轮一格滚动的像素量。 */
@@ -93,4 +93,25 @@ fun Modifier.mouseWheel(state: ScrollState): Modifier {
             }
         }
     }
+}
+
+/** One focus target per control, with a high-contrast ring in both keyboard and D-pad modes. */
+fun Modifier.tvClickable(enabled: Boolean = true, onClick: () -> Unit): Modifier = composed {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    this
+        .drawWithContent {
+            drawContent()
+            if (focused) {
+                val inset = 2.dp.toPx()
+                drawRoundRect(
+                    color = androidx.compose.ui.graphics.Color.White,
+                    topLeft = androidx.compose.ui.geometry.Offset(inset, inset),
+                    size = androidx.compose.ui.geometry.Size((size.width - 2 * inset).coerceAtLeast(0f), (size.height - 2 * inset).coerceAtLeast(0f)),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(10.dp.toPx()),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(3.dp.toPx())
+                )
+            }
+        }
+        .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick)
 }

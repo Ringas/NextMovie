@@ -12,3 +12,8 @@
     public java.lang.String searchContent(java.lang.String, boolean, java.lang.String);
     public java.lang.String playerContent(java.lang.String, java.lang.String, java.util.List);
 }
+
+# QuickJsJobs reads the runtime pointer of the pinned Android binding.
+-keepclassmembers class com.quickjs.QuickJS {
+    long runtimePtr;
+}

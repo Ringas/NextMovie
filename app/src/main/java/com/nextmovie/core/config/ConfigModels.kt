@@ -20,7 +20,13 @@ data class Site(
     /** 站点所属配置的真实地址，用于解析 ext / jar 的相对路径 */
     val origin: String = ""
 ) {
-    val isSpider: Boolean get() = type == 3 || api.startsWith("csp_") || api.endsWith(".js") || api.endsWith(".py") || api.startsWith("node:")
+    /** Identity includes configuration and plugin inputs; site keys alone are not globally unique. */
+    val runtimeKey: String get() = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(listOf(origin, key, api, jar, jarHash, ext, headers.toSortedMap().toString()).joinToString("\u0000").toByteArray())
+        .joinToString("") { "%02x".format(it) }
+
+    val isJavaScript: Boolean get() = isJavaScriptApi(api)
+    val isSpider: Boolean get() = type == 3 || api.startsWith("csp_") || isJavaScript || api.endsWith(".py") || api.startsWith("node:")
     val isCms: Boolean get() = !isSpider && (type == 0 || type == 1 || type == 4)
 
     /**
@@ -30,8 +36,7 @@ data class Site(
     val unavailableReason: String?
         get() = when {
             isCms -> null
-            // JS 源已由内置 QuickJS 宿主接管；异步脚本在运行时会明确报错，这里不拦
-            api.endsWith(".js") || api.endsWith(".mjs") -> null
+            isJavaScript -> null
             api.endsWith(".py") -> "PY 插件需要 Python 运行时，当前版本暂不支持"
             api.startsWith("node:") -> "Node 插件暂不支持"
             api.startsWith("csp_") || api.endsWith(".jar") ->
@@ -42,6 +47,8 @@ data class Site(
     val isPlayable: Boolean get() = unavailableReason == null
 
     companion object {
+        private fun isJavaScriptApi(api: String): Boolean =
+            api.substringBefore('?').substringBefore('#').substringAfterLast('.').lowercase() in setOf("js", "mjs")
         /** 配置根级 `spider` 字段：`"https://x.jar;md5;hash"` 或 `{"jar": "..."}`。 */
         /** 原样返回根级 `spider`（可能带 `;md5;hash`），拆分交给 [splitJarSpec]。 */
         fun spiderJar(root: JSONObject): String {
@@ -55,19 +62,14 @@ data class Site(
 
         /** `https://x/tv/x.jpg;md5;abc` → (url, hash)。省略写法 `url;abc` 也认。 */
         fun splitJarSpec(raw: String): Pair<String, String> {
-            val t = raw.trim()
-            if (t.isEmpty()) return "" to ""
-            val parts = t.split(';').map { it.trim() }
-            if (parts.size >= 3 && parts[1].equals("md5", ignoreCase = true)) return parts[0] to parts[2]
-            if (parts.size == 2 && parts[1].length == 32 && parts[1].all { it.isLetterOrDigit() }) return parts[0] to parts[1]
-            return t to ""
+            return PluginArtifact.split(raw)
         }
 
         fun fromJson(o: JSONObject, origin: String, fallbackJar: String = ""): Site {
             val api = o.optString("api", "").trim()
             val type = when {
                 o.has("type") -> o.optInt("type", 0)
-                api.startsWith("csp_") || api.endsWith(".js") || api.endsWith(".py") -> 3
+                api.startsWith("csp_") || isJavaScriptApi(api) || api.endsWith(".py") -> 3
                 else -> 0
             }
             val rawJar = o.optString("jar", "").trim().ifBlank { fallbackJar }
@@ -80,12 +82,19 @@ data class Site(
                 ext = o.optString("ext", ""),
                 jar = jarUrl,
                 jarHash = jarHash,
-                searchable = o.optBoolean("searchable", true),
-                quickSearch = o.optBoolean("quickSearch", true),
-                filterable = o.optBoolean("filter", false),
+                searchable = flag(o, "searchable", true),
+                quickSearch = flag(o, "quickSearch", true),
+                filterable = flag(o, "filter", false),
                 headers = jsonToHeaders(o.optJSONObject("headers")),
                 origin = origin
             )
+        }
+
+        private fun flag(o: JSONObject, key: String, default: Boolean): Boolean = when (val v = o.opt(key)) {
+            is Boolean -> v
+            is Number -> v.toInt() != 0
+            is String -> when (v.lowercase()) { "0", "false" -> false; "1", "true" -> true; else -> default }
+            else -> default
         }
 
         private fun jsonToHeaders(o: JSONObject?): Map<String, String> {

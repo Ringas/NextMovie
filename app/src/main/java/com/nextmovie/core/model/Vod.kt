@@ -18,6 +18,8 @@ data class Vod(
     val score: String = "",
     /** 横版背景图（B站剧照 / 源站自带），16:9 用 */
     val backdrop: String = "",
+    val tag: String = "",
+    val action: String = "",
     /** TMDB 补充信息，未命中的源保持 null */
     val tmdb: TmdbMeta? = null
 ) {
@@ -83,7 +85,9 @@ object VodParser {
             // 简介字段各家不统一：CMS 用 vod_content，老 spider 用 des，Guard 系插件常见 vod_blurb。
             // 少认一个键，详情页就整段空白，所以这里全部兜一遍。
             content = text(o, "vod_content", "vod_blurb", "vod_desc", "des", "content", "brief"),
-            score = text(o, "vod_score", "score")
+            score = text(o, "vod_score", "score"),
+            tag = text(o, "vod_tag", "tag"),
+            action = text(o, "action")
         )
     }
 
@@ -153,6 +157,8 @@ object VodParser {
                     .put("vod_actor", v.actor)
                     .put("vod_director", v.director)
                     .put("vod_content", v.content)
+                    .put("vod_tag", v.tag)
+                    .put("action", v.action)
             )
         }
         return JSONObject().put("list", arr)

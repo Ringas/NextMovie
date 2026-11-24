@@ -17,6 +17,12 @@ open class Spider {
     @JvmField
     var siteKey: String = ""
 
+    open fun getActivity(): android.app.Activity? = com.nextmovie.core.spider.PluginDialogs.current()
+
+    open fun dialog(options: org.json.JSONObject): org.json.JSONObject? = com.nextmovie.core.spider.PluginDialogs.show(this, options)
+
+    fun closeDialog() { com.nextmovie.core.spider.PluginDialogs.close(this) }
+
     open fun init(context: Context?, extend: String?) {}
 
     open fun init(context: Context?) = init(context, null)

@@ -1,0 +1,28 @@
+{
+  "sites": [
+    {
+      "key": "module",
+      "name": "ES module",
+      "api": "./plugin.mjs?v=1",
+      "ext": "fixture"
+    },
+    {
+      "key": "legacy",
+      "name": "Legacy JS",
+      "api": "./legacy.js?v=1",
+      "ext": "fixture"
+    },
+    {
+      "key": "async-module",
+      "name": "async-module",
+      "api": "./async-plugin.mjs?v=1",
+      "ext": "fixture"
+    },
+    {
+      "key": "async-legacy",
+      "name": "async-legacy",
+      "api": "./async-legacy.js?v=1",
+      "ext": "fixture"
+    }
+  ]
+}

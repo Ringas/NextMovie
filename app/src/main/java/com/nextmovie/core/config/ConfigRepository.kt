@@ -21,13 +21,23 @@ class ConfigRepository(private val http: Http) {
 
     var lastResolvedUrl: String = ""
 
+    suspend fun loadText(text: String): ConfigBundle = withContext(Dispatchers.IO) {
+        val root = JSONObject(ConfigDecoder.sanitizeJson(text))
+        val sites = ArrayList<Site>()
+        val parses = ArrayList<Parse>()
+        collect(root, "", 0, sites, Site.spiderJar(root), parses)
+        if (sites.isEmpty()) throw ConfigError("JSON 中没有来源")
+        ConfigBundle(sites.distinctBy { it.runtimeKey }, parses.distinctBy { it.url })
+    }
+
     suspend fun load(url: String): ConfigBundle = withContext(Dispatchers.IO) {
         val root = fetchRoot(url, depth = 0)
         lastResolvedUrl = root.second
         val sites = ArrayList<Site>()
-        collect(root.first, root.second, 0, sites, Site.spiderJar(root.first))
+        val parses = ArrayList<Parse>()
+        collect(root.first, root.second, 0, sites, Site.spiderJar(root.first), parses)
         if (sites.isEmpty()) throw ConfigError("配置里没有可用站点：$url")
-        ConfigBundle(sites)
+        ConfigBundle(sites.distinctBy { it.runtimeKey }, parses.distinctBy { it.url })
     }
 
     /** 不少源站按 UA 分流：okhttp 系给配置，浏览器 UA 给网页；逐个试。 */
@@ -116,7 +126,8 @@ class ConfigRepository(private val http: Http) {
         origin: String,
         depth: Int,
         out: MutableList<Site>,
-        parentJar: String
+        parentJar: String,
+        parses: MutableList<Parse>
     ) {
         val jar = Site.spiderJar(root).ifBlank { parentJar }
         if (Warehouse.isCatalog(root)) {
@@ -130,13 +141,15 @@ class ConfigRepository(private val http: Http) {
                 ) {
                     continue
                 }
-                runCatching { collect(child.first, child.second, depth + 1, out, jar) }
+                runCatching { collect(child.first, child.second, depth + 1, out, jar, parses) }
                     .onFailure { /* 单个子仓失败不影响其它仓 */ }
                 android.util.Log.d("NextMovie", "depot loaded: $name -> $resolved")
             }
             return
         }
-        out += ConfigBundle.fromJson(root, origin, jar).sites
+        val bundle = ConfigBundle.fromJson(root, origin, jar)
+        out += bundle.sites
+        parses += bundle.parses
     }
 
     private fun resolve(origin: String, target: String): String? {

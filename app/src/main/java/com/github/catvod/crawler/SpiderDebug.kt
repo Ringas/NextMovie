@@ -16,6 +16,9 @@ object SpiderDebug {
     private const val TAG = "NextMovie/Spider"
 
     @JvmStatic
+    fun log(error: Throwable?): Unit { Log.e(TAG, error?.message.orEmpty(), error) }
+
+    @JvmStatic
     fun log(msg: String?): Unit { Log.d(TAG, msg.orEmpty()) }
 
     @JvmStatic
