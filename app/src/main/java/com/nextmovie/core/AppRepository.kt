@@ -387,15 +387,32 @@ class AppRepository(private val context: Context) {
         // Native plugins may wait for the user to complete a login dialog.
         val raw = (if (site.isCms) PlayResult(episodeUrl) else spiderHost.play(site, flag, episodeUrl))
             ?: return null
-        if (raw.parse == 0 && (!SharePageResolver.looksLikePage(raw.url) ||
-            runCatching { java.net.URI(raw.url).host in listOf("127.0.0.1", "localhost") }.getOrDefault(false))) return raw
+        // 部分插件把地址包进自己的本地代理（127.0.0.1:端口），但宿主环境里那个端口可能根本没起来
+        // （此时端口是 -1 / 0），ExoPlayer 只会报 Malformed URL。这里把内层真实地址取出来直接用。
+        fun unwrapLocalProxy(url: String): String {
+            // 端口可能是 -1，「java.net.URI」会直接判定非法，所以这里按字符串解析
+            val m = Regex("^https?://(127\\.0\\.0\\.1|localhost|\\[::1\\]):(-?\\d+)/").find(url) ?: return url
+            if ((m.groupValues[2].toIntOrNull() ?: -1) > 0) return url
+            val query = url.substringAfter('?', "")
+            if (query.isBlank()) return url
+            val target = query.split('&')
+                .firstOrNull { it.substringBefore('=') == "url" }?.substringAfter('=', "")
+                ?.takeIf { it.isNotBlank() } ?: return url
+            val decoded = runCatching { java.net.URLDecoder.decode(target, "UTF-8") }.getOrDefault(target)
+            return if (decoded.startsWith("http")) decoded else url
+        }
+        val usable = raw.copy(url = unwrapLocalProxy(raw.url))
+        android.util.Log.d("NextMoviePlay", "raw-url=<${raw.url}> usable=<${usable.url}> parse=${raw.parse} flag=$flag")
+        val rawFixed = usable
+        if (rawFixed.parse == 0 && (!SharePageResolver.looksLikePage(rawFixed.url) ||
+            runCatching { java.net.URI(rawFixed.url).host in listOf("127.0.0.1", "localhost") }.getOrDefault(false))) return rawFixed
         onStage("正在解析网页播放地址…")
         return withTimeoutOrNull(18_000) {
-            if (site.isCms || raw.parse != 0) {
-                withTimeoutOrNull(4_000) { SharePageResolver.resolve(http, raw.url, raw.headers) }
-                    ?.let { return@withTimeoutOrNull PlayResult(it, raw.headers) }
+            if (site.isCms || rawFixed.parse != 0) {
+                withTimeoutOrNull(4_000) { SharePageResolver.resolve(http, rawFixed.url, rawFixed.headers) }
+                    ?.let { return@withTimeoutOrNull PlayResult(it, rawFixed.headers) }
             }
-            if (raw.parse == 0) return@withTimeoutOrNull raw
+            if (rawFixed.parse == 0) return@withTimeoutOrNull rawFixed
             withTimeoutOrNull(6_000) {
                 com.nextmovie.core.net.WebPlaybackResolver.resolve(context, raw.url, raw.headers)
             }?.let { return@withTimeoutOrNull it }

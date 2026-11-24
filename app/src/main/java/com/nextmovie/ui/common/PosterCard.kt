@@ -1,19 +1,20 @@
 package com.nextmovie.ui.common
 
-import com.nextmovie.ui.common.mouseFocusable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import com.nextmovie.ui.common.tvClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -29,6 +30,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -37,29 +39,9 @@ import com.nextmovie.core.model.Vod
 import com.nextmovie.ui.theme.Tokens
 
 /**
- * 海报卡：聚焦放大 + 金色描边 + 标题浮现。
- * 图片优先 TMDB 海报，缺失时回退源站 vod_pic（由 Vod.displayPic 统一处理）。
+ * 海报卡：6dp 图片圆角 + 聚焦琥珀描边 + 外发光 + 1.035 轻推。
+ * 只有卡片本身会发光，片名是静态文字，不参与焦点。
  */
-/** 缺图占位：渐变底 + 片名首字，比一块纯灰更像"设计过"。 */
-@Composable
-private fun PosterPlaceholder(name: String, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier.background(
-            Brush.linearGradient(
-                0f to Color(0xFF2A2E3A),
-                1f to Color(0xFF14161C)
-            )
-        ),
-        contentAlignment = Alignment.Center
-    ) {
-        androidx.compose.material3.Text(
-            text = name.take(1),
-            color = Tokens.AccentDim,
-            style = androidx.compose.material3.MaterialTheme.typography.displaySmall
-        )
-    }
-}
-
 @Composable
 fun PosterCard(
     vod: Vod,
@@ -78,6 +60,7 @@ fun PosterCard(
         animationSpec = tween(Tokens.MotionMs, easing = FastOutSlowInEasing),
         label = "posterScale"
     )
+    val shape = RoundedCornerShape(Tokens.Radius)
 
     Column(
         modifier = modifier
@@ -91,20 +74,20 @@ fun PosterCard(
                 focused = it.isFocused
                 if (it.isFocused) onFocused()
             }
-            .tvClickable { onClick() },
-        horizontalAlignment = Alignment.CenterHorizontally
+            .tvClickable(onClick = onClick, corner = Tokens.Radius, showRing = false)
     ) {
         Box(
             modifier = Modifier
                 .width(width)
                 .height(height)
-                .clip(RoundedCornerShape(Tokens.Radius))
+                .clip(shape)
                 .background(Tokens.SurfaceHigh)
                 .border(
                     width = if (focused) 2.dp else 1.dp,
                     color = if (focused) Tokens.Accent else Tokens.Stroke,
-                    shape = RoundedCornerShape(Tokens.Radius)
+                    shape = shape
                 )
+                .tvFocusRing(corner = Tokens.Radius, visible = focused)
         ) {
             if (vod.displayPic.isBlank() || imageFailed) {
                 PosterPlaceholder(name = vod.name, modifier = Modifier.fillMaxSize())
@@ -117,29 +100,59 @@ fun PosterCard(
                     modifier = Modifier.fillMaxSize()
                 )
             }
+            // 底部压暗，保证角标与片名在亮海报上也读得清
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Brush.verticalGradient(0.55f to Color.Transparent, 1f to Color(0xE60B0C10)))
+            )
             if (vod.remark.isNotBlank()) {
                 Text(
                     text = vod.remark,
-                    color = Tokens.Text,
-                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                    color = if (focused) Tokens.OnAccent else Tokens.Text,
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
-                        .align(Alignment.BottomEnd)
+                        .align(Alignment.TopEnd)
                         .padding(6.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(Color(0x99000000))
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .clip(RoundedCornerShape(Tokens.Corner.badge))
+                        .background(if (focused) Tokens.Accent else Color(0xCC0B0C10))
+                        .padding(horizontal = 5.dp, vertical = 2.dp)
                 )
             }
+            // 片名压在图上：电视墙只给一行的高度，与其把名字挤到画面外，不如贴在封面底部
+            Text(
+                text = vod.name,
+                color = Tokens.Text,
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .padding(start = 8.dp, end = 8.dp, bottom = 7.dp)
+            )
         }
+    }
+}
+
+/** 缺图占位：渐变底 + 片名首字，比一块纯灰更像"设计过"。 */
+@Composable
+private fun PosterPlaceholder(name: String, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier.background(
+            Brush.linearGradient(
+                0f to Color(0xFF23262E),
+                1f to Color(0xFF121419)
+            )
+        ),
+        contentAlignment = Alignment.Center
+    ) {
         Text(
-            text = vod.name,
-            color = if (focused) Tokens.Text else Tokens.TextDim,
-            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(top = 8.dp)
+            text = name.take(1),
+            color = Tokens.AccentDim.copy(alpha = 0.9f),
+            style = MaterialTheme.typography.displaySmall
         )
     }
 }

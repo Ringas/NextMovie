@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -63,6 +64,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import coil.compose.AsyncImage
 import com.nextmovie.core.AppRepository
@@ -103,6 +105,8 @@ fun HomeScreen(
     /** 异步补图结果，按 id 归并；渲染时再和 vods 合并，避免并发写丢更新 */
     var enrichedById by remember { mutableStateOf<Map<String, Vod>>(emptyMap()) }
     var heroId by remember { mutableStateOf<String?>(null) }
+    // Hero 需要年份/地区/简介才立得住：列表接口常常只有片名和评分，这里补一次详情元信息
+    var heroMeta by remember { mutableStateOf<Vod?>(null) }
     var continueList by remember { mutableStateOf<List<HistoryEntry>>(emptyList()) }
     val requested = remember { mutableSetOf<String>() }
     val context = LocalContext.current
@@ -181,7 +185,7 @@ fun HomeScreen(
         // 否则会把刚固定住的 Hero 顶出去、滚动区自己滑到底。
         if (vods.isEmpty()) return@LaunchedEffect
         val target = initialFocusIndex.coerceIn(0, vods.lastIndex)
-        if (target > 0) runCatching { rowState.scrollToItem(target + 2 + if (tab == 0 && continueList.isNotEmpty()) 1 else 0) }
+        if (target > 0) runCatching { rowState.scrollToItem(target + 1 + if (tab == 0 && continueList.isNotEmpty()) 1 else 0) }
         delay(100)
         runCatching { posterFocus.getOrNull(target)?.requestFocus() }
     }
@@ -217,12 +221,18 @@ fun HomeScreen(
     }
 
     val display = remember(vods, enrichedById) { vods.map { enrichedById[it.id] ?: it } }
-    val hero = display.firstOrNull { it.id == heroId } ?: display.firstOrNull()
+    val heroBase = display.firstOrNull { it.id == heroId } ?: display.firstOrNull()
+    val hero = heroMeta?.takeIf { it.id == heroBase?.id } ?: heroBase
     // Debounce navigation; never prefetch an entire wall or resolve playback/login speculatively.
-    LaunchedEffect(site.runtimeKey, heroId, cats) {
-        val focused = display.firstOrNull { it.id == heroId } ?: return@LaunchedEffect
+    LaunchedEffect(site.runtimeKey, heroBase?.id, cats) {
+        val focused = heroBase ?: return@LaunchedEffect
         delay(700)
         repo.prefetchDetail(site, focused)
+        if (focused.displayOverview.isBlank() || focused.displayYear.isBlank()) {
+            val detail = runCatching { repo.detail(site, focused.id, focused.name) }.getOrNull()
+            val vod = detail?.vod
+            if (vod != null && vod.id == focused.id) heroMeta = vod
+        }
     }
     val backdrop = hero?.displayBackdrop.orEmpty()
     LaunchedEffect(display.isNotEmpty()) {
@@ -254,7 +264,7 @@ fun HomeScreen(
                     Brush.verticalGradient(
                         0f to Tokens.ScrimTop,
                         0.42f to Color.Transparent,
-                        0.70f to Color(0xB3000000),
+                        0.68f to Color(0xCC0B0C10),
                         1f to Tokens.Bg
                     )
                 )
@@ -266,31 +276,37 @@ fun HomeScreen(
                 .fillMaxSize()
                 .background(
                     Brush.horizontalGradient(
-                        0f to Color(0xD907080B),
-                        0.42f to Color(0x6607080B),
-                        0.72f to Color.Transparent
+                        0f to Color(0xF20B0C10),
+                        0.42f to Color(0xB30B0C10),
+                        0.76f to Color.Transparent
                     )
                 )
         )
 
-        Column(modifier = Modifier.fillMaxSize().padding(Tokens.ScreenPadding)) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 40.dp, vertical = 24.dp)
+        ) {
             TopBar(site = site, status = repo.configStatus(), onSearch = onSearch, onOpenSettings = onOpenSettings)
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(10.dp))
+            if (hero != null) {
+                HeroPanel(hero, onOpen = { onOpenDetail(hero) }, onSearch = onSearch)
+                Spacer(Modifier.height(10.dp))
+            }
+            if (cats.isNotEmpty()) {
+                CategoryTabs(cats, tab) { selected ->
+                    tab = selected; onTabChanged(selected)
+                }
+                Spacer(Modifier.height(10.dp))
+            }
             LazyVerticalGrid(
                 columns = GridCells.Fixed(gridColumns), state = rowState,
-                horizontalArrangement = Arrangement.spacedBy(18.dp),
-                verticalArrangement = Arrangement.spacedBy(18.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
                 modifier = Modifier.fillMaxWidth().weight(1f).onSizeChanged { gridColumns = TvGridNavigation.columns(it.width / density) }.mouseWheel(rowState)
             ) {
-                item(key = "intro", span = { GridItemSpan(maxLineSpan) }) {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        if (hero != null) Text(hero.name, color = Tokens.Text, style = MaterialTheme.typography.headlineMedium, maxLines = 1)
-                        if (cats.isNotEmpty()) CategoryTabs(cats, tab) { selected ->
-                            tab = selected; onTabChanged(selected)
-                        }
-                    }
-                }
                 if (loading || error != null || site.unavailableReason != null || display.isEmpty()) {
                     item(key = "state", span = { GridItemSpan(maxLineSpan) }) {
                         when {
@@ -305,7 +321,7 @@ fun HomeScreen(
                         item(key = "continue", span = { GridItemSpan(maxLineSpan) }) {
                             Column {
                                 SectionTitle("继续观看")
-                                Spacer(Modifier.height(12.dp))
+                                Spacer(Modifier.height(8.dp))
                                 LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                                     items(continueList, key = { it.key }) { entry -> ContinueCard(entry, { onResume(entry) }) }
                                 }
@@ -325,7 +341,7 @@ fun HomeScreen(
                                 val target = TvGridNavigation.target(index, gridColumns, display.size, key)
                                 if (target == null) false else {
                                     if (target != index) scope.launch {
-                                        val gridIndex = target + 2 + if (tab == 0 && continueList.isNotEmpty()) 1 else 0
+                                        val gridIndex = target + 1 + if (tab == 0 && continueList.isNotEmpty()) 1 else 0
                                         if (rowState.layoutInfo.visibleItemsInfo.none { it.index == gridIndex }) {
                                             rowState.scrollToItem(gridIndex)
                                             delay(60)
@@ -351,69 +367,104 @@ private fun TopBar(
     onOpenSettings: () -> Unit
 ) {
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            text = "Next Movie",
-            color = Tokens.Accent,
-            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
-            modifier = Modifier.width(160.dp)
-        )
-        Text(
-            text = site.name,
-            color = Tokens.TextDim,
-            style = MaterialTheme.typography.bodyMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier
-                .weight(1f)
-                .tvClickable { onOpenSettings() }
-                .padding(vertical = 8.dp)
-        )
-        status?.let {
+        Row(verticalAlignment = Alignment.Bottom) {
             Text(
-                text = it.text,
-                color = if (it.ok) Tokens.Accent else Color(0xFFE06C75),
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.widthIn(max = 360.dp).padding(horizontal = 12.dp)
+                text = "NEXT MOVIE",
+                color = Tokens.Text,
+                style = MaterialTheme.typography.titleLarge.copy(
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 3.sp
+                )
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "HOST",
+                color = Tokens.Accent,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = Tokens.Type.micro,
+                    letterSpacing = Tokens.Type.MICRO_TRACK.sp
+                ),
+                modifier = Modifier.padding(bottom = 3.dp)
             )
         }
-        Text(
-            text = "搜索",
-            color = Tokens.Text,
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.tvClickable { onSearch() }.padding(8.dp)
-        )
-        Spacer(Modifier.width(12.dp))
-        Text(
-            text = "设置",
-            color = Tokens.Text,
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.tvClickable { onOpenSettings() }.padding(8.dp)
-        )
+        Spacer(Modifier.width(32.dp))
+        NavPill("推荐", active = true, onClick = {})
+        Spacer(Modifier.width(6.dp))
+        NavPill("搜索", active = false, onClick = onSearch)
+        Spacer(Modifier.width(6.dp))
+        NavPill("设置", active = false, onClick = onOpenSettings)
+        Spacer(Modifier.weight(1f))
+        status?.let {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(Tokens.Corner.pill))
+                    .background(Tokens.Surface)
+                    .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Box(
+                    Modifier
+                        .size(6.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(if (it.ok) Tokens.Accent else Tokens.Danger)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = it.text,
+                    color = if (it.ok) Tokens.TextDim else Tokens.Danger,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 300.dp)
+                )
+            }
+            Spacer(Modifier.width(16.dp))
+        }
     }
 }
 
 @Composable
-private fun HeroInfo(vod: Vod?, onOpen: (Vod) -> Unit) {
-    if (vod == null) return
-    Column(modifier = Modifier.fillMaxWidth(0.55f)) {
+private fun NavPill(text: String, active: Boolean, onClick: () -> Unit) {
+    Text(
+        text = text,
+        color = if (active) Tokens.Text else Tokens.TextDim,
+        style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier
+            .clip(RoundedCornerShape(Tokens.Corner.pill))
+            .background(if (active) Tokens.SurfaceHigh else Color.Transparent)
+            .tvClickable(onClick = onClick, corner = Tokens.Corner.pill)
+            .padding(horizontal = 18.dp, vertical = 9.dp)
+    )
+}
+
+/**
+ * Hero 信息区：片名 + 元信息 + 两行简介 + 主次操作。
+ * 背景是当前焦点影片的剧照，这里只负责把「这是哪部片、能不能看」讲清楚。
+ */
+@Composable
+private fun HeroPanel(vod: Vod, onOpen: () -> Unit, onSearch: () -> Unit) {
+    Column(modifier = Modifier.fillMaxWidth(0.56f)) {
         Text(
             text = vod.name,
             color = Tokens.Text,
-            style = MaterialTheme.typography.displaySmall.copy(fontSize = Tokens.Type.hero),
+            style = MaterialTheme.typography.displaySmall.copy(fontSize = 30.sp),
             maxLines = 2,
-            overflow = TextOverflow.Ellipsis
+            overflow = TextOverflow.Ellipsis,
+            lineHeight = 40.sp
         )
         val meta = listOf(vod.displayYear, vod.area, vod.typeName, vod.remark)
             .filter { it.isNotBlank() }
+            .distinct()
             .joinToString("  ·  ")
         if (meta.isNotBlank()) {
             Text(
                 text = meta,
-                color = Tokens.TextDim,
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.padding(top = 8.dp)
+                color = Tokens.Accent,
+                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.4.sp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 10.dp)
             )
         }
         val overview = vod.displayOverview
@@ -424,15 +475,14 @@ private fun HeroInfo(vod: Vod?, onOpen: (Vod) -> Unit) {
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 10.dp)
+                modifier = Modifier.padding(top = 8.dp)
             )
         }
-
         Spacer(Modifier.height(Tokens.Gap.m))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            HeroButton("▶  播放", primary = true) { onOpen(vod) }
+            HeroButton("查看详情", primary = true, onClick = onOpen)
             Spacer(Modifier.width(Tokens.Gap.m))
-            HeroButton("详情") { onOpen(vod) }
+            HeroButton("搜索", primary = false, onClick = onSearch)
         }
     }
 }
@@ -445,14 +495,14 @@ private fun HeroInfo(vod: Vod?, onOpen: (Vod) -> Unit) {
 private fun HeroButton(text: String, primary: Boolean = false, onClick: () -> Unit) {
     val bg = if (primary) Tokens.Accent else Color.Transparent
     val fg = if (primary) Tokens.OnAccent else Tokens.Text
-    val shape = RoundedCornerShape(Tokens.Corner.badge)
+    val shape = RoundedCornerShape(Tokens.Corner.pill)
     Box(
         modifier = Modifier
             .clip(shape)
             .background(bg)
-            .then(if (primary) Modifier else Modifier.border(1.dp, Tokens.Stroke, shape))
-            .tvClickable { onClick() }
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .then(if (primary) Modifier else Modifier.border(1.dp, Tokens.StrokeStrong, shape))
+            .tvClickable(onClick = onClick, corner = Tokens.Corner.pill, scaleOnFocus = 1.03f)
+            .padding(horizontal = 22.dp, vertical = 10.dp)
     ) {
         Text(text, color = fg, style = MaterialTheme.typography.labelLarge)
     }
@@ -464,10 +514,19 @@ private fun SectionTitle(text: String, trailing: String? = null, onPage: ((Int) 
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.Bottom
     ) {
+        Box(
+            Modifier
+                .size(width = 2.dp, height = 14.dp)
+                .background(Tokens.Accent)
+        )
+        Spacer(Modifier.width(9.dp))
         Text(
             text = text,
             color = Tokens.Text,
-            style = MaterialTheme.typography.titleLarge.copy(fontSize = Tokens.Type.section)
+            style = MaterialTheme.typography.titleLarge.copy(
+                fontSize = Tokens.Type.section,
+                letterSpacing = 0.4.sp
+            )
         )
         if (trailing != null) {
             Spacer(Modifier.width(Tokens.Gap.s))
@@ -524,12 +583,14 @@ private fun CategoryTabs(
 
 @Composable
 private fun TabChip(text: String, active: Boolean, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(Tokens.Corner.pill)
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(Tokens.Corner.badge))
+            .clip(shape)
             .background(if (active) Tokens.Accent else Tokens.Surface)
-            .tvClickable { onClick() }
-            .padding(horizontal = 14.dp, vertical = 7.dp)
+            .then(if (active) Modifier else Modifier.border(1.dp, Tokens.Stroke, shape))
+            .tvClickable(onClick = onClick, corner = Tokens.Corner.pill)
+            .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
         Text(
             text = text,
@@ -611,32 +672,44 @@ private fun ErrorBlock(
     onRetry: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
-    Column {
-        Text(title, color = Tokens.Text, style = MaterialTheme.typography.titleMedium)
+    Column(
+        modifier = Modifier
+            .widthIn(max = 860.dp)
+            .clip(RoundedCornerShape(Tokens.Corner.panel))
+            .background(Tokens.Surface)
+            .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.panel))
+            .padding(horizontal = 24.dp, vertical = 20.dp)
+    ) {
+        Text(title, color = Tokens.Text, style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(8.dp))
         Text(
             text = message,
             color = Tokens.TextDim,
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.bodyMedium,
             maxLines = 6,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.widthIn(max = 780.dp)
+            overflow = TextOverflow.Ellipsis
         )
         Spacer(Modifier.height(16.dp))
         Row {
-            Text(
-                text = "重试",
-                color = Tokens.Accent,
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.tvClickable { onRetry() }.padding(vertical = 8.dp, horizontal = 12.dp)
-            )
-            Spacer(Modifier.width(16.dp))
-            Text(
-                text = "换站点 / 改配置",
-                color = Tokens.Accent,
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.tvClickable { onOpenSettings() }.padding(vertical = 8.dp, horizontal = 12.dp)
-            )
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(Tokens.Corner.pill))
+                    .background(Tokens.Accent)
+                    .tvClickable(onClick = onRetry, corner = Tokens.Corner.pill)
+                    .padding(horizontal = 22.dp, vertical = 10.dp)
+            ) {
+                Text("重试", color = Tokens.OnAccent, style = MaterialTheme.typography.labelLarge)
+            }
+            Spacer(Modifier.width(12.dp))
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(Tokens.Corner.pill))
+                    .border(1.dp, Tokens.StrokeStrong, RoundedCornerShape(Tokens.Corner.pill))
+                    .tvClickable(onClick = onOpenSettings, corner = Tokens.Corner.pill)
+                    .padding(horizontal = 22.dp, vertical = 10.dp)
+            ) {
+                Text("换站点 / 改配置", color = Tokens.Text, style = MaterialTheme.typography.labelLarge)
+            }
         }
     }
 }

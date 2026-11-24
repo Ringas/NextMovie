@@ -2,7 +2,7 @@ package com.nextmovie.ui.common
 
 /** Explicit row/column navigation; virtualized grids must not jump to column zero on Down. */
 object TvGridNavigation {
-    fun columns(widthDp: Float): Int = ((widthDp - 16f + 18f) / (148f + 18f)).toInt().coerceAtLeast(1)
+    fun columns(widthDp: Float): Int = ((widthDp + 16f) / (128f + 16f)).toInt().coerceAtLeast(1)
     fun target(index: Int, columns: Int, count: Int, keyCode: Int): Int? {
         if (count <= 0 || columns <= 0) return null
         return when (keyCode) {

@@ -2,6 +2,7 @@ package com.nextmovie.ui.search
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.ui.draw.clip
 import com.nextmovie.ui.common.tvClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -52,6 +53,7 @@ import kotlinx.coroutines.launch
  * 1) 一个可聚焦输入框（外接键盘 / 电视输入法可用）；
  * 2) 一套自绘九宫格键盘，纯遥控器也能把英文片名敲出来。
  */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun SearchScreen(
     repo: AppRepository,
@@ -60,6 +62,10 @@ fun SearchScreen(
     onBack: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
+    // 电视/盒子上系统输入法会整屏盖住自绘键盘，聚焦时主动收起；外接键盘不受影响
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    // 当前源不支持搜索时，允许在这一页直接挑一个可搜索的源，不用先回设置换源
+    var activeSite by remember(site.runtimeKey) { mutableStateOf(site) }
     var keyword by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<Vod>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
@@ -73,7 +79,7 @@ fun SearchScreen(
         scope.launch {
             loading = true
             message = null
-            runCatching { repo.search(site, query) }
+            runCatching { repo.search(activeSite, query) }
                 .onSuccess { list ->
                     results = repo.prepareForList(list)
                     if (list.isEmpty()) message = "没有搜到「$query」，换个片名试试"
@@ -108,60 +114,131 @@ fun SearchScreen(
                 }
             }
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(verticalAlignment = Alignment.Bottom) {
             Text(
-                text = "返回",
+                text = "NEXT MOVIE",
+                color = Tokens.Text,
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold, letterSpacing = 3.sp)
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "SEARCH",
+                color = Tokens.Accent,
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro, letterSpacing = Tokens.Type.MICRO_TRACK.sp),
+                modifier = Modifier.padding(bottom = 2.dp)
+            )
+            Spacer(Modifier.width(22.dp))
+            Text(
+                text = "‹ 返回",
                 color = Tokens.TextDim,
                 style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.tvClickable { onBack() }.padding(8.dp)
+                modifier = Modifier
+                    .clip(RoundedCornerShape(Tokens.Corner.pill))
+                    .background(Tokens.Surface)
+                    .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
+                    .tvClickable(onClick = onBack, corner = Tokens.Corner.pill)
+                    .padding(horizontal = 14.dp, vertical = 7.dp)
             )
-            Spacer(Modifier.width(16.dp))
+            Spacer(Modifier.weight(1f))
             Text(
-                text = "搜索 · ${site.name}",
-                color = Tokens.Text,
-                style = MaterialTheme.typography.headlineSmall
+                text = "当前源 · ${activeSite.name}",
+                color = Tokens.TextFaint,
+                style = MaterialTheme.typography.labelSmall
             )
         }
 
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(18.dp))
+        Text(
+            text = "搜索",
+            color = Tokens.Text,
+            fontSize = Tokens.Type.display,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(Modifier.height(14.dp))
 
-        if (!site.searchable) {
+        if (!activeSite.searchable) {
             Text(
-                text = "这个源没有开启搜索（配置里 searchable=0）",
+                text = "「${activeSite.name}」没有开启搜索，先挑一个可搜索的来源：",
                 color = Tokens.TextDim,
-                style = MaterialTheme.typography.bodyLarge
+                style = MaterialTheme.typography.bodyMedium
             )
+            Spacer(Modifier.height(16.dp))
+            val candidates = repo.sites.filter { it.searchable }.take(6)
+            if (candidates.isEmpty()) {
+                Text(
+                    text = "这份配置里没有可搜索的来源（searchable=0），去设置里换一份配置吧",
+                    color = Tokens.TextFaint,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            } else {
+                androidx.compose.foundation.layout.FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxWidth(0.9f)
+                ) {
+                    candidates.forEach { candidate ->
+                        Text(
+                            text = candidate.name,
+                            color = Tokens.Text,
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(Tokens.Corner.pill))
+                                .background(Tokens.Surface)
+                                .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
+                                .tvClickable(corner = Tokens.Corner.pill) { activeSite = candidate }
+                                .padding(horizontal = 16.dp, vertical = 9.dp)
+                        )
+                    }
+                }
+            }
             return@Column
         }
 
         // 输入框：给了输入法一条路，也给外接键盘一条路
-        Box(
+        val fieldShape = RoundedCornerShape(Tokens.Corner.card)
+        Row(
             modifier = Modifier
-                .fillMaxWidth(0.6f)
-                .height(52.dp)
-                .background(Tokens.Surface, RoundedCornerShape(10.dp))
-                .border(1.dp, Tokens.Stroke, RoundedCornerShape(10.dp))
-                .padding(horizontal = 16.dp),
-            contentAlignment = Alignment.CenterStart
+                .fillMaxWidth(0.62f)
+                .height(48.dp)
+                .clip(fieldShape)
+                .background(Tokens.Surface)
+                .border(if (fieldFocused) 2.dp else 1.dp, if (fieldFocused) Tokens.Accent else Tokens.Stroke, fieldShape)
+                .padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            if (keyword.isEmpty()) {
-                Text("输入片名", color = Tokens.TextDim, style = MaterialTheme.typography.bodyLarge)
+            Text("⌕", color = Tokens.Accent, style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.width(10.dp))
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                if (keyword.isEmpty()) {
+                    Text("输入片名，选中后按确认开始搜索", color = Tokens.TextFaint, style = MaterialTheme.typography.bodyMedium)
+                }
+                BasicTextField(
+                    value = keyword,
+                    onValueChange = { keyword = it },
+                    singleLine = true,
+                    textStyle = TextStyle(color = Tokens.Text, fontSize = 15.sp),
+                    cursorBrush = SolidColor(Tokens.Accent),
+                    modifier = Modifier.fillMaxWidth().onFocusChanged {
+                        fieldFocused = it.isFocused
+                        if (it.isFocused) keyboard?.hide()
+                    }
+                )
             }
-            BasicTextField(
-                value = keyword,
-                onValueChange = { keyword = it },
-                singleLine = true,
-                textStyle = TextStyle(color = Tokens.Text, fontSize = 18.sp),
-                cursorBrush = SolidColor(Tokens.Accent),
-                modifier = Modifier.fillMaxWidth().onFocusChanged { fieldFocused = it.isFocused }
-            )
+            if (keyword.isNotEmpty()) {
+                Text(
+                    text = "清空",
+                    color = Tokens.TextFaint,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.tvClickable(onClick = { keyword = "" }, corner = Tokens.Corner.pill).padding(8.dp)
+                )
+            }
         }
 
         Spacer(Modifier.height(6.dp))
         Text(
-            text = "方向键选择字符，确认键输入；也可使用系统输入法",
-            color = Tokens.TextDim,
-            style = MaterialTheme.typography.labelSmall
+            text = "方向键选字符 · OK 输入 · 也可用系统输入法直接打字",
+            color = Tokens.TextFaint,
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro)
         )
 
         Spacer(Modifier.height(16.dp))
@@ -177,7 +254,7 @@ fun SearchScreen(
 
         val msg = message
         if (loading) {
-            Text("正在搜索…", color = Tokens.TextDim, style = MaterialTheme.typography.bodyLarge)
+            Text("正在搜索…", color = Tokens.Accent, style = MaterialTheme.typography.bodyMedium)
         } else if (msg != null) {
             Text(msg, color = Tokens.TextDim, style = MaterialTheme.typography.bodyLarge)
         }
@@ -218,17 +295,17 @@ private fun Keypad(
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         rows.forEach { keys ->
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 keys.forEach { key ->
                     KeyCap(text = key, onClick = { onChar(key) })
                 }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            KeyCap(text = "空格", width = 150.dp, onClick = { onChar(" ") })
-            KeyCap(text = "删除", width = 110.dp, onClick = onBackspace)
-            KeyCap(text = "清空", width = 110.dp, onClick = onClear)
-            KeyCap(text = "搜索", width = 140.dp, accent = true, onClick = onSubmit)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            KeyCap(text = "空格", width = 190.dp, onClick = { onChar(" ") })
+            KeyCap(text = "删除", width = 120.dp, onClick = onBackspace)
+            KeyCap(text = "清空", width = 120.dp, onClick = onClear)
+            KeyCap(text = "搜索", width = 160.dp, accent = true, onClick = onSubmit)
         }
     }
 }
@@ -241,21 +318,20 @@ private fun KeyCap(
     onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(Tokens.Radius)
     Box(
         modifier = Modifier
             .width(width)
-            .height(48.dp)
+            .height(44.dp)
+            .clip(shape)
+            .background(if (accent) Tokens.AccentDim else Tokens.Surface)
             .border(
                 width = if (focused) 2.dp else 1.dp,
-                color = if (focused) Tokens.Accent else Tokens.Stroke,
-                shape = RoundedCornerShape(8.dp)
-            )
-            .background(
-                if (focused) Tokens.SurfaceHigh else if (accent) Tokens.Accent.copy(alpha = 0.18f) else Tokens.Surface,
-                RoundedCornerShape(8.dp)
+                color = if (focused) Tokens.Accent else if (accent) Tokens.Accent.copy(alpha = 0.45f) else Tokens.Stroke,
+                shape = shape
             )
             .onFocusChanged { focused = it.isFocused }
-            .tvClickable { onClick() },
+            .tvClickable(onClick = onClick, corner = Tokens.Radius, scaleOnFocus = 1.03f),
         contentAlignment = Alignment.Center
     ) {
         Text(

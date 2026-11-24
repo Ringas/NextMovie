@@ -33,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.nextmovie.core.AppRepository
 import com.nextmovie.core.config.Site
 import com.nextmovie.core.history.HistoryEntry
@@ -286,11 +287,24 @@ private fun AppRoot(repo: AppRepository) {
             if (booting) {
                 Box(modifier = Modifier.fillMaxSize().background(Tokens.Bg), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("正在载入数据源…", color = Tokens.Text, style = MaterialTheme.typography.titleMedium)
-                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            "NEXT MOVIE",
+                            color = Tokens.Text,
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                                letterSpacing = 4.sp
+                            )
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "正在载入数据源…",
+                            color = Tokens.Accent,
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                        Spacer(Modifier.height(12.dp))
                         Text(
                             "首次加载插件源需要下载并初始化插件，通常 10–40 秒",
-                            color = Tokens.TextDim,
+                            color = Tokens.TextFaint,
                             style = MaterialTheme.typography.labelSmall
                         )
                     }
@@ -372,11 +386,17 @@ private fun AppRoot(repo: AppRepository) {
     }
     if (resolving) {
         androidx.compose.ui.window.Dialog(onDismissRequest = { playJob?.cancel(); resolving = false }) {
-            Column(Modifier.clip(RoundedCornerShape(18.dp)).background(Tokens.Surface).padding(28.dp)) {
+            Column(
+                Modifier
+                    .clip(RoundedCornerShape(Tokens.Corner.panel))
+                    .background(Tokens.Surface)
+                    .padding(28.dp)
+            ) {
                 androidx.compose.material3.CircularProgressIndicator(color = Tokens.Accent)
                 Spacer(Modifier.height(16.dp))
-                Text(resolveStage, color = Tokens.Text)
-                Text("按返回取消", color = Tokens.TextDim)
+                Text(resolveStage, color = Tokens.Text, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(4.dp))
+                Text("按返回取消", color = Tokens.TextFaint, style = MaterialTheme.typography.labelSmall)
             }
         }
     }
@@ -394,9 +414,18 @@ private fun SetupHint(onOpenSettings: () -> Unit) {
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
-                text = "Next Movie",
+                text = "NEXT MOVIE",
+                color = Tokens.Text,
+                style = MaterialTheme.typography.titleLarge.copy(
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                    letterSpacing = 4.sp
+                )
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "HOST · 零内置源",
                 color = Tokens.Accent,
-                style = MaterialTheme.typography.displaySmall
+                style = MaterialTheme.typography.labelSmall
             )
             Spacer(Modifier.height(12.dp))
             Text(
@@ -407,18 +436,18 @@ private fun SetupHint(onOpenSettings: () -> Unit) {
             Spacer(Modifier.height(28.dp))
             Box(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(10.dp))
+                    .clip(RoundedCornerShape(Tokens.Corner.pill))
                     .background(Tokens.Accent)
                     .focusRequester(first)
-                    .tvClickable { onOpenSettings() }
-                    .padding(horizontal = 28.dp, vertical = 14.dp)
+                    .tvClickable(onClick = onOpenSettings, corner = Tokens.Corner.pill)
+                    .padding(horizontal = 32.dp, vertical = 14.dp)
             ) {
                 Text("导入配置", color = Tokens.OnAccent, style = MaterialTheme.typography.labelLarge)
             }
             Spacer(Modifier.height(20.dp))
             Text(
                 text = "本应用不提供影视资源，请使用你有权访问的配置。",
-                color = Tokens.TextDim,
+                color = Tokens.TextFaint,
                 style = MaterialTheme.typography.labelSmall
             )
         }

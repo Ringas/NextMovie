@@ -6,6 +6,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import kotlinx.coroutines.ensureActive
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import com.nextmovie.ui.common.tvClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -168,9 +169,9 @@ fun DetailScreen(
                 .fillMaxSize()
                 .background(
                     Brush.horizontalGradient(
-                        0f to Color(0xF207080B),
-                        0.42f to Color(0xC007080B),
-                        1f to Color(0x8A07080B)
+                        0f to Color(0xF20B0C10),
+                        0.45f to Color(0xC00B0C10),
+                        1f to Color(0x990B0C10)
                     )
                 )
         )
@@ -179,10 +180,10 @@ fun DetailScreen(
                 .fillMaxSize()
                 .background(
                     Brush.verticalGradient(
-                        0f to Color(0xE607080B),
+                        0f to Color(0xE60B0C10),
                         0.22f to Color.Transparent,
                         0.72f to Color.Transparent,
-                        1f to Color(0xF207080B)
+                        1f to Color(0xF20B0C10)
                     )
                 )
         )
@@ -193,21 +194,43 @@ fun DetailScreen(
                 .padding(horizontal = 44.dp, vertical = 26.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(
+                        text = "NEXT MOVIE",
+                        color = Tokens.Text,
+                        style = MaterialTheme.typography.titleSmall.copy(
+                            fontWeight = FontWeight.SemiBold,
+                            letterSpacing = 3.sp
+                        )
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "DETAIL",
+                        color = Tokens.Accent,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = Tokens.Type.micro,
+                            letterSpacing = Tokens.Type.MICRO_TRACK.sp
+                        ),
+                        modifier = Modifier.padding(bottom = 2.dp)
+                    )
+                }
+                Spacer(Modifier.width(24.dp))
                 Text(
                     text = "‹ 返回",
                     color = Tokens.TextDim,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0x1AFFFFFF))
+                        .clip(RoundedCornerShape(Tokens.Corner.pill))
+                        .background(Tokens.Surface)
+                        .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
                         .mouseFocusable()
-                        .tvClickable { onBack() }
-                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                        .tvClickable(onClick = onBack, corner = Tokens.Corner.pill)
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
                 )
                 Spacer(Modifier.weight(1f))
                 Text(
                     text = if (hit == null) site.name else "${active.name}  ·  ${lines.size} 条线路",
-                    color = Tokens.TextDim,
+                    color = Tokens.TextFaint,
                     style = MaterialTheme.typography.labelSmall
                 )
             }
@@ -221,8 +244,9 @@ fun DetailScreen(
                         modifier = Modifier
                             .width(192.dp)
                             .height(264.dp)
-                            .clip(RoundedCornerShape(Tokens.Corner.card))
+                            .clip(RoundedCornerShape(Tokens.Radius))
                             .background(Tokens.SurfaceHigh)
+                            .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Radius))
                     ) {
                         AsyncImage(
                             model = remember(vod.displayPic) { posterModel(context, vod.displayPic, detail = true) },
@@ -257,11 +281,11 @@ fun DetailScreen(
                     Text(
                         text = vod.name,
                         color = Tokens.Text,
-                        fontSize = 38.sp,
+                        fontSize = 36.sp,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
-                        lineHeight = 46.sp
+                        lineHeight = 44.sp
                     )
                     Spacer(Modifier.height(12.dp))
                     val chips = buildList {
@@ -344,25 +368,27 @@ fun DetailScreen(
 private fun MetaChip(text: String) {
     Text(
         text = text,
-        color = Tokens.Text,
-        fontSize = 16.sp,
+        color = Tokens.TextDim,
+        fontSize = Tokens.Type.badge,
         modifier = Modifier
-            .clip(RoundedCornerShape(999.dp))
+            .clip(RoundedCornerShape(Tokens.Corner.pill))
             .background(Tokens.Surface)
-            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
+            .padding(horizontal = 12.dp, vertical = 5.dp)
     )
 }
 
 @Composable
 private fun PrimaryButton(label: String, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(Tokens.Corner.pill)
     Box(
         modifier = modifier
             .fillMaxWidth()
             .height(52.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .clip(shape)
             .background(if (enabled) Tokens.Accent else Tokens.SurfaceHigh)
             .mouseFocusable()
-            .tvClickable(enabled = enabled) { onClick() },
+            .tvClickable(enabled = enabled, onClick = onClick, corner = Tokens.Corner.pill, scaleOnFocus = 1.02f),
         contentAlignment = Alignment.Center
     ) {
         Text(
@@ -378,15 +404,16 @@ private fun PrimaryButton(label: String, enabled: Boolean, modifier: Modifier = 
 private fun GhostButton(label: String, onClick: () -> Unit) {
     Text(
         text = label,
-        color = Tokens.Text,
-        fontSize = 18.sp,
+        color = Tokens.TextDim,
+        fontSize = Tokens.Type.caption,
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(Color(0x26FFFFFF))
+            .clip(RoundedCornerShape(Tokens.Corner.pill))
+            .background(Tokens.Surface)
+            .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
             .mouseFocusable()
-            .tvClickable { onClick() }
-            .padding(horizontal = 16.dp, vertical = 14.dp)
+            .tvClickable(onClick = onClick, corner = Tokens.Corner.pill)
+            .padding(horizontal = 16.dp, vertical = 13.dp)
     )
 }
 
@@ -394,8 +421,9 @@ private fun GhostButton(label: String, onClick: () -> Unit) {
 private fun ErrorCard(message: String, onRetry: () -> Unit) {
     Column(
         modifier = Modifier
-            .clip(RoundedCornerShape(Tokens.Corner.card))
+            .clip(RoundedCornerShape(Tokens.Corner.panel))
             .background(Tokens.Surface)
+            .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.panel))
             .padding(18.dp)
     ) {
         Text(message, color = Tokens.TextDim, style = MaterialTheme.typography.bodyMedium)
@@ -405,10 +433,10 @@ private fun ErrorCard(message: String, onRetry: () -> Unit) {
             color = Tokens.Accent,
             style = MaterialTheme.typography.labelLarge,
             modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
+                .clip(RoundedCornerShape(Tokens.Corner.pill))
                 .background(Tokens.AccentDim)
                 .mouseFocusable()
-                .tvClickable { onRetry() }
+                .tvClickable(onClick = onRetry, corner = Tokens.Corner.pill)
                 .padding(horizontal = 16.dp, vertical = 8.dp)
         )
     }
@@ -420,8 +448,8 @@ private fun SourceRow(sources: List<Pair<Site, Boolean>>, onPick: (Site) -> Unit
     Column {
         Text(
             text = "换源",
-            color = Tokens.TextDim,
-            style = MaterialTheme.typography.labelSmall,
+            color = Tokens.Accent,
+            style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.06.sp),
             modifier = Modifier.padding(bottom = 8.dp)
         )
         LazyRow(
@@ -436,11 +464,16 @@ private fun SourceRow(sources: List<Pair<Site, Boolean>>, onPick: (Site) -> Unit
                     color = if (current) Tokens.Accent else Tokens.TextDim,
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(if (current) Tokens.AccentDim else Color(0x14FFFFFF))
+                        .clip(RoundedCornerShape(Tokens.Corner.pill))
+                        .background(if (current) Tokens.AccentDim else Tokens.Surface)
+                        .border(
+                            width = 1.dp,
+                            color = if (current) Tokens.Accent.copy(alpha = 0.55f) else Tokens.Stroke,
+                            shape = RoundedCornerShape(Tokens.Corner.pill)
+                        )
                         .mouseFocusable()
-                        .tvClickable { onPick(s) }
-                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                        .tvClickable(onClick = { onPick(s) }, corner = Tokens.Corner.pill)
+                        .padding(horizontal = 14.dp, vertical = 7.dp)
                 )
             }
         }
@@ -462,11 +495,16 @@ private fun LineTabs(lines: List<PlayLine>, selected: Int, onSelect: (Int) -> Un
                 color = if (active) Tokens.Accent else Tokens.TextDim,
                 style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(if (active) Tokens.AccentDim else Color(0x14FFFFFF))
+                    .clip(RoundedCornerShape(Tokens.Corner.pill))
+                    .background(if (active) Tokens.AccentDim else Tokens.Surface)
+                    .border(
+                        width = 1.dp,
+                        color = if (active) Tokens.Accent.copy(alpha = 0.55f) else Tokens.Stroke,
+                        shape = RoundedCornerShape(Tokens.Corner.pill)
+                    )
                     .mouseFocusable()
-                    .tvClickable { onSelect(index) }
-                    .padding(horizontal = 14.dp, vertical = 7.dp)
+                    .tvClickable(onClick = { onSelect(index) }, corner = Tokens.Corner.pill)
+                    .padding(horizontal = 16.dp, vertical = 7.dp)
             )
         }
     }
@@ -483,8 +521,8 @@ private fun EpisodeGrid(line: PlayLine, onPlay: (Episode) -> Unit) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
             Text(
                 text = "选集",
-                color = Tokens.TextDim,
-                style = MaterialTheme.typography.labelSmall
+                color = Tokens.Accent,
+                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.06.sp)
             )
             Spacer(Modifier.width(8.dp))
             Text(
@@ -507,10 +545,11 @@ private fun EpisodeGrid(line: PlayLine, onPlay: (Episode) -> Unit) {
                 Box(
                     modifier = Modifier
                         .height(56.dp)
-                        .clip(RoundedCornerShape(9.dp))
+                        .clip(RoundedCornerShape(Tokens.Radius))
                         .background(Tokens.Surface)
+                        .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Radius))
                         .mouseFocusable()
-                        .tvClickable { onPlay(ep) },
+                        .tvClickable(onClick = { onPlay(ep) }, corner = Tokens.Radius, scaleOnFocus = 1.02f),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(

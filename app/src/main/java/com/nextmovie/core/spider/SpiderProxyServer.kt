@@ -34,16 +34,19 @@ class SpiderProxyServer : java.io.Closeable {
     val port: Int get() = server.localPort
     fun activate(handler: (Map<String, String>) -> Array<*>?) { route = handler }
     fun rewrite(url: String): String {
-        val uri = runCatching { URI(url) }.getOrNull() ?: return url
-        if (uri.host !in listOf("127.0.0.1", "localhost", "::1")) return url
-        if (uri.scheme !in listOf("http", "https")) return url
+        // 端口可能是 -1（插件没拿到宿主端口时写成 -1），java.net.URI 会直接判非法，
+        // 所以这里按字符串拆，port <= 0 一律视作「在找宿主代理」。
+        val m = Regex("^https?://(?:127\\.0\\.0\\.1|localhost|\\[::1\\]):(-?\\d+)(/[^?#]*)(\\?.*)?$")
+            .find(url) ?: return url
+        val declared = m.groupValues[1].toIntOrNull() ?: -1
+        val path = m.groupValues[2]
+        val query = m.groupValues[3]
         // Only the TVBox host callback endpoint belongs to us. GoProxy and other
         // plugin-owned servers expose /proxy/play/... on their own port; moving
         // those requests to this query-parameter dispatcher loses the route.
-        if (uri.path !in listOf("/proxy", "/proxy/") || uri.rawQuery.isNullOrBlank()) return url
-        if (uri.port !in 9978..9999 && uri.port != port) return url
-        return "http://127.0.0.1:${server.localPort}" + (uri.rawPath ?: "/") +
-            (uri.rawQuery?.let { "?$it" } ?: "")
+        if (path !in listOf("/proxy", "/proxy/") || query.isEmpty()) return url
+        if (declared > 0 && declared !in 9978..9999 && declared != port) return url
+        return "http://127.0.0.1:${server.localPort}$path$query"
     }
     private fun serve(socket: Socket) {
         socket.soTimeout = 20_000

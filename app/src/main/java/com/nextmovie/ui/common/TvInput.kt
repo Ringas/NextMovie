@@ -18,7 +18,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.unit.Dp
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import com.nextmovie.ui.theme.Tokens
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -95,23 +105,68 @@ fun Modifier.mouseWheel(state: ScrollState): Modifier {
     }
 }
 
-/** One focus target per control, with a high-contrast ring in both keyboard and D-pad modes. */
-fun Modifier.tvClickable(enabled: Boolean = true, onClick: () -> Unit): Modifier = composed {
+/**
+ * 全局焦点语法：2dp 琥珀描边 + 两层内发光。
+ *
+ * 只有「按 OK 真的会发生什么」的控件才发光；静态文字一律不带焦点。
+ * 描边画在控件内部，避免被父级 clip 裁掉一半。
+ */
+fun Modifier.tvFocusRing(corner: Dp = 8.dp, visible: Boolean = true): Modifier = drawWithContent {
+    drawContent()
+    if (!visible) return@drawWithContent
+    val radius = CornerRadius(corner.toPx())
+    val glow1 = 7.dp.toPx()
+    val glow2 = 4.dp.toPx()
+    val ring = 2.dp.toPx()
+    val w = size.width
+    val h = size.height
+    if (w <= 0f || h <= 0f) return@drawWithContent
+    drawRoundRect(
+        color = Color(0x1FE2B268),
+        topLeft = Offset(0f, 0f),
+        size = Size(w, h),
+        cornerRadius = radius,
+        style = Stroke(glow1)
+    )
+    drawRoundRect(
+        color = Color(0x4DE2B268),
+        topLeft = Offset(glow2 / 2, glow2 / 2),
+        size = Size(w - glow2, h - glow2),
+        cornerRadius = radius,
+        style = Stroke(glow2)
+    )
+    drawRoundRect(
+        color = Tokens.Accent,
+        topLeft = Offset(ring / 2, ring / 2),
+        size = Size((w - ring).coerceAtLeast(1f), (h - ring).coerceAtLeast(1f)),
+        cornerRadius = radius,
+        style = Stroke(ring)
+    )
+}
+
+/**
+ * One focus target per control, amber ring in both keyboard and D-pad modes.
+ * 轻微放大只做在图层上，不参与布局，避免相邻控件被挤动。
+ */
+fun Modifier.tvClickable(
+    enabled: Boolean = true,
+    corner: Dp = 8.dp,
+    scaleOnFocus: Float = 1f,
+    showRing: Boolean = true,
+    onClick: () -> Unit
+): Modifier = composed {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (focused) scaleOnFocus else 1f,
+        animationSpec = tween(Tokens.MotionMs, easing = FastOutSlowInEasing),
+        label = "tvFocusScale"
+    )
     this
-        .drawWithContent {
-            drawContent()
-            if (focused) {
-                val inset = 2.dp.toPx()
-                drawRoundRect(
-                    color = androidx.compose.ui.graphics.Color.White,
-                    topLeft = androidx.compose.ui.geometry.Offset(inset, inset),
-                    size = androidx.compose.ui.geometry.Size((size.width - 2 * inset).coerceAtLeast(0f), (size.height - 2 * inset).coerceAtLeast(0f)),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(10.dp.toPx()),
-                    style = androidx.compose.ui.graphics.drawscope.Stroke(3.dp.toPx())
-                )
-            }
+        .graphicsLayer {
+            scaleX = scale
+            scaleY = scale
         }
+        .tvFocusRing(corner = corner, visible = focused && showRing)
         .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick)
 }

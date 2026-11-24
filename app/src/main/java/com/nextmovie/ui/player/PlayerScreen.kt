@@ -1,6 +1,7 @@
 package com.nextmovie.ui.player
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -114,6 +115,15 @@ fun PlayerScreen(
     val rootFocus = remember { FocusRequester() }
     val toolbarFocus = remember { FocusRequester() }
     var controlsVisible by remember { mutableStateOf(false) }
+    // 控制条是按需组合的，慢设备上 50ms 内还没进组合树，直接 requestFocus 会抛
+    // 「FocusRequester is not initialized」把播放器进程带崩；这里等组合完成再抢焦点。
+    LaunchedEffect(controlsVisible) {
+        if (!controlsVisible) return@LaunchedEffect
+        repeat(8) {
+            delay(100)
+            if (runCatching { toolbarFocus.requestFocus() }.isSuccess) return@LaunchedEffect
+        }
+    }
     val scope = rememberCoroutineScope()
 
     fun flash(msg: String) {
@@ -308,7 +318,6 @@ fun PlayerScreen(
                     Key.DirectionUp, Key.DirectionDown -> {
                         if (controlsVisible) false else {
                             controlsVisible = true
-                            scope.launch { delay(50); toolbarFocus.requestFocus() }
                             true
                         }
                     }
@@ -335,10 +344,19 @@ fun PlayerScreen(
         )
 
         if (controlsVisible) {
-            Row(Modifier.align(Alignment.BottomCenter).padding(bottom = 80.dp).clip(RoundedCornerShape(16.dp)).background(Tokens.Surface).padding(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 92.dp)
+                    .clip(RoundedCornerShape(Tokens.Corner.panel))
+                    .background(Color(0xF2111319))
+                    .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.panel))
+                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 com.nextmovie.ui.settings.SettingsButton(if (player.isPlaying) "暂停" else "继续", Modifier.focusRequester(toolbarFocus)) { togglePlay() }
-                com.nextmovie.ui.settings.SettingsButton("后退 10 秒") { seekBy(-10_000L) }
-                com.nextmovie.ui.settings.SettingsButton("前进 10 秒") { seekBy(10_000L) }
+                com.nextmovie.ui.settings.SettingsButton("−10 秒") { seekBy(-10_000L) }
+                com.nextmovie.ui.settings.SettingsButton("+10 秒") { seekBy(10_000L) }
                 com.nextmovie.ui.settings.SettingsButton("倍速 $speed×") {
                     val steps = listOf(1f, 1.25f, 1.5f, 2f)
                     speed = steps[(steps.indexOf(speed) + 1) % steps.size]
@@ -365,7 +383,8 @@ fun PlayerScreen(
                         .fillMaxWidth()
                         .background(
                             Brush.verticalGradient(
-                                0f to Color(0xE6000000),
+                                0f to Color(0xF00B0C10),
+                                0.55f to Color(0x660B0C10),
                                 1f to Color.Transparent
                             )
                         )
@@ -376,22 +395,47 @@ fun PlayerScreen(
                             .padding(horizontal = 40.dp, vertical = 26.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Row(verticalAlignment = Alignment.Bottom) {
+                            Text(
+                                text = "NEXT MOVIE",
+                                color = Tokens.Text,
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    fontWeight = FontWeight.SemiBold,
+                                    letterSpacing = 3.sp
+                                )
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "PLAY",
+                                color = Tokens.Accent,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontSize = Tokens.Type.micro,
+                                    letterSpacing = Tokens.Type.MICRO_TRACK.sp
+                                ),
+                                modifier = Modifier.padding(bottom = 2.dp)
+                            )
+                        }
+                        Spacer(Modifier.width(22.dp))
                         Text(
                             text = "‹ 返回",
                             color = Tokens.TextDim,
                             style = MaterialTheme.typography.labelLarge,
                             modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0x26FFFFFF))
-                                .padding(horizontal = 12.dp, vertical = 7.dp)
+                                .clip(RoundedCornerShape(Tokens.Corner.pill))
+                                .background(Color(0x14F3F0E9))
+                                .border(1.dp, Color(0x26F3F0E9), RoundedCornerShape(Tokens.Corner.pill))
+                                .tvClickable(onClick = onBack, corner = Tokens.Corner.pill)
+                                .padding(horizontal = 14.dp, vertical = 7.dp)
                         )
-                        Spacer(Modifier.width(20.dp))
+                        Spacer(Modifier.width(22.dp))
                         Column {
                             Text(
                                 text = title,
                                 color = Tokens.Text,
                                 style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Medium
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                             )
                             Text(
                                 text = "确认键暂停 · 左右快进退 · 上下打开控制栏",
@@ -481,14 +525,14 @@ fun PlayerScreen(
                                 .fillMaxWidth()
                                 .height(6.dp)
                                 .clip(RoundedCornerShape(3.dp))
-                                .background(Color(0x1FFFFFFF))
+                                .background(Color(0x24F3F0E9))
                         ) {
                             if (bufferedFraction > playedFraction) {
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth(bufferedFraction)
                                         .fillMaxHeight()
-                                        .background(Color(0x66FFFFFF))
+                                        .background(Color(0x59F3F0E9))
                                 )
                             }
                             Box(
@@ -511,9 +555,17 @@ fun PlayerScreen(
                             )
                             Text(
                                 text = " / ${if (duration > 0) fmt(duration) else "--:--"}",
-                                color = Color(0x66FFFFFF),
+                                color = Color(0x66F3F0E9),
                                 style = MaterialTheme.typography.labelMedium
                             )
+                            if (duration > 0) {
+                                Spacer(Modifier.width(12.dp))
+                                Text(
+                                    text = "−" + fmt((duration - positionMs).coerceAtLeast(0L)),
+                                    color = Tokens.TextFaint,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
                             Spacer(Modifier.weight(1f))
                             if (nextEpisodeName != null) {
                                 Text(
@@ -544,7 +596,8 @@ private fun StatusPill(text: String, color: Color) {
         style = MaterialTheme.typography.labelSmall,
         modifier = Modifier
             .clip(RoundedCornerShape(999.dp))
-            .background(Color(0x1FFFFFFF))
+            .background(Color(0x1AF3F0E9))
+            .border(1.dp, Color(0x24F3F0E9), RoundedCornerShape(Tokens.Corner.pill))
             .padding(horizontal = 10.dp, vertical = 5.dp)
     )
 }
@@ -553,8 +606,13 @@ private fun StatusPill(text: String, color: Color) {
 private fun FloatCard(accent: Boolean, content: @Composable () -> Unit) {
     Column(
         modifier = Modifier
-            .clip(RoundedCornerShape(14.dp))
-            .background(Color(0xE6111318))
+            .clip(RoundedCornerShape(Tokens.Corner.panel))
+            .background(Color(0xF2111319))
+            .border(
+                1.dp,
+                if (accent) Tokens.Accent.copy(alpha = 0.45f) else Tokens.Stroke,
+                RoundedCornerShape(Tokens.Corner.panel)
+            )
             .padding(horizontal = 28.dp, vertical = 22.dp)
     ) {
         content()
