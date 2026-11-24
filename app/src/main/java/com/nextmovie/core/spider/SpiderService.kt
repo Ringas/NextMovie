@@ -25,6 +25,16 @@ import com.nextmovie.core.spider.SpiderProtocol.errorBundle
 import com.nextmovie.core.spider.SpiderProtocol.okBundle
 import com.nextmovie.core.spider.SpiderProtocol.siteFromTransport
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.Executors
 
 /**
@@ -37,12 +47,18 @@ class SpiderService : Service() {
 
     private lateinit var loader: JarSpiderLoader
     private lateinit var jsLoader: JsSpiderLoader
-    private val cancelled = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
-    private val proxyInstance = lazy { SpiderProxyServer() }
-    private val proxy by proxyInstance
+    private data class RequestKey(val client: IBinder, val id: Int)
+    private val requests = mutableMapOf<RequestKey, Job>()
+    private val proxies = ArrayDeque<SpiderProxyServer>()
     private val watchdog = Executors.newSingleThreadScheduledExecutor()
-    private val siteLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
-    private val executor = Executors.newFixedThreadPool(4)
+    private val siteLocks = mutableMapOf<String, Mutex>()
+    private val executor = Executors.newFixedThreadPool(4).asCoroutineDispatcher()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    private fun newProxy(): SpiderProxyServer = synchronized(proxies) {
+        if (proxies.size >= 8) proxies.removeFirst().close()
+        SpiderProxyServer().also { proxies.addLast(it) }
+    }
     private val messenger: Messenger by lazy { Messenger(Handler(Looper.getMainLooper()) { onRequest(it); true }) }
 
     override fun onCreate() {
@@ -59,9 +75,10 @@ class SpiderService : Service() {
 
     override fun onDestroy() {
         PluginRuntime.release()
-        executor.shutdownNow()
+        scope.cancel()
+        executor.close()
         watchdog.shutdownNow()
-        if (proxyInstance.isInitialized()) proxy.close()
+        synchronized(proxies) { proxies.forEach { it.close() }; proxies.clear() }
         super.onDestroy()
     }
 
@@ -73,43 +90,55 @@ class SpiderService : Service() {
             Handler(Looper.getMainLooper()).postDelayed({ android.os.Process.killProcess(android.os.Process.myPid()) }, 100)
             return
         }
-        if (msg.what == SpiderProtocol.ACTION_CANCEL) { cancelled.add(msg.arg1); return }
-        val action = msg.what
-        val id = msg.arg1
-        val replyTo = msg.replyTo ?: return
-        val args = msg.data?.let { Bundle(it) } ?: Bundle()
-        android.util.Log.d("NextMovieSpider", "recv action=$action id=$id")
-        executor.execute {
-            if (cancelled.remove(id)) return@execute
-            val deadline = watchdog.schedule({ android.os.Process.killProcess(android.os.Process.myPid()) }, if (action == ACTION_PLAY) 330 else 85, java.util.concurrent.TimeUnit.SECONDS)
-            val started = System.currentTimeMillis()
-            val result = runCatching {
-                synchronized(siteLocks.getOrPut(args.getString(KEY_SITE).orEmpty()) { Any() }) {
-                    handle(action, args, id)
-                }
+        if (msg.what == SpiderProtocol.ACTION_RELEASE_PROXY) {
+            val port = msg.arg1
+            val proxy = synchronized(proxies) {
+                proxies.firstOrNull { it.port == port }?.also { proxies.remove(it) }
             }
-                .getOrElse {
-                    val cls = it.javaClass.simpleName
-                    android.util.Log.e(
-                        "NextMovieSpider",
-                        "action=$action 失败 ${cls}: ${rootCause(it)}（${System.currentTimeMillis() - started}ms）",
-                        it
-                    )
-                    val text = if (it is JarSpiderLoader.SpiderLoadException) {
-                        rootCause(it)
-                    } else {
-                        "$cls：${rootCause(it)}"
-                    }
-                    errorBundle(id, text)
-                }
-            deadline.cancel(false)
-            cancelled.remove(id)
-            android.util.Log.d(
-                "NextMovieSpider",
-                "action=$action ok=${result.getBoolean(SpiderProtocol.KEY_OK)} ${System.currentTimeMillis() - started}ms"
-            )
-            runCatching { replyTo.send(Message.obtain().apply { what = SpiderProtocol.ACTION_REPLY; data = result }) }
+            proxy?.close()
+            return
         }
+        val replyTo = msg.replyTo ?: return
+        val id = msg.arg1
+        val key = RequestKey(replyTo.binder, id)
+        if (msg.what == SpiderProtocol.ACTION_CANCEL) {
+            requests.remove(key)?.cancel()
+            return
+        }
+        val action = msg.what
+        val args = msg.data?.let { Bundle(it) } ?: Bundle()
+        val gate = siteLocks.getOrPut(args.getString(KEY_SITE).orEmpty()) { Mutex() }
+        val queuedAt = System.nanoTime()
+        val job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            try {
+                val result = gate.withLock {
+                    withContext(executor) {
+                        val delayMs = (System.nanoTime() - queuedAt) / 1_000_000
+                        android.util.Log.i("NextMovieTiming", "plugin-queue action=$action ${delayMs}ms")
+                        val deadline = watchdog.schedule(
+                            { android.os.Process.killProcess(android.os.Process.myPid()) },
+                            if (action == ACTION_PLAY) 330 else 85,
+                            java.util.concurrent.TimeUnit.SECONDS
+                        )
+                        try {
+                            handle(action, args, id)
+                        } catch (e: Exception) {
+                            android.util.Log.w("NextMovieSpider", "action=$action failed ${e.javaClass.simpleName}")
+                            errorBundle(id, "插件调用失败（${e.javaClass.simpleName}）")
+                        } catch (e: LinkageError) {
+                            errorBundle(id, "插件运行时不兼容（${e.javaClass.simpleName}）")
+                        } finally {
+                            deadline.cancel(false)
+                        }
+                    }
+                }
+                runCatching { replyTo.send(Message.obtain().apply { what = SpiderProtocol.ACTION_REPLY; data = result }) }
+            } finally {
+                requests.remove(key)
+            }
+        }
+        requests[key] = job
+        job.start()
     }
 
     private fun handle(action: Int, args: Bundle, id: Int): Bundle {
@@ -117,7 +146,7 @@ class SpiderService : Service() {
         val siteJson = args.getString(KEY_SITE) ?: return errorBundle(id, "缺少站点信息")
         val site = runCatching { siteFromTransport(siteJson) }
             .getOrElse { return errorBundle(id, "站点信息解析失败：" + rootCause(it)) }
-        android.util.Log.d("NextMovieSpider", "site=${site.name} type=${site.type} api=${site.api}")
+        android.util.Log.d("NextMovieSpider", "site=${site.name} type=${site.type}")
         // .js 站点走 QuickJS；其余（csp_* / jar）走 DexClassLoader。两条路径共享同一个 :spider 进程隔离。
         val isJs = site.isJavaScript
         val loadStarted = System.nanoTime()
@@ -162,11 +191,9 @@ class SpiderService : Service() {
 
             ACTION_DETAIL -> {
                 val vodId = args.getString(KEY_ARG1).orEmpty()
-                android.util.Log.d("NextMovieSpider", "detail id=$vodId")
                 val raw = runCatching { spider.detailContent(listOf(vodId)) }
                     .onFailure { android.util.Log.w("NextMovieSpider", "detailContent 失败: " + rootCause(it), it) }
                     .getOrNull().orEmpty()
-                DetailRaw.save(applicationContext, vodId, raw)
                 if (raw.isBlank()) {
                     (spider as? JsSpider)?.asyncNote()?.let { return errorBundle(id, it) }
                 }
@@ -186,6 +213,7 @@ class SpiderService : Service() {
                 val flag = args.getString(KEY_ARG1).orEmpty()
                 val episode = args.getString(KEY_ARG2).orEmpty()
                 if (!isJs) loader.bindActivity(site)
+                val proxy = newProxy()
                 proxy.activate { params -> if (isJs) spider.proxy(HashMap(params)) else loader.proxy(site, params) }
                 if (!isJs) loader.prepareProxy(site, proxy.port)
                 val original = spider.playerContent(flag, episode, ArrayList()).orEmpty()
@@ -195,7 +223,6 @@ class SpiderService : Service() {
                         if (url.isNotBlank()) put("url", proxy.rewrite(url))
                     }.toString()
                 }.getOrDefault(original)
-                PlayRaw.save(applicationContext, raw)
                 if (raw.isBlank()) {
                     (spider as? JsSpider)?.asyncNote()?.let { return errorBundle(id, it) }
                 }

@@ -399,18 +399,6 @@ private fun ErrorCard(message: String, onRetry: () -> Unit) {
             .padding(18.dp)
     ) {
         Text(message, color = Tokens.TextDim, style = MaterialTheme.typography.bodyMedium)
-        // 详情为什么是空的：把传进去的 id 和插件返回原文摊出来，一眼能分辨是 id 传错还是 Init 没解开二级 dex
-        val ctx = androidx.compose.ui.platform.LocalContext.current
-        val raw = remember(message) { com.nextmovie.core.spider.DetailRaw.read(ctx) }
-        if (raw.isNotBlank()) {
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "插件返回：$raw",
-                color = Tokens.TextDim.copy(alpha = 0.72f),
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 3
-            )
-        }
         Spacer(Modifier.height(10.dp))
         Text(
             text = "重试",

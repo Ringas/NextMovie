@@ -12,12 +12,22 @@ import java.util.concurrent.Executors
 class SpiderProxyServer : java.io.Closeable {
     private val server = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
     private val pool = Executors.newFixedThreadPool(4)
+    private val sockets = java.util.concurrent.ConcurrentHashMap.newKeySet<Socket>()
     @Volatile private var route: ((Map<String, String>) -> Array<*>?)? = null
     init {
         Thread({
             while (!server.isClosed) {
                 val socket = runCatching { server.accept() }.getOrNull() ?: break
-                pool.execute { runCatching { serve(socket) }; runCatching { socket.close() } }
+                sockets.add(socket)
+                try {
+                    pool.execute {
+                        try { socket.use { runCatching { serve(it) } } }
+                        finally { sockets.remove(socket) }
+                    }
+                } catch (_: java.util.concurrent.RejectedExecutionException) {
+                    sockets.remove(socket)
+                    socket.close()
+                }
             }
         }, "spider-proxy-accept").apply { isDaemon = true; start() }
     }
@@ -86,5 +96,11 @@ class SpiderProxyServer : java.io.Closeable {
             out.flush()
         }
     }
-    override fun close() { server.close(); pool.shutdownNow(); route = null }
+    override fun close() {
+        route = null
+        server.close()
+        pool.shutdownNow()
+        sockets.forEach { runCatching { it.close() } }
+        sockets.clear()
+    }
 }

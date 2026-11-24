@@ -153,7 +153,7 @@ class JsSpider(
                 val optJson = runCatching { args?.getString(1).orEmpty() }.getOrDefault("")
                 return runCatching { fetchSync(url, optJson) }
                     .getOrElse {
-                        Log.w("NextMovieJs", "request 失败 $url: ${it.message}")
+                        Log.w("NextMovieJs", "request 失败 ${it.javaClass.simpleName}")
                         "{\"code\":0,\"content\":\"\",\"headers\":{}}"
                     }
             }

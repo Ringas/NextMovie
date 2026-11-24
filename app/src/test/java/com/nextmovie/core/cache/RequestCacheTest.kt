@@ -39,4 +39,17 @@ class RequestCacheTest {
             cache.clear(); assertEquals(4, cache.get("k") { 4 })
         }
     }
+    @Test fun invalidatedFlightCannotReplaceRefreshedValue() = runBlocking {
+        val started = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        RequestCache<String, Int>(10_000).use { cache ->
+            val old = async { cache.get("site") { started.complete(Unit); finish.await(); 1 } }
+            started.await()
+            cache.invalidate("site")
+            assertEquals(2, cache.get("site") { 2 })
+            finish.complete(Unit)
+            assertEquals(1, old.await())
+            assertEquals(2, cache.get("site") { error("fresh value was overwritten") })
+        }
+    }
 }

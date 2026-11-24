@@ -21,22 +21,27 @@ class RequestCache<K, V>(
         val task = mutex.withLock {
             values[key]?.takeIf { now() - it.time < ttlMs }?.let { return it.value }
             flights[key] ?: scope.async(start = CoroutineStart.LAZY) {
+                val flight = currentCoroutineContext()[Job]
                 try {
                     val result = load()
                     mutex.withLock {
-                        if (cacheIf(result)) {
+                        if (flights[key] === flight && cacheIf(result)) {
                             values.remove(key)
                             values[key] = Entry(result, now())
                             while (values.size > maxEntries) values.remove(values.keys.first())
                         }
                     }
                     result
-                } finally { mutex.withLock { flights.remove(key) } }
+                } finally {
+                    withContext(NonCancellable) {
+                        mutex.withLock { if (flights[key] === flight) flights.remove(key) }
+                    }
+                }
             }.also { flights[key] = it }
         }
         return task.await()
     }
-    suspend fun invalidate(key: K) { mutex.withLock { values.remove(key) } }
-    suspend fun clear() { mutex.withLock { values.clear() } }
+    suspend fun invalidate(key: K) { mutex.withLock { values.remove(key); flights.remove(key) } }
+    suspend fun clear() { mutex.withLock { values.clear(); flights.clear() } }
     override fun close() { scope.cancel() }
 }

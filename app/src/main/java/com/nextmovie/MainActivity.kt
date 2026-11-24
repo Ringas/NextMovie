@@ -129,6 +129,7 @@ private fun AppRoot(repo: AppRepository) {
     var homeFocusIndex by remember { mutableStateOf(0) }
     var homeTab by remember { mutableStateOf(0) }
     var booting by remember { mutableStateOf(false) }
+    var resolveStage by remember { mutableStateOf("正在读取来源播放地址…") }
     var resolving by remember { mutableStateOf(false) }
     var playJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
@@ -136,7 +137,9 @@ private fun AppRoot(repo: AppRepository) {
     LaunchedEffect(Unit) {
         if (repo.currentSite == null && repo.configUrl().isNotBlank()) {
             val savedUrl = repo.configUrl()
+            val configStarted = System.nanoTime()
             val restored = repo.restoreCachedConfig()
+            android.util.Log.i("NextMovieTiming", "startup-config restored=$restored ${(System.nanoTime() - configStarted) / 1_000_000}ms")
             booting = !restored
             if (restored) {
                 if (repo.configSnapshotIsFresh()) return@LaunchedEffect
@@ -214,16 +217,17 @@ private fun AppRoot(repo: AppRepository) {
         }
         playJob?.cancel()
         playJob = scope.launch {
+            resolveStage = "正在读取来源播放地址…"
             resolving = true
             try {
                 val result = try {
                     repo.preparePlayback(activeSite)
-                    if (activeSite.isCms) repo.resolvePlay(activeSite, line.name, episode.url)
-                    else PluginPlaybackWindow.resolve(context) { repo.resolvePlay(activeSite, line.name, episode.url) }
+                    if (activeSite.isCms) repo.resolvePlay(activeSite, line.name, episode.url) { resolveStage = it }
+                    else PluginPlaybackWindow.resolve(context) { repo.resolvePlay(activeSite, line.name, episode.url) { resolveStage = it } }
                 }
                 catch (e: kotlinx.coroutines.CancellationException) { repo.cancelPlayback(activeSite); throw e }
                 catch (e: Exception) {
-                    Toast.makeText(context, e.message ?: "播放解析失败", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, if (e is IllegalStateException && e.message == "网页解析未取得媒体地址，请更换线路") e.message else "来源解析失败，请重试或换一条线路", Toast.LENGTH_LONG).show()
                     return@launch
                 }
             when {
@@ -360,12 +364,18 @@ private fun AppRoot(repo: AppRepository) {
             onConfigLoaded = { route = Route.Home }
         )
     }
+    val proxyUrl = (route as? Route.Player)?.req?.url
+    if (proxyUrl != null) {
+        androidx.compose.runtime.DisposableEffect(proxyUrl) {
+            onDispose { repo.releasePlaybackProxy(proxyUrl) }
+        }
+    }
     if (resolving) {
         androidx.compose.ui.window.Dialog(onDismissRequest = { playJob?.cancel(); resolving = false }) {
             Column(Modifier.clip(RoundedCornerShape(18.dp)).background(Tokens.Surface).padding(28.dp)) {
                 androidx.compose.material3.CircularProgressIndicator(color = Tokens.Accent)
                 Spacer(Modifier.height(16.dp))
-                Text("正在解析播放地址…", color = Tokens.Text)
+                Text(resolveStage, color = Tokens.Text)
                 Text("按返回取消", color = Tokens.TextDim)
             }
         }

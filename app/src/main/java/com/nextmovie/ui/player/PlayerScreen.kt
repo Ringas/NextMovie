@@ -99,6 +99,7 @@ fun PlayerScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val view = LocalView.current
     var requestStarted by remember { mutableLongStateOf(0L) }
+    var buffering by remember { mutableStateOf(true) }
     var playbackError by remember { mutableStateOf<String?>(null) }
     var resumedHint by remember { mutableStateOf(false) }
     var keyHint by remember { mutableStateOf<String?>(null) }
@@ -151,6 +152,7 @@ fun PlayerScreen(
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
+                buffering = playbackState == Player.STATE_BUFFERING
                 if (playbackState == Player.STATE_ENDED) {
                     ended = true
                     // 单集影片播完就停住，不要莫名其妙跳回详情
@@ -182,6 +184,7 @@ fun PlayerScreen(
 
     LaunchedEffect(url, headers, startPositionMs) {
         requestStarted = System.nanoTime()
+        buffering = true
         playbackError = null
         ended = false
         countdown = 0
@@ -200,7 +203,7 @@ fun PlayerScreen(
         val path = runCatching { java.net.URI(url).path.orEmpty().lowercase() }.getOrDefault("")
         val knownFile = listOf(".mp4", ".mkv", ".webm", ".flv", ".ts", ".mp3", ".m4v").any { path.endsWith(it) }
         val isHls = url.contains(".m3u8", ignoreCase = true) || (!knownFile && sniffHls(url, headers))
-        android.util.Log.d("NextMoviePlay", "url=$url hls=$isHls headers=$headers")
+        android.util.Log.d("NextMoviePlay", "prepare hls=$isHls")
         val item = MediaItem.fromUri(url)
         val mediaSource = if (isHls) {
             HlsMediaSource.Factory(dataSourceFactory)
@@ -423,16 +426,6 @@ fun PlayerScreen(
                                 style = MaterialTheme.typography.bodyMedium,
                                 modifier = Modifier.padding(top = 8.dp)
                             )
-                            // 插件到底回了什么，直接摊在用户面前：一次截图就能定位是 parse、还是 URL/header
-                            val raw = remember(playbackError) { com.nextmovie.core.spider.PlayRaw.read(context) }
-                            if (raw.isNotBlank()) {
-                                Text(
-                                    text = "插件返回：$raw",
-                                    color = Tokens.TextDim.copy(alpha = 0.75f),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    modifier = Modifier.padding(top = 6.dp)
-                                )
-                            }
                             Text(
                                 text = "Esc 返回详情 · 换一条线路或源再试",
                                 color = Tokens.Accent,
@@ -440,6 +433,7 @@ fun PlayerScreen(
                                 modifier = Modifier.padding(top = 12.dp)
                             )
                         }
+                        buffering -> FloatCard(accent = false) { Text("正在缓冲…", color = Tokens.Text) }
                         ended && nextEpisodeName != null && countdown > 0 -> FloatCard(accent = true) {
                             Text(
                                 text = "即将播放 $nextEpisodeName",

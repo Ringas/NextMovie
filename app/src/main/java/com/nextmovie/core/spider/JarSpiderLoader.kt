@@ -65,7 +65,9 @@ class JarSpiderLoader(
         if (!jarUrl.startsWith("http://") && !jarUrl.startsWith("https://")) {
             throw SpiderLoadException("站点「${site.name}」没有可下载的插件地址（api=$api）")
         }
+        val artifactStart = System.nanoTime()
         val jarFile = ensureJar(jarUrl, site.name, site.jarHash)
+        android.util.Log.i("NextMovieTiming", "plugin-artifact ${(System.nanoTime() - artifactStart) / 1_000_000}ms")
 
         // 先做 ABI 预检：Guard 插件通常只带 ARM 的 .so，x86 模拟器上 dlopen 必失败，
         // MuMu 这类带 ARM 翻译的 x86 环境还会直接 SIGSEGV。提前拦下可以给出准确文案并避免原生崩溃。

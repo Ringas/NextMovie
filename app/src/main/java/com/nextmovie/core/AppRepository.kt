@@ -228,12 +228,17 @@ class AppRepository(private val context: Context) {
 
     suspend fun home(site: Site = requireSite(), refresh: Boolean = false): List<Vod> {
         val key = "home|" + site.runtimeKey
-        if (refresh) { lists.invalidate(key); spiderHost.clearCache() }
+        if (refresh) {
+            withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.invalidate(site.runtimeKey) }
+            lists.invalidate(key)
+            spiderHost.clearCache()
+        }
         val started = System.nanoTime()
         val result = lists.get(key) {
+            val snapshotGeneration = homeSnapshots.generation
             val saved = if (refresh) null else withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.read(site.runtimeKey) }
             saved ?: (if (site.isCms) CmsSiteClient(http, site).home() else spiderHost.home(site)).also {
-                withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.write(site.runtimeKey, it) }
+                withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.write(site.runtimeKey, it, snapshotGeneration) }
             }
         }
         android.util.Log.i("NextMovieTiming", "home ${((System.nanoTime() - started) / 1_000_000)}ms items=${result.size}")
@@ -357,34 +362,45 @@ class AppRepository(private val context: Context) {
      */
     fun cancelPlayback(site: Site) { if (!site.isCms) spiderHost.cancelPlayback() }
 
+    fun releasePlaybackProxy(url: String) = spiderHost.releasePlaybackProxy(url)
+
     suspend fun preparePlayback(site: Site) { if (!site.isCms) spiderHost.preparePlayback() }
 
-    suspend fun resolvePlay(site: Site, flag: String, episodeUrl: String): PlayResult? {
-        val raw = if (site.isCms) PlayResult(episodeUrl) else spiderHost.play(site, flag, episodeUrl)
-        if (raw == null) return null
+    suspend fun resolvePlay(
+        site: Site,
+        flag: String,
+        episodeUrl: String,
+        onStage: (String) -> Unit = {}
+    ): PlayResult? {
+        onStage("正在读取来源播放地址…")
+        // Native plugins may wait for the user to complete a login dialog.
+        val raw = (if (site.isCms) PlayResult(episodeUrl) else spiderHost.play(site, flag, episodeUrl))
+            ?: return null
         if (raw.parse == 0 && (!SharePageResolver.looksLikePage(raw.url) ||
             runCatching { java.net.URI(raw.url).host in listOf("127.0.0.1", "localhost") }.getOrDefault(false))) return raw
-        // A no-extension HTTP stream can still be direct. Only invoke WebView for explicit parse results.
-        if (site.isCms || raw.parse != 0) {
-            val real = SharePageResolver.resolve(http, raw.url, raw.headers)
-            if (real != null) return PlayResult(real, raw.headers)
-        }
-        if (raw.parse == 0) return raw
-        val direct = com.nextmovie.core.net.WebPlaybackResolver.resolve(context, raw.url, raw.headers)
-        if (direct != null) return direct
-        for (parser in parses.filter { it.type == 0 || it.type == 1 }.take(3)) {
-            if (!parser.url.startsWith("http")) continue
-            val page = parser.url + raw.url
-            if (parser.type == 1) {
-                val parsed = runCatching {
-                    PlayResult.fromJson(org.json.JSONObject(http.text(page)))
-                }.getOrNull()
-                if (parsed != null && parsed.parse == 0) return parsed
-            } else {
-                com.nextmovie.core.net.WebPlaybackResolver.resolve(context, page, raw.headers)?.let { return it }
+        onStage("正在解析网页播放地址…")
+        return withTimeoutOrNull(18_000) {
+            if (site.isCms || raw.parse != 0) {
+                withTimeoutOrNull(4_000) { SharePageResolver.resolve(http, raw.url, raw.headers) }
+                    ?.let { return@withTimeoutOrNull PlayResult(it, raw.headers) }
             }
-        }
-        throw IllegalStateException("播放页未取得媒体地址，请更换线路；该来源可能需要登录或专用宿主")
+            if (raw.parse == 0) return@withTimeoutOrNull raw
+            withTimeoutOrNull(6_000) {
+                com.nextmovie.core.net.WebPlaybackResolver.resolve(context, raw.url, raw.headers)
+            }?.let { return@withTimeoutOrNull it }
+            for (parser in parses.filter { it.type == 0 || it.type == 1 }.take(3)) {
+                if (!parser.url.startsWith("http")) continue
+                val page = parser.url + raw.url
+                val result = withTimeoutOrNull(4_000) {
+                    detailAttempt {
+                        if (parser.type == 1) PlayResult.fromJson(org.json.JSONObject(http.text(page)))
+                        else com.nextmovie.core.net.WebPlaybackResolver.resolve(context, page, emptyMap())
+                    }
+                }
+                if (result != null && result.parse == 0) return@withTimeoutOrNull result
+            }
+            null
+        } ?: throw IllegalStateException("网页解析未取得媒体地址，请更换线路")
     }
 
     /** 列表首屏：只做 L0 URL 尺寸升级，同步返回，不发请求。 */
@@ -395,7 +411,12 @@ class AppRepository(private val context: Context) {
     suspend fun enrichPoster(vod: Vod, detail: Boolean): Vod =
         runCatching { poster.resolve(vod, detail, posterEnhance) }.getOrDefault(vod)
 
-    suspend fun invalidateContent() { lists.clear(); details.clear(); spiderHost.clearCache(); withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.clear() } }
+    suspend fun invalidateContent() {
+        withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.clear() }
+        lists.clear()
+        details.clear()
+        spiderHost.clearCache()
+    }
 
     fun release() {
         prefetchScope.cancel()

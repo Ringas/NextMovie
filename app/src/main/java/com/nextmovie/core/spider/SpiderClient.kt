@@ -17,7 +17,7 @@ import com.nextmovie.core.spider.SpiderProtocol.KEY_ERROR
 import com.nextmovie.core.spider.SpiderProtocol.KEY_OK
 import com.nextmovie.core.spider.SpiderProtocol.toTransport
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -31,7 +31,10 @@ class SpiderClient(private val context: Context) {
 
     class SpiderException(message: String) : Exception(message)
 
-    private var inbound: Messenger? = null
+    private val connectionState = kotlinx.coroutines.flow.MutableStateFlow<Messenger?>(null)
+    private var inbound: Messenger?
+        get() = connectionState.value
+        set(value) { connectionState.value = value }
     private var binding = false
     private var bound = false
     private val pending = ConcurrentHashMap<Int, CompletableDeferred<SpiderProtocol.Reply>>()
@@ -90,11 +93,7 @@ class SpiderClient(private val context: Context) {
             }
         }
         // 模拟器/低端盒子上插件进程冷启动可能要十几秒，这里等到 20s 再判失败
-        repeat(200) {
-            if (inbound != null) return true
-            delay(100)
-        }
-        return inbound != null
+        return withTimeoutOrNull(20_000) { connectionState.first { it != null } } != null
     }
 
     /** 发一个请求并等待插件进程返回原始 JSON。 */
@@ -132,7 +131,7 @@ class SpiderClient(private val context: Context) {
         } finally {
             pending.remove(id)
             if (!deferred.isCompleted) runCatching {
-                inbound?.send(Message.obtain(null, SpiderProtocol.ACTION_CANCEL).apply { arg1 = id })
+                inbound?.send(Message.obtain(null, SpiderProtocol.ACTION_CANCEL).apply { arg1 = id; replyTo = replyMessenger })
             }
         }
         if (reply == null) throw SpiderException("插件响应超时（${timeoutMs / 1000}s），可以重试")
@@ -145,10 +144,19 @@ class SpiderClient(private val context: Context) {
         val previous = inbound
         request(SpiderProtocol.ACTION_RESTART, null, timeoutMs = 5_000)
         val connected = withTimeoutOrNull(25_000) {
-            while (inbound == null || inbound === previous) delay(100)
-            true
-        } ?: false
+            connectionState.first { it != null && it !== previous }
+        } != null
         if (!connected) throw SpiderException("登录运行时重置超时，请重试")
+    }
+
+    fun releasePlaybackProxy(url: String) {
+        val uri = runCatching { java.net.URI(url) }.getOrNull() ?: return
+        if (uri.host != "127.0.0.1" || uri.path !in listOf("/proxy", "/proxy/")) return
+        runCatching {
+            inbound?.send(Message.obtain(null, SpiderProtocol.ACTION_RELEASE_PROXY).apply {
+                arg1 = uri.port
+            })
+        }
     }
 
     fun close() {

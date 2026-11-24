@@ -155,6 +155,8 @@ class SpiderHost(
             }
         }
 
+    fun releasePlaybackProxy(url: String) = client.releasePlaybackProxy(url)
+
     private fun ensureSpider(site: Site, action: String) {
         when {
             // 插件源（加壳 jar）与 JS 源都由 :spider 进程加载，这里只放行，具体能力由服务端判断

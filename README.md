@@ -22,10 +22,11 @@
 | 多仓配置 | ✅ | `urls` / `storeHouse` / `depots` 递归（深度 ≤ 2，上限 64 仓） |
 | 相对路径 | ✅ | `./`、`../` 按配置地址解析，`ext`/`jar` 可用相对写法 |
 | CMS 站点 | ✅ | type 0（XML 兜底解析）、type 1/4（JSON），首页/分类/详情/搜索 |
-| JAR 插件 | ✅ | `csp_` + DexClassLoader + 自有宿主 ABI；主进程内加载 |
-| JS / PY / Node 插件 | ⛔ | 明确抛错，不静默失败（P1/P2 接入 QuickJS / Chaquopy） |
-| 网页解析（parse=1） | ⛔ | 只支持直链，需解析的线路会提示 |
-| 首页海报墙 | ✅ | 焦点驱动沉浸背景 + 横向海报 + 聚焦放大/描边；可见项后台异步补图 |
+| JAR 插件 | ✅ | `csp_` + DexClassLoader + 自有宿主 ABI，在独立的 `:spider` 进程运行 |
+| JavaScript 插件 | ✅ | QuickJS 支持同步、Promise 和相对 ES 模块导入。第三方宿主 API 逐源验证 |
+| Python / Node 插件 | ⛔ | 当前未接入运行时 |
+| 网页解析（parse=1） | 部分支持 | 分享页、WebView 和配置解析器，按来源验证 |
+| 首页海报墙 | ✅ | 焦点驱动沉浸背景 + 多行海报 + 聚焦放大/描边；可见项后台异步补图 |
 | 详情页 | ✅ | 海报/元信息/简介/线路切换/选集 |
 | 播放 | ✅ | Media3 ExoPlayer 直链 + 自定义 Header |
 | 海报 L0 升级 | ✅ | 源图 URL 尺寸改写（豆瓣 s→m/l、TMDB w185→w500/w780、B站去 `@` 后缀），零请求 |
