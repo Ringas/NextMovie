@@ -1,0 +1,27 @@
+PosterTV
+Copyright (C) 2026 PosterTV contributors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, version 3 of the License only.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/gpl-3.0.txt>.
+
+------------------------------------------------------------------
+发布前请把本文件替换为 GPL-3.0 的完整官方文本（约 35KB），
+并保留上面的版权声明。本项目不使用 "or later" 条款，
+即 GPL-3.0-only。
+
+第三方说明：
+- `com.github.catvod.crawler.Spider` 的包名与方法签名属于插件互操作
+  所需的接口标识，实现代码为本项目独立编写；该标识不代表与任何
+  上游项目存在隶属或授权关系。
+- 其余第三方依赖（AndroidX、Media3、OkHttp、Coil 等）遵循各自许可，
+  详见构建依赖清单。
+------------------------------------------------------------------

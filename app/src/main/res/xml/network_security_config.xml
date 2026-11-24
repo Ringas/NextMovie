@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  说明：数据源地址由用户在运行时输入，无法在编译期枚举域名，
+  因此这里与 FongMi / Marco 的做法一致，允许明文 HTTP。
+  风险与后续收窄方案见 docs/TMDB.md 与 README「已知限制」。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

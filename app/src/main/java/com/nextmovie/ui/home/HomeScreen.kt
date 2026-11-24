@@ -1,0 +1,612 @@
+package com.nextmovie.ui.home
+
+import com.nextmovie.ui.common.mouseWheel
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+import coil.compose.AsyncImage
+import com.nextmovie.core.AppRepository
+import com.nextmovie.core.config.Site
+import com.nextmovie.core.history.HistoryEntry
+import com.nextmovie.core.model.Vod
+import com.nextmovie.ui.common.ContinueCard
+import com.nextmovie.ui.common.PosterCard
+import com.nextmovie.ui.common.posterModel
+import com.nextmovie.ui.theme.Tokens
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+
+/**
+ * 首页：全屏沉浸背景 + 焦点驱动的影片信息 + 继续观看 + 横向海报墙。
+ * 背景图取当前焦点影片（TMDB backdrop / B站剧照 / 源站图）。
+ */
+@Composable
+fun HomeScreen(
+    repo: AppRepository,
+    site: Site,
+    onOpenDetail: (Vod) -> Unit,
+    onOpenSettings: () -> Unit,
+    onSearch: () -> Unit = {},
+    onResume: (HistoryEntry) -> Unit = {},
+    initialFocusIndex: Int = 0,
+    onFocusIndexChanged: (Int) -> Unit = {}
+) {
+    var vods by remember { mutableStateOf<List<Vod>>(emptyList()) }
+    /** 异步补图结果，按 id 归并；渲染时再和 vods 合并，避免并发写丢更新 */
+    var enrichedById by remember { mutableStateOf<Map<String, Vod>>(emptyMap()) }
+    var heroId by remember { mutableStateOf<String?>(null) }
+    var continueList by remember { mutableStateOf<List<HistoryEntry>>(emptyList()) }
+    val requested = remember { mutableSetOf<String>() }
+    val context = LocalContext.current
+    var loading by remember { mutableStateOf(true) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var reloadTick by remember { mutableIntStateOf(0) }
+    /** 分类导航：0 = 最近更新，其余对应 cats[i-1] */
+    var cats by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    var tab by remember { mutableIntStateOf(0) }
+    val restoreFocus = remember { FocusRequester() }
+    val rowState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(site.key) {
+        cats = runCatching { repo.categories(site) }.getOrDefault(emptyList())
+        if (tab > cats.size) tab = 0
+    }
+
+    LaunchedEffect(site.key, reloadTick) {
+        loading = true
+        error = null
+        continueList = repo.history.continueWatching(10).filter { it.siteKey == site.key }
+        runCatching {
+            // 源头请求失败先自动重连一次（只针对超时/5xx 这类临时故障）
+            com.nextmovie.core.net.Retry.once {
+                if (tab == 0) repo.home(site)
+                else repo.category(site, cats.getOrNull(tab - 1)?.first.orEmpty(), 1)
+            }
+        }
+            .onSuccess { list ->
+                android.util.Log.d("NextMovieHome", "home count=${list.size} " + list.take(5).joinToString(" | ") { "${it.name}=>${it.pic.take(60)}" })
+                // L0：先把 URL 尺寸升级掉，首屏立刻能出图，不额外发请求
+                vods = repo.prepareForList(list)
+                enrichedById = emptyMap()
+                requested.clear()
+                heroId = null
+            }
+            .onFailure { e -> error = com.nextmovie.core.net.FriendlyError.describe(e) }
+        loading = false
+    }
+
+    // 回到首页时恢复上次停留的位置（索引由 AppRoot 持有，跨页面存活）
+    LaunchedEffect(vods.size) {
+        // 只在「用户确实离开过第 0 张」时恢复焦点：首次进入不去抢焦点，
+        // 否则会把刚固定住的 Hero 顶出去、滚动区自己滑到底。
+        if (vods.isEmpty() || initialFocusIndex <= 0) return@LaunchedEffect
+        val target = initialFocusIndex.coerceIn(0, vods.lastIndex)
+        runCatching { rowState.scrollToItem(target) }
+        delay(40)
+        runCatching { restoreFocus.requestFocus() }
+    }
+
+    // L1：首屏前 4 张并发补图（TMDB 有 Token 时走 TMDB，否则走 B站）
+    LaunchedEffect(site.key, vods.size) {
+        if (vods.isEmpty()) return@LaunchedEffect
+        val targets = vods.filter { it.id !in requested }.take(4)
+        if (targets.isEmpty()) return@LaunchedEffect
+        requested += targets.map { it.id }
+        val sem = Semaphore(2)
+        val resolved = coroutineScope {
+            targets.map { vod -> async { sem.withPermit { repo.enrichPoster(vod, detail = false) } } }
+                .awaitAll()
+        }
+        android.util.Log.d("NextMovieHome", "enriched " + resolved.joinToString(" | ") { "${it.name}=>${it.displayPic.take(60)}" })
+        enrichedById = enrichedById + resolved.associateBy { it.id }
+    }
+
+    // 滚动到新区域时补上后面的卡片
+    LaunchedEffect(rowState.firstVisibleItemIndex) {
+        val start = rowState.firstVisibleItemIndex
+        if (vods.isEmpty()) return@LaunchedEffect
+        val targets = vods.drop(start).take(3).filter { it.id !in requested }
+        if (targets.isEmpty()) return@LaunchedEffect
+        requested += targets.map { it.id }
+        val sem = Semaphore(2)
+        val resolved = coroutineScope {
+            targets.map { vod -> async { sem.withPermit { repo.enrichPoster(vod, detail = false) } } }
+                .awaitAll()
+        }
+        enrichedById = enrichedById + resolved.associateBy { it.id }
+    }
+
+    val display = remember(vods, enrichedById) { vods.map { enrichedById[it.id] ?: it } }
+    val hero = display.firstOrNull { it.id == heroId } ?: display.firstOrNull()
+    val backdrop = hero?.displayBackdrop.orEmpty()
+
+    Box(modifier = Modifier.fillMaxSize().background(Tokens.Bg)) {
+        // 焦点切换时背景 300ms 交叉淡入，避免硬切闪一下
+        Crossfade(
+            targetState = backdrop,
+            animationSpec = tween(300),
+            label = "heroBackdrop",
+            modifier = Modifier.fillMaxSize()
+        ) { url ->
+            AsyncImage(
+                model = remember(url) { posterModel(context, url, detail = true) },
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                alpha = 0.55f,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        0f to Tokens.ScrimTop,
+                        0.42f to Color.Transparent,
+                        0.70f to Color(0xB3000000),
+                        1f to Tokens.Bg
+                    )
+                )
+        )
+
+        // 左侧压暗：横向渐变与纵向渐变叠加，避免文字区出现生硬的矩形边界
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.horizontalGradient(
+                        0f to Color(0xD907080B),
+                        0.42f to Color(0x6607080B),
+                        0.72f to Color.Transparent
+                    )
+                )
+        )
+
+        Column(modifier = Modifier.fillMaxSize().padding(Tokens.ScreenPadding)) {
+            TopBar(site = site, status = repo.configStatus(), onSearch = onSearch, onOpenSettings = onOpenSettings)
+
+            // Hero 固定在首屏（不参与滚动），保证进页面第一眼是主推影片；
+            // 下面的分类/继续观看/海报行才纵向滚动（1080p TV 一屏放不下全部）。
+            Spacer(Modifier.height(16.dp))
+            if (!loading && site.unavailableReason == null && error == null && display.isNotEmpty()) {
+                HeroInfo(hero) { onOpenDetail(it) }
+                Spacer(Modifier.height(12.dp))
+                if (cats.isNotEmpty()) {
+                    CategoryTabs(
+                        cats = cats,
+                        selected = tab,
+                        onSelect = {
+                            tab = it
+                            scope.launch { rowState.scrollToItem(0) }
+                        }
+                    )
+                    Spacer(Modifier.height(10.dp))
+                }
+            }
+
+            val vState = rememberScrollState()
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .verticalScroll(vState)
+                    .mouseWheel(vState)
+            ) {
+            Spacer(Modifier.height(12.dp))
+            when {
+                loading -> HomeSkeleton()
+                site.unavailableReason != null ->
+                    ErrorBlock("站点不可用", site.unavailableReason!!, { reloadTick++ }, onOpenSettings)
+                error != null ->
+                    ErrorBlock("数据源加载失败", error!!, { reloadTick++ }, onOpenSettings)
+                display.isEmpty() ->
+                    ErrorBlock("这个源暂时没有返回内容", "可以重试，或在设置里换一个站点", { reloadTick++ }, onOpenSettings)
+                else -> {
+                    if (tab == 0 && continueList.isNotEmpty()) {
+                        SectionTitle("继续观看", "全部 ›")
+                        Spacer(Modifier.height(10.dp))
+                        val continueState = rememberLazyListState()
+                        LazyRow(
+                            state = continueState,
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            modifier = Modifier.mouseWheel(continueState, horizontal = true)
+                        ) {
+                            items(continueList, key = { it.key }) { entry ->
+                                ContinueCard(entry = entry, onClick = { onResume(entry) })
+                            }
+                        }
+                        Spacer(Modifier.height(24.dp))
+                    }
+
+                    SectionTitle(
+                        text = if (tab == 0) "最近更新" else cats.getOrNull(tab - 1)?.second.orEmpty(),
+                        trailing = "全部 ›",
+                        onPage = { dir ->
+                            val target = (rowState.firstVisibleItemIndex + dir * 3)
+                                .coerceIn(0, (display.size - 1).coerceAtLeast(0))
+                            scope.launch { rowState.animateScrollToItem(target) }
+                        }
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    LazyRow(
+                        state = rowState,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        modifier = Modifier.mouseWheel(rowState, horizontal = true)
+                    ) {
+                        itemsIndexed(display) { index, vod ->
+                            PosterCard(
+                                vod = vod,
+                                onClick = { onOpenDetail(vod) },
+                                onFocused = {
+                                    heroId = vod.id
+                                    onFocusIndexChanged(index)
+                                },
+                                modifier = if (initialFocusIndex > 0 &&
+                                    index == initialFocusIndex.coerceIn(0, display.lastIndex)
+                                ) {
+                                    Modifier.focusRequester(restoreFocus)
+                                } else {
+                                    Modifier
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun TopBar(
+    site: Site,
+    status: AppRepository.ConfigStatus?,
+    onSearch: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = "Next Movie",
+            color = Tokens.Accent,
+            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+            modifier = Modifier.width(160.dp)
+        )
+        Text(
+            text = site.name,
+            color = Tokens.TextDim,
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .weight(1f)
+                .clickable { onOpenSettings() }
+                .padding(vertical = 8.dp)
+        )
+        status?.let {
+            Text(
+                text = it.text,
+                color = if (it.ok) Tokens.Accent else Color(0xFFE06C75),
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 360.dp).padding(horizontal = 12.dp)
+            )
+        }
+        Text(
+            text = "搜索",
+            color = Tokens.Text,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.clickable { onSearch() }.padding(8.dp)
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text = "设置",
+            color = Tokens.Text,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.clickable { onOpenSettings() }.padding(8.dp)
+        )
+    }
+}
+
+@Composable
+private fun HeroInfo(vod: Vod?, onOpen: (Vod) -> Unit) {
+    if (vod == null) return
+    Column(modifier = Modifier.fillMaxWidth(0.55f)) {
+        Text(
+            text = vod.name,
+            color = Tokens.Text,
+            style = MaterialTheme.typography.displaySmall.copy(fontSize = Tokens.Type.hero),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        val meta = listOf(vod.displayYear, vod.area, vod.typeName, vod.remark)
+            .filter { it.isNotBlank() }
+            .joinToString("  ·  ")
+        if (meta.isNotBlank()) {
+            Text(
+                text = meta,
+                color = Tokens.TextDim,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
+        val overview = vod.displayOverview
+        if (overview.isNotBlank()) {
+            Text(
+                text = overview,
+                color = Tokens.TextDim,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 10.dp)
+            )
+        }
+
+        Spacer(Modifier.height(Tokens.Gap.m))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            HeroButton("▶  播放", primary = true) { onOpen(vod) }
+            Spacer(Modifier.width(Tokens.Gap.m))
+            HeroButton("详情") { onOpen(vod) }
+        }
+    }
+}
+
+/**
+ * Hero 主按钮：主按钮用强调色实心（和遥控器「确定」键语义一致），次按钮描边。
+ * 只做视觉/语义，焦点态交给 Compose 默认的 focus 指示，避免自定义指示器与 tab 焦点冲突。
+ */
+@Composable
+private fun HeroButton(text: String, primary: Boolean = false, onClick: () -> Unit) {
+    val bg = if (primary) Tokens.Accent else Color.Transparent
+    val fg = if (primary) Tokens.OnAccent else Tokens.Text
+    val shape = RoundedCornerShape(Tokens.Corner.badge)
+    Box(
+        modifier = Modifier
+            .clip(shape)
+            .background(bg)
+            .then(if (primary) Modifier else Modifier.border(1.dp, Tokens.Stroke, shape))
+            .clickable { onClick() }
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+    ) {
+        Text(text, color = fg, style = MaterialTheme.typography.labelLarge)
+    }
+}
+
+@Composable
+private fun SectionTitle(text: String, trailing: String? = null, onPage: ((Int) -> Unit)? = null) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Bottom
+    ) {
+        Text(
+            text = text,
+            color = Tokens.Text,
+            style = MaterialTheme.typography.titleLarge.copy(fontSize = Tokens.Type.section)
+        )
+        if (trailing != null) {
+            Spacer(Modifier.width(Tokens.Gap.s))
+            Text(
+                text = trailing,
+                color = Tokens.TextDim,
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
+        if (onPage != null) {
+            Spacer(Modifier.weight(1f))
+            PageArrow("‹") { onPage(-1) }
+            Spacer(Modifier.width(8.dp))
+            PageArrow("›") { onPage(1) }
+        }
+    }
+}
+
+/** 海报行的左右翻页按钮：电视上比鼠标滚轮更快，也方便纯遥控器用户。 */
+@Composable
+private fun PageArrow(text: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(Tokens.SurfaceHigh)
+            .clickable { onClick() }
+            .padding(horizontal = 10.dp, vertical = 2.dp)
+    ) {
+        Text(text, color = Tokens.TextDim, style = MaterialTheme.typography.titleSmall)
+    }
+}
+
+/** 分类导航条：横向可滚，选中态用强调色底。 */
+@Composable
+private fun CategoryTabs(
+    cats: List<Pair<String, String>>,
+    selected: Int,
+    onSelect: (Int) -> Unit
+) {
+    val state = rememberLazyListState()
+    LazyRow(
+        state = state,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier.mouseWheel(state, horizontal = true)
+    ) {
+        item {
+            TabChip("最近更新", selected == 0) { onSelect(0) }
+        }
+        itemsIndexed(cats) { index, item ->
+            TabChip(item.second, selected == index + 1) { onSelect(index + 1) }
+        }
+    }
+}
+
+@Composable
+private fun TabChip(text: String, active: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(Tokens.Corner.badge))
+            .background(if (active) Tokens.Accent else Tokens.Surface)
+            .clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 7.dp)
+    ) {
+        Text(
+            text = text,
+            color = if (active) Tokens.OnAccent else Tokens.TextDim,
+            style = MaterialTheme.typography.labelMedium,
+            maxLines = 1
+        )
+    }
+}
+
+
+/**
+ * 首屏骨架：真实数据回来前先给出布局轮廓，避免"黑屏 + 一行字"的廉价感。
+ */
+@Composable
+private fun HomeSkeleton() {
+    val transition = rememberInfiniteTransition(label = "skeleton")
+    val alpha by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.75f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "skeletonAlpha"
+    )
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        SkeletonBar(width = 420.dp, height = 44.dp, alpha = alpha)
+        Spacer(Modifier.height(Tokens.Gap.m))
+        SkeletonBar(width = 280.dp, height = 18.dp, alpha = alpha)
+        Spacer(Modifier.height(Tokens.Gap.m))
+        SkeletonBar(width = 620.dp, height = 16.dp, alpha = alpha)
+        SkeletonBar(width = 560.dp, height = 16.dp, alpha = alpha, top = 8.dp)
+        Spacer(Modifier.height(Tokens.Gap.xxl))
+        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            repeat(6) {
+                Box(
+                    modifier = Modifier
+                        .width(Tokens.CardWidth)
+                        .height(Tokens.CardHeight)
+                        .clip(RoundedCornerShape(Tokens.Corner.card))
+                        .background(Tokens.SurfaceHigh.copy(alpha = alpha))
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SkeletonBar(width: Dp, height: Dp, alpha: Float, top: Dp = 0.dp) {
+    Box(
+        modifier = Modifier
+            .padding(top = top)
+            .width(width)
+            .height(height)
+            .clip(RoundedCornerShape(Tokens.Corner.badge))
+            .background(Tokens.SurfaceHigh.copy(alpha = alpha))
+    )
+}
+
+@Composable
+private fun LoadingBlock() {
+    Column {
+        Text("正在加载…", color = Tokens.TextDim, style = MaterialTheme.typography.bodyLarge)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "首次使用插件源需要下载并初始化插件，可能要等几秒",
+            color = Tokens.TextDim,
+            style = MaterialTheme.typography.labelSmall
+        )
+    }
+}
+
+@Composable
+private fun ErrorBlock(
+    title: String,
+    message: String,
+    onRetry: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    Column {
+        Text(title, color = Tokens.Text, style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = message,
+            color = Tokens.TextDim,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 6,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 780.dp)
+        )
+        Spacer(Modifier.height(16.dp))
+        Row {
+            Text(
+                text = "重试",
+                color = Tokens.Accent,
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.clickable { onRetry() }.padding(vertical = 8.dp, horizontal = 12.dp)
+            )
+            Spacer(Modifier.width(16.dp))
+            Text(
+                text = "换站点 / 改配置",
+                color = Tokens.Accent,
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.clickable { onOpenSettings() }.padding(vertical = 8.dp, horizontal = 12.dp)
+            )
+        }
+    }
+}
