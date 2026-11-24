@@ -48,6 +48,7 @@ class SpiderClient(private val context: Context) {
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            android.util.Log.i("NextMovieTiming", "plugin-bind-connected")
             inbound = service?.let { Messenger(it) }
             synchronized(lock) { binding = false }
         }
@@ -81,10 +82,10 @@ class SpiderClient(private val context: Context) {
 
     suspend fun preconnect() { ensureConnected() }
 
-    private suspend fun ensureConnected(): Boolean {
-        inbound?.let { return true }
+    fun startBinding() {
         synchronized(lock) {
             if (!binding && !bound) {
+                android.util.Log.i("NextMovieTiming", "plugin-bind-request")
                 binding = context.bindService(
                     Intent(context, SpiderService::class.java),
                     connection,
@@ -94,6 +95,11 @@ class SpiderClient(private val context: Context) {
                 android.util.Log.i("NextMovieSpider", "bindService -> $binding")
             }
         }
+    }
+
+    private suspend fun ensureConnected(): Boolean {
+        inbound?.let { return true }
+        startBinding()
         // 模拟器/低端盒子上插件进程冷启动可能要十几秒，这里等到 20s 再判失败
         return withTimeoutOrNull(20_000) { connectionState.first { it != null } } != null
     }

@@ -168,6 +168,10 @@ class AppRepository(private val context: Context) {
     fun siteByKey(key: String): Site? = sites.firstOrNull { it.key == key }
 
     /** 站点分类导航（CMS 走 ac=list 的 class 数组；插件站点暂不提供） */
+    fun startConfiguredPluginHost() {
+        if (configUrl().isNotBlank() && prefs.getBoolean(KEY_SITE_PLUGIN, true)) spiderHost.startBinding()
+    }
+
     suspend fun connectPluginHost(site: Site) {
         if (site.isSpider && site.isPlayable) spiderHost.preconnect()
     }
@@ -178,7 +182,7 @@ class AppRepository(private val context: Context) {
     fun selectSite(key: String) {
         currentSite = sites.firstOrNull { it.key == key } ?: currentSite
         currentSite?.let {
-            prefs.edit().putString(KEY_SITE_KEY, it.key).putBoolean(KEY_SITE_MANUAL, true).apply()
+            prefs.edit().putString(KEY_SITE_KEY, it.key).putBoolean(KEY_SITE_MANUAL, true).putBoolean(KEY_SITE_PLUGIN, it.isSpider && it.isPlayable).apply()
         }
     }
 
@@ -204,7 +208,7 @@ class AppRepository(private val context: Context) {
         val savedKey = prefs.getString(KEY_SITE_KEY, "").orEmpty()
         val manual = prefs.getBoolean(KEY_SITE_MANUAL, false)
         currentSite = SiteSelector.pick(sites, savedKey, manual)
-        currentSite?.let { prefs.edit().putString(KEY_SITE_KEY, it.key).apply() }
+        currentSite?.let { prefs.edit().putString(KEY_SITE_KEY, it.key).putBoolean(KEY_SITE_PLUGIN, it.isSpider && it.isPlayable).apply() }
         recordConfigResult(true, "✓ 已加载 ${sites.size} 个站点")
         return sites.size
     }
@@ -492,6 +496,7 @@ class AppRepository(private val context: Context) {
         private const val KEY_CONFIG_URL = "config_url"
         private const val KEY_TMDB_TOKEN = "tmdb_token"
         private const val KEY_SITE_KEY = "site_key"
+        private const val KEY_SITE_PLUGIN = "site_plugin"
         private const val KEY_POSTER_ENHANCE = "poster_enhance"
         private const val KEY_SITE_MANUAL = "site_manual"
         private const val KEY_TMDB_ROUTE = "tmdb_route"

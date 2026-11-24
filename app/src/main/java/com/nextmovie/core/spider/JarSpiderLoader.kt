@@ -80,9 +80,6 @@ class JarSpiderLoader(
         // 只会在宿主 classpath 里找，找不到就直接 abort（MuMu 上表现为插件进程闪退）。
         val libDir = File(context.filesDir, "spider-libs/" + jarFile.nameWithoutExtension).apply { mkdirs() }
         val nativeFile = extractNativeLib(jarFile, libDir)
-        // Guard 的二级 dex 加密体（assets/ftyshinidie.guard）也落盘：
-        // 部分插件的 <混淆名>(File) 入口要的是这个 payload，而不是 jar 自身。
-        val guardFile = extractAssetEntry(jarFile, ".guard", libDir, "payload.guard")
         val bridgeDex = ensureBridgeDex()
 
         val loader = classLoaders.getOrPut(jarFile.absolutePath) {
@@ -335,17 +332,6 @@ class JarSpiderLoader(
 
     private fun md5(bytes: ByteArray): String =
         MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { b -> "%02x".format(b) }
-
-    /** 从 jar 里按后缀取一个资源落盘（assets 里的 .guard 这类加密负载）。 */
-    private fun extractAssetEntry(jarFile: File, suffix: String, dir: File, name: String): File? = runCatching {
-        ZipFile(jarFile).use { zip ->
-            val entry = zip.entries().asSequence().firstOrNull { it.name.endsWith(suffix) && it.size > 0 }
-                ?: return@use null
-            val out = File(dir, name)
-            zip.getInputStream(entry).use { input -> out.outputStream().use { input.copyTo(it) } }
-            out
-        }
-    }.getOrNull()
 
     /** 从 jar 的 assets 里挑出与本进程 ABI 匹配的那个 .so，落到私有目录。 */
     private fun extractNativeLib(jarFile: File, dir: File): File? = runCatching {

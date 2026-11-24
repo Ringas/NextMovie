@@ -57,6 +57,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         repo = AppRepository(applicationContext)
+        // Android can start the isolated process while Compose and the configuration load.
+        repo.startConfiguredPluginHost()
         setContent {
             com.nextmovie.ui.theme.TvDisplay {
                 NextMovieTheme { AppRoot(repo) }
@@ -147,7 +149,9 @@ private fun AppRoot(repo: AppRepository) {
                 kotlinx.coroutines.delay(3_000)
                 if (route != Route.Home || repo.configUrl() != savedUrl) return@LaunchedEffect
             }
+            val remoteConfigStarted = System.nanoTime()
             val r = runCatching { repo.loadConfig(savedUrl) }
+            android.util.Log.i("NextMovieTiming", "startup-config-network ok=${r.isSuccess} ${(System.nanoTime() - remoteConfigStarted) / 1_000_000}ms")
             booting = false
             if (restored) return@LaunchedEffect
             // 冷启动自动载入同样要给结果反馈：成功报站点数，失败报原因，避免"黑屏几秒像卡死"

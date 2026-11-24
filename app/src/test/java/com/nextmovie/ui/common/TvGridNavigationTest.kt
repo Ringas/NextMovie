@@ -15,5 +15,9 @@ class TvGridNavigationTest {
         assertEquals(11, TvGridNavigation.target(8, 5, 12, 20))
         assertEquals(11, TvGridNavigation.target(11, 5, 12, 20))
     }
-    @Test fun normalizedTvWidthUsesReadableColumns() { assertEquals(5, TvGridNavigation.columns(896f)); assertEquals(4, TvGridNavigation.columns(704f)) }
+    @Test fun normalizedTvWidthUsesCurrentPosterSizeAndSpacing() {
+        assertEquals(6, TvGridNavigation.columns(896f))
+        assertEquals(5, TvGridNavigation.columns(704f))
+        assertEquals(4, TvGridNavigation.columns(703f))
+    }
 }

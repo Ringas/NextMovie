@@ -152,8 +152,9 @@ class SpiderService : Service() {
         val loadStarted = System.nanoTime()
         val spider = runBlocking { if (isJs) jsLoader.obtain(site) else loader.obtain(site) }
 
-        android.util.Log.i("NextMovieTiming", "plugin-obtain ${(System.nanoTime() - loadStarted) / 1_000_000}ms")
+        android.util.Log.i("NextMovieTiming", "plugin-obtain action=$action ${(System.nanoTime() - loadStarted) / 1_000_000}ms")
 
+        val sourceStarted = System.nanoTime()
         val raw = when (action) {
             // TVBox 的两段式首页：homeContent 只给分类（class），homeVideoContent 才给视频列表。
             // 合并成一份返回，宿主一次请求就能同时渲染分类 Tab 与海报行。
@@ -232,6 +233,7 @@ class SpiderService : Service() {
             else -> return errorBundle(id, "未知动作：$action")
         }
 
+        android.util.Log.i("NextMovieTiming", "plugin-source action=$action ${(System.nanoTime() - sourceStarted) / 1_000_000}ms")
         if (raw.isBlank() || raw == "{}") return errorBundle(id, "插件没有返回数据")
         return okBundle(id, raw)
     }
