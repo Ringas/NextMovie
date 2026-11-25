@@ -12,10 +12,11 @@ class HomeSnapshotStoreTest {
             store.write("source", listOf(Vod("1", "Example", "https://example.test/poster.jpg")))
             assertEquals("Example", store.read("source")!!.single().name)
             now += 300_001
-            assertNull(store.read("source"))
-            assertEquals("Example", store.read("source", maxAgeMs = 86_400_000)!!.single().name)
+            assertEquals(300_001L, store.ageMs("source"))
+            assertNull(store.read("source", maxAgeMs = 300_000))
+            assertEquals("Example", store.read("source")!!.single().name)
             now += 86_400_000
-            assertNull(store.read("source", maxAgeMs = 86_400_000))
+            assertNull(store.read("source"))
         } finally { dir.deleteRecursively() }
     }
     @Test fun failedEmptyResponsesDoNotEraseVisibleContent() {

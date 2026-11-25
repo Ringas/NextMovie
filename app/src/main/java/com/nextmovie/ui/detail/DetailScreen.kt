@@ -64,6 +64,9 @@ import com.nextmovie.core.history.HistoryEntry
 import com.nextmovie.core.model.Episode
 import com.nextmovie.core.model.PlayLine
 import com.nextmovie.core.model.Vod
+import com.nextmovie.core.model.mediaBadges
+import com.nextmovie.core.model.ratingBadges
+import com.nextmovie.core.model.withMetadataFrom
 import com.nextmovie.ui.common.AmberChip
 import com.nextmovie.ui.common.BrandLogo
 import com.nextmovie.ui.common.GoldChip
@@ -108,6 +111,13 @@ fun DetailScreen(
 ) {
     val screenStartedAt = remember { System.nanoTime() }
     val context = LocalContext.current
+    var cachedMetadata by remember(site.runtimeKey, initial.id) { mutableStateOf<Vod?>(null) }
+    LaunchedEffect(site.runtimeKey, initial.id) {
+        cachedMetadata = repo.cachedDetailMetadata(site, initial.id)
+        if (cachedMetadata != null) {
+            android.util.Log.i("NextMovieTiming", "detail-metadata-ready ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms")
+        }
+    }
     val scope = rememberCoroutineScope()
     var agg by remember { mutableStateOf<AppRepository.AggregatedDetail?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -210,7 +220,8 @@ fun DetailScreen(
     val safeSourceIndex = sourceIndex.coerceIn(0, sources.lastIndex.coerceAtLeast(0))
     val activeSource = sources.getOrNull(safeSourceIndex)
     val active: Site = activeSource?.site ?: site
-    val vod = activeSource?.detail?.vod ?: initial
+    val seed = cachedMetadata?.withMetadataFrom(initial) ?: initial
+    val vod = activeSource?.detail?.vod?.withMetadataFrom(seed) ?: seed
     val lines: List<PlayLine> = activeSource?.detail?.lines.orEmpty()
     val line: PlayLine? = lines.getOrNull(lineIndex)
         ?: activeSource?.let { src -> lines.getOrNull(src.bestLineIndex) }
@@ -364,8 +375,9 @@ fun DetailScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     MetaChip(if (sources.isEmpty()) site.name else active.name, highlight = true)
-                    val score = vod.tmdb?.voteAverage?.takeIf { it > 0.0 } ?: vod.score.toDoubleOrNull()
-                    if (score != null && score > 0) GoldChip("TMDB %.1f".format(score))
+                    vod.ratingBadges().forEach { GoldChip(it) }
+                    vod.mediaBadges(line?.episodes?.firstOrNull()?.name.orEmpty(), line?.name.orEmpty())
+                        .forEach { MetaChip(it) }
                     vod.displayYear.takeIf { it.isNotBlank() }?.let { MetaChip(it) }
                     vod.area.takeIf { it.isNotBlank() }?.let { MetaChip(it) }
                     vod.remark.takeIf { it.isNotBlank() }?.let { MetaChip(it.take(16)) }

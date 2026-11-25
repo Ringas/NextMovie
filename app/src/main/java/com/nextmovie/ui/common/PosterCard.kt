@@ -62,7 +62,8 @@ fun PosterCard(
     width: Dp = Tokens.CardWidth,
     height: Dp = Tokens.CardHeight,
     progress: Float? = null,
-    fillWidth: Boolean = false
+    fillWidth: Boolean = false,
+    onImageFailed: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val url = remember(vod.displayPic, vod.pic) { vod.displayPic.ifBlank { vod.pic } }
@@ -132,7 +133,10 @@ fun PosterCard(
                     model = model,
                     contentDescription = vod.name,
                     contentScale = ContentScale.Crop,
-                    onError = { imageFailed = true },
+                    onError = {
+                        imageFailed = true
+                        onImageFailed()
+                    },
                     modifier = Modifier.fillMaxSize().clip(inner)
                 )
             }

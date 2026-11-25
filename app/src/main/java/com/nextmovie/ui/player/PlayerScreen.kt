@@ -108,6 +108,7 @@ fun PlayerScreen(
     val view = LocalView.current
     var requestStarted by remember { mutableLongStateOf(0L) }
     var buffering by remember { mutableStateOf(true) }
+    var trackBadges by remember { mutableStateOf(emptyList<String>()) }
     var playbackError by remember { mutableStateOf<String?>(null) }
     var resumedHint by remember { mutableStateOf(false) }
     var keyHint by remember { mutableStateOf<String?>(null) }
@@ -153,6 +154,31 @@ fun PlayerScreen(
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                trackBadges = buildList {
+                    val formats = tracks.groups.flatMap { group ->
+                        (0 until group.length).filter { group.isTrackSelected(it) }.map { group.getTrackFormat(it) }
+                    }
+                    formats.firstOrNull { it.height > 0 }?.height?.let { height ->
+                        add(if (height >= 2160) "4K" else "${height}p")
+                    }
+                    formats.firstOrNull { it.channelCount > 0 }?.let { audio ->
+                        val codec = when (audio.sampleMimeType) {
+                            "audio/eac3-joc" -> "Dolby Atmos"
+                            "audio/eac3" -> "Dolby Digital Plus"
+                            "audio/ac3" -> "Dolby Digital"
+                            "audio/true-hd" -> "Dolby TrueHD"
+                            "audio/vnd.dts.hd" -> "DTS-HD"
+                            "audio/vnd.dts" -> "DTS"
+                            "audio/mp4a-latm" -> "AAC"
+                            else -> null
+                        }
+                        codec?.let { add(it) }
+                        when (audio.channelCount) { 6 -> add("5.1"); 8 -> add("7.1") }
+                    }
+                }
+            }
+
             override fun onRenderedFirstFrame() {
                 if (requestStarted > 0) android.util.Log.i("NextMovieTiming", "first-frame ${(System.nanoTime() - requestStarted) / 1_000_000}ms")
             }
@@ -207,6 +233,7 @@ fun PlayerScreen(
 
     LaunchedEffect(url, headers, startPositionMs) {
         requestStarted = System.nanoTime()
+        trackBadges = emptyList()
         buffering = true
         playbackError = null
         ended = false
@@ -498,6 +525,7 @@ fun PlayerScreen(
                         Spacer(Modifier.weight(1f))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (slots.size > 1) StatusPill("线路 ${currentSlot + 1}/${slots.size} · 菜单键切换", Tokens.Text)
+                            trackBadges.forEach { StatusPill(it, Tokens.Text) }
                             if (speed > 1f) StatusPill("${speed}×", Tokens.Accent)
                             if (resumedHint) StatusPill("已续播", Tokens.Text)
                         }

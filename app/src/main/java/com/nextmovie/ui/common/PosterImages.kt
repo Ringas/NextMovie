@@ -24,9 +24,5 @@ fun posterModel(context: Context, rawUrl: String, detail: Boolean = false): Any 
     // 豆瓣图床对非浏览器 UA 直接返回 418（实测：无 UA 418/13 字节，Chrome UA 200/正常图片），
     // 全局带一次浏览器 UA，其它图床也普遍更宽容。
     builder.addHeader("User-Agent", baked["User-Agent"] ?: BROWSER_UA)
-    builder.listener(
-        onSuccess = { _, _ -> android.util.Log.d("NextMoviePoster", "ok $url") },
-        onError = { _, r -> android.util.Log.w("NextMoviePoster", "fail $url -> ${r.throwable}") }
-    )
     return builder.build()
 }

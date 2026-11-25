@@ -30,7 +30,9 @@ object XmlCmsParser {
                 pic = tag("vod_pic", "pic"), remark = tag("vod_remarks", "note"),
                 year = tag("vod_year", "year"), area = tag("vod_area", "area"),
                 typeName = tag("vod_class", "type"), actor = tag("vod_actor", "actor"),
-                director = tag("vod_director", "director"), content = tag("vod_content", "des"))
+                director = tag("vod_director", "director"), content = tag("vod_content", "des"),
+                score = tag("vod_score", "score"), doubanScore = tag("vod_douban_score", "douban_score"),
+                resolution = tag("vod_resolution", "resolution"), audio = tag("vod_audio", "audio"))
             val dd = element.getElementsByTagName("dd")
             val lines = (0 until dd.length).mapNotNull { i ->
                 val entry = dd.item(i) as? Element ?: return@mapNotNull null

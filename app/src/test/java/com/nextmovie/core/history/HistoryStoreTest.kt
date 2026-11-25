@@ -59,12 +59,15 @@ class HistoryStoreTest {
     }
 
     @Test
-    fun `same vod on different sites stays separate`() {
+    fun `same title on different sites keeps latest playback progress`() {
         val s = store()
-        s.upsert(entry("1", site = "源A"))
-        s.upsert(entry("1", site = "源B"))
+        s.upsert(entry("1", pos = 60_000, site = "源A"))
+        val latest = entry("2", pos = 120_000, site = "源B").copy(name = "剧名1")
+        s.upsert(latest)
+        s.upsert(entry("3", site = "源A"))
         assertEquals(2, s.list().size)
-        assertNull(s.find("源C", "1"))
+        assertEquals(latest, s.findByName("剧名1"))
+        assertNull(s.find("源A", "1"))
     }
 
     @Test

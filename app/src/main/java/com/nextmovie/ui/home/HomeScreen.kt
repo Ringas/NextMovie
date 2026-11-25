@@ -118,7 +118,9 @@ fun HomeScreen(
     var vods by remember { mutableStateOf<List<Vod>>(emptyList()) }
     var enrichedById by remember { mutableStateOf<Map<String, Vod>>(emptyMap()) }
     var continueList by remember { mutableStateOf<List<HistoryEntry>>(emptyList()) }
-    val requested = remember { mutableSetOf<String>() }
+    val requested = remember(site.runtimeKey) { mutableSetOf<String>() }
+    var focusedVod by remember(site.runtimeKey) { mutableStateOf<Vod?>(null) }
+    val posterRequests = remember { Semaphore(2) }
     val context = LocalContext.current
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -218,14 +220,17 @@ fun HomeScreen(
             runCatching { gridState.scrollToItem(target) }
         }
     }
-    LaunchedEffect(site.key, vods.size) {
-        if (vods.isEmpty()) return@LaunchedEffect
-        val targets = vods.filter { it.id !in requested }.take(4)
+    LaunchedEffect(site.runtimeKey, focusedVod?.id) {
+        val focused = focusedVod ?: return@LaunchedEffect
+        delay(450)
+        if (repo.cachedDetailMetadata(site, focused.id) == null) repo.prefetchDetail(site, focused)
+    }
+    LaunchedEffect(site.runtimeKey, vods) {
+        val targets = vods.filter { it.displayPic.isBlank() && it.id !in requested }.take(4)
         if (targets.isEmpty()) return@LaunchedEffect
         requested += targets.map { it.id }
-        val sem = Semaphore(2)
         val resolved = coroutineScope {
-            targets.map { vod -> async { sem.withPermit { repo.enrichPoster(vod, detail = false) } } }.awaitAll()
+            targets.map { vod -> async { posterRequests.withPermit { repo.enrichPoster(vod, detail = false) } } }.awaitAll()
         }
         enrichedById = enrichedById + resolved.associateBy { it.id }
     }
@@ -391,6 +396,7 @@ fun HomeScreen(
                             vod = vod,
                             onClick = { onOpenDetail(vod) },
                             onFocused = {
+                                focusedVod = vod
                                 onFocusIndexChanged(index)
                                 val tint = PosterTint.cached(vod.displayPic)
                                 if (tint != null) posterTint = tint
@@ -399,7 +405,13 @@ fun HomeScreen(
                                 }
                             },
                             modifier = Modifier.focusRequester(remember(vod.id) { FocusRequester() }),
-                            fillWidth = true
+                            fillWidth = true,
+                            onImageFailed = {
+                                if (requested.add(vod.id)) scope.launch {
+                                    val resolved = posterRequests.withPermit { repo.enrichPoster(vod, detail = false) }
+                                    enrichedById = enrichedById + (vod.id to resolved)
+                                }
+                            }
                         )
                     }
                 }

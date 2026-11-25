@@ -247,12 +247,13 @@ private fun AppRoot(repo: AppRepository) {
         }
         playJob?.cancel()
         playJob = scope.launch {
+            val resolveStarted = System.nanoTime()
             resolveStage = "正在读取来源播放地址…"
             resolving = true
             try {
                 val result = try {
                     repo.preparePlayback(activeSite)
-                    if (activeSite.isCms) repo.resolvePlay(activeSite, line.name, episode.url) { resolveStage = it }
+                    if (activeSite.isCms || activeSite.isJavaScript) repo.resolvePlay(activeSite, line.name, episode.url) { resolveStage = it }
                     else PluginPlaybackWindow.resolve(context) { repo.resolvePlay(activeSite, line.name, episode.url) { resolveStage = it } }
                 }
                 catch (e: kotlinx.coroutines.CancellationException) { repo.cancelPlayback(activeSite); throw e }
@@ -261,6 +262,7 @@ private fun AppRoot(repo: AppRepository) {
                     Toast.makeText(context, if (e is IllegalStateException && e.message == "网页解析未取得媒体地址，请更换线路") e.message else "来源解析失败，请重试或换一条线路", Toast.LENGTH_LONG).show()
                     return@launch
                 }
+            android.util.Log.i("NextMovieTiming", "play-resolve ${(System.nanoTime() - resolveStarted) / 1_000_000}ms")
             when {
                 result == null -> {
                     repo.recordPlayOutcome(activeSite.key, false)

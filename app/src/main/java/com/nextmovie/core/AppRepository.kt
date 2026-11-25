@@ -23,6 +23,7 @@ import com.nextmovie.core.poster.PosterCache
 import com.nextmovie.core.poster.PosterResolver
 import com.nextmovie.core.spider.SpiderHost
 import com.nextmovie.core.tmdb.TmdbClient
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.cancel
@@ -52,6 +53,7 @@ class AppRepository(private val context: Context) {
     private val aggregations = com.nextmovie.core.cache.RequestCache<String, AggregatedDetail?>(180_000, 32, cacheIf = { it != null && it.sources.isNotEmpty() })
     private val homeSnapshots = com.nextmovie.core.cache.HomeSnapshotStore(File(context.filesDir, "home-snapshots"))
     private val warmSites = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val detailSnapshots = com.nextmovie.core.cache.HomeSnapshotStore(File(context.filesDir, "detail-metadata"))
     private val prefetchScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
     private val prefetchSlot = java.util.concurrent.Semaphore(1)
     private val configGeneration = java.util.concurrent.atomic.AtomicLong()
@@ -345,24 +347,33 @@ class AppRepository(private val context: Context) {
         }
 
     /** Speculation stays on the focused item of an already initialized source, at most one request. */
-    fun prefetchDetail(site: Site, vod: Vod) {
-        if (site.runtimeKey !in warmSites || vod.id.isBlank() || vod.action.isNotBlank() || vod.tag == "folder") return
-        if (vod.id.startsWith("action://", true)) return
+    suspend fun prefetchDetail(site: Site, vod: Vod): Vod? {
+        if (site.runtimeKey !in warmSites || vod.id.isBlank() || vod.action.isNotBlank() || vod.tag == "folder") return null
+        if (vod.id.startsWith("action://", true)) return null
         val sourceLabel = "${site.api} ${site.name}"
-        if (listOf("wogg", "网盘", "玩偶", "夸克", "alist", "netdisk").any { sourceLabel.contains(it, true) }) return
-        if (!prefetchSlot.tryAcquire()) return
-        prefetchScope.launch {
-            try { detail(site, vod.id, vod.name) }
-            catch (e: kotlinx.coroutines.CancellationException) { throw e }
-            catch (_: Exception) { /* A speculative failure must never affect navigation. */ }
-            finally { prefetchSlot.release() }
-        }
+        if (listOf("wogg", "网盘", "玩偶", "夸克", "alist", "netdisk").any { sourceLabel.contains(it, true) }) return null
+        if (!prefetchSlot.tryAcquire()) return null
+        val task = prefetchScope.async { detailAttempt { detail(site, vod.id, vod.name)?.vod } }
+        task.invokeOnCompletion { prefetchSlot.release() }
+        return task.await()
+    }
+
+    private fun detailSnapshotKey(site: Site, id: String): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest("${site.runtimeKey}|$id".toByteArray()).joinToString("") { "%02x".format(it) }
+
+    suspend fun cachedDetailMetadata(site: Site, id: String): Vod? = withContext(kotlinx.coroutines.Dispatchers.IO) {
+        detailSnapshots.read(detailSnapshotKey(site, id), maxAgeMs = 7 * 86_400_000L)?.firstOrNull()
     }
 
     suspend fun detail(site: Site, id: String, altId: String? = null): VodDetail? =
-        // 插件源额外带一个「片名」作为备用 id：部分插件 homeVod 不返回 vod_id
         details.get("detail|${site.runtimeKey}|$id") {
-            if (site.isCms) CmsSiteClient(http, site).detail(id) else spiderHost.detail(site, id, altId)
+            val generation = detailSnapshots.generation
+            val result = if (site.isCms) CmsSiteClient(http, site).detail(id) else spiderHost.detail(site, id, altId)
+            if (result != null) withContext(kotlinx.coroutines.Dispatchers.IO) {
+                detailSnapshots.write(detailSnapshotKey(site, id), listOf(result.vod.copy(action = "")), generation)
+            }
+            result
         }
 
     /**
@@ -688,7 +699,7 @@ class AppRepository(private val context: Context) {
         runCatching { poster.resolve(vod, detail, posterEnhance) }.getOrDefault(vod)
 
     suspend fun invalidateContent() {
-        withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.clear() }
+        withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.clear(); detailSnapshots.clear() }
         lists.clear()
         details.clear()
         spiderHost.clearCache()

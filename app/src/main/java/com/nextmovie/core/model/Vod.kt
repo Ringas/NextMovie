@@ -21,7 +21,10 @@ data class Vod(
     val tag: String = "",
     val action: String = "",
     /** TMDB 补充信息，未命中的源保持 null */
-    val tmdb: TmdbMeta? = null
+    val tmdb: TmdbMeta? = null,
+    val doubanScore: String = "",
+    val resolution: String = "",
+    val audio: String = ""
 ) {
     val displayPic: String get() = tmdb?.posterUrl?.takeIf { it.isNotBlank() } ?: pic
     val displayBackdrop: String
@@ -86,6 +89,10 @@ object VodParser {
             // 少认一个键，详情页就整段空白，所以这里全部兜一遍。
             content = text(o, "vod_content", "vod_blurb", "vod_desc", "des", "content", "brief"),
             score = text(o, "vod_score", "score"),
+            doubanScore = text(o, "vod_douban_score", "doubanScore", "douban_score"),
+            resolution = text(o, "vod_resolution", "resolution"),
+            audio = text(o, "vod_audio", "audio"),
+            backdrop = normalizePic(text(o, "vod_backdrop", "backdrop")),
             tag = text(o, "vod_tag", "tag"),
             action = text(o, "action")
         )
@@ -99,6 +106,7 @@ object VodParser {
     private fun text(o: JSONObject, vararg keys: String): String {
         for (k in keys) {
             val v = o.opt(k) ?: continue
+            if (v == JSONObject.NULL) continue
             val s = when (v) {
                 is org.json.JSONArray -> v.optString(0, "")
                 is JSONObject -> v.optString("id", v.optString("value", ""))
@@ -156,7 +164,12 @@ object VodParser {
                     .put("vod_class", v.typeName)
                     .put("vod_actor", v.actor)
                     .put("vod_director", v.director)
-                    .put("vod_content", v.content)
+                    .put("vod_content", v.displayOverview)
+                    .put("vod_score", v.score)
+                    .put("vod_douban_score", v.doubanScore)
+                    .put("vod_resolution", v.resolution)
+                    .put("vod_audio", v.audio)
+                    .put("backdrop", v.backdrop)
                     .put("vod_tag", v.tag)
                     .put("action", v.action)
             )
