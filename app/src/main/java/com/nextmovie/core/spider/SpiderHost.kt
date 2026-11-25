@@ -171,10 +171,20 @@ class SpiderHost(
     suspend fun search(site: Site, keyword: String): List<Vod> = withContext(Dispatchers.IO) {
         tryNative(site, "search") { it.search(site, keyword) }?.let { return@withContext it }
         ensureSpider(site, "search")
-        val raw = client.request(ACTION_SEARCH, site) {
+        // CatVod 语义：searchContent(key, quick, page) 的 quick 是「本次是否快搜」，
+        // 不是站点能力开关。配置里的 quickSearch:1 表示站点支持快搜，直接传 true 会让
+        // 部分 Guard 插件走浅层检索并返回空。先按完整检索来，空了再退回快搜。
+        var raw = client.request(ACTION_SEARCH, site) {
             putString(KEY_ARG1, keyword)
             putString(KEY_ARG2, "1")
-            putBoolean(KEY_FILTER, site.quickSearch)
+            putBoolean(KEY_FILTER, false)
+        }
+        if (raw.isBlank() || raw == "{}" || raw.contains("\"list\":[]")) {
+            raw = client.request(ACTION_SEARCH, site) {
+                putString(KEY_ARG1, keyword)
+                putString(KEY_ARG2, "1")
+                putBoolean(KEY_FILTER, true)
+            }
         }
         VodParser.list(JSONObject(raw))
     }

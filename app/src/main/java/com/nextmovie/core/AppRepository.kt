@@ -260,13 +260,119 @@ class AppRepository(private val context: Context) {
      * 用户还在看首页的时候（有快照时首页 200ms 就出画，用户不会察觉）。等真正点开海报时，
      * 插件实例、dex、native lib 都已在 :spider 进程里就绪。
      */
+    // ── 源能力记忆 ─────────────────────────────────────────────────────────────
+    // 有的站点只做「榜单/发现」：homeContent、categoryContent 都正常，但 detailContent
+    // 对任何 id 都同步返回空（例如 csp_NewDouBanGuard）。它们不能当「线路源」用，
+    // 但仍然是首页内容的好来源。这里按实测结果记住这类站点，避免每次详情都白跑一轮。
+    fun isDiscoveryOnly(site: Site): Boolean =
+        prefs.getBoolean("cap_discovery_${site.key}", false)
+
+    fun lineScore(site: Site): Int {
+        if (isDiscoveryOnly(site)) return -1
+        val ok = prefs.getInt("cap_lines_${site.key}", 0)
+        val rate = (sourceSuccessRate(site.key) * 10).toInt()
+        val warm = if (site.runtimeKey in warmSites) 100 else 0
+        // 实测详情耗时越短越优先（花卷 1.6s / 玩偶 5.4s，差 4s 就体现在这里）
+        val ms = prefs.getInt("cap_ms_${site.key}", 0)
+        return ok * 3 + rate + warm - ms / 50
+    }
+
+    private fun noteDetailLines(site: Site) {
+        prefs.edit()
+            .putInt("cap_lines_${site.key}", prefs.getInt("cap_lines_${site.key}", 0) + 1)
+            .putBoolean("cap_discovery_${site.key}", false)
+            .apply()
+    }
+
+    private fun noteDetailBlank(site: Site) {
+        val blanks = prefs.getInt("cap_blank_${site.key}", 0) + 1
+        val lines = prefs.getInt("cap_lines_${site.key}", 0)
+        prefs.edit().putInt("cap_blank_${site.key}", blanks).apply()
+        if (lines == 0 && blanks >= 2) {
+            prefs.edit().putBoolean("cap_discovery_${site.key}", true).apply()
+            android.util.Log.i("NextMovieTiming", "cap-mark discovery-only site=${site.name} blanks=$blanks")
+        }
+    }
+
+    /**
+     * 能力探针：分类页里出现「非 msearch:」的 id，说明这个源的条目带真实详情 id，
+     * detailContent 才可能返回线路；全是 msearch: 的源只能做榜单。
+     */
+    private suspend fun probeRealIds(site: Site?): Boolean {
+        if (site == null) return false
+        if (prefs.contains("cap_real_${site.key}")) return prefs.getBoolean("cap_real_${site.key}", false)
+        val started = System.nanoTime()
+        val result = runCatching {
+            val tid = categories(site).firstOrNull()?.first
+            if (tid.isNullOrBlank()) false
+            else category(site, tid, 1).any { it.id.isNotBlank() && !it.id.startsWith("msearch:", true) }
+        }.getOrDefault(false)
+        prefs.edit().putBoolean("cap_real_${site.key}", result).apply()
+        android.util.Log.i(
+            "NextMovieTiming",
+            "cap-probe site=${site.name} realIds=$result ${(System.nanoTime() - started) / 1_000_000}ms"
+        )
+        return result
+    }
+
+    /** 启动时把 1–2 个「真的能出线路」的源一起预热，详情才有 Marco 那种 4s 量级。 */
+    fun prewarmLineSources(count: Int = 2, reason: String = "startup") {
+        prefetchScope.launch {
+            val current = currentSite
+            val picked = sites
+                .filter { it.isPlayable && it.searchable && it.isSpider }
+                .filterNot { isDiscoveryOnly(it) }
+                .filterNot { it.runtimeKey == current?.runtimeKey }
+                .sortedByDescending { lineScore(it) }
+                .take(count)
+            for (candidate in picked) {
+                if (candidate.runtimeKey in warmSites) continue
+                val started = System.nanoTime()
+                runCatching { spiderHost.warm(candidate) }
+                    .onSuccess {
+                        warmSites.add(candidate.runtimeKey)
+                        android.util.Log.i(
+                            "NextMovieTiming",
+                            "prewarm-line-ok ${(System.nanoTime() - started) / 1_000_000}ms site=${candidate.name} reason=$reason"
+                        )
+                        // 预热完立刻做一次「这个源会不会给真 id」的能力探针：
+                        // 只做榜单的源（如 csp_NewDouBanGuard）分类里全是 msearch: 重定向 id，
+                        // 详情必然拿不到线路；给真 id 的源才是线路源。
+                        if (probeRealIds(candidate) && !probeRealIds(currentSite)) {
+                            android.util.Log.i(
+                                "NextMovieTiming",
+                                "auto-site 切到 ${candidate.name}（能给出真实线路 id）"
+                            )
+                            prefs.edit()
+                                .putString(KEY_SITE_KEY, candidate.key)
+                                .putBoolean(KEY_SITE_MANUAL, false)
+                                .putString("line_site_key", candidate.key)
+                                .apply()
+                            currentSite = candidate
+                        }
+                    }
+                    .onFailure {
+                        android.util.Log.w(
+                            "NextMovieTiming",
+                            "prewarm-line-fail ${(System.nanoTime() - started) / 1_000_000}ms site=${candidate.name} ${it.message}"
+                        )
+                    }
+            }
+        }
+    }
+
     fun prewarmCurrentSite(reason: String = "startup") {
         val site = currentSite ?: return
         if (!site.isSpider || !site.isPlayable || site.runtimeKey in warmSites) return
         prefetchScope.launch {
             val started = System.nanoTime()
             runCatching { spiderHost.warm(site) }
-                .onSuccess { warmSites.add(site.runtimeKey); android.util.Log.i("NextMovieTiming", "prewarm-ok ${(System.nanoTime() - started) / 1_000_000}ms site=${site.name} reason=$reason initOnly=true") }
+                .onSuccess {
+                    warmSites.add(site.runtimeKey)
+                    android.util.Log.i("NextMovieTiming", "prewarm-ok ${(System.nanoTime() - started) / 1_000_000}ms site=${site.name} reason=$reason initOnly=true")
+                    // 当前源预热完，再把线路源排进队列（同 jar 的 Init 已复用，只剩 spider.init(ext)）
+                    prewarmLineSources(reason = "$reason/line")
+                }
                 .onFailure { android.util.Log.w("NextMovieTiming", "prewarm-fail ${(System.nanoTime() - started) / 1_000_000}ms site=${site.name} reason=$reason ${it.message}") }
         }
     }
@@ -551,7 +657,19 @@ class AppRepository(private val context: Context) {
                 android.util.Log.w("NextMovieTiming", "detail-source fail ${site.name} id=$id ${t.javaClass.simpleName}: ${t.message}")
                 throw t
             }
-            if (result == null) detailFails[key] = System.currentTimeMillis() else detailFails.remove(key)
+            if (result == null) {
+                detailFails[key] = System.currentTimeMillis()
+                if (id.startsWith("msearch:", true) && System.nanoTime() - started < 1_500_000_000L) noteDetailBlank(site)
+            } else {
+                detailFails.remove(key)
+                if (result.lines.any { it.episodes.isNotEmpty() }) {
+                    noteDetailLines(site)
+                    prefs.edit()
+                        .putInt("cap_ms_${site.key}", ((System.nanoTime() - started) / 1_000_000).toInt())
+                        .putString("line_site_key", site.key)
+                        .apply()
+                }
+            }
             android.util.Log.i("NextMovieTiming", "detail-source cache=miss ${(System.nanoTime() - started) / 1_000_000}ms")
             if (result != null) withContext(kotlinx.coroutines.Dispatchers.IO) {
                 detailSnapshots.write(diskKey, listOf(result.vod.copy(action = "")), generation)
@@ -674,8 +792,10 @@ class AppRepository(private val context: Context) {
             if (!searchRedirect) add(site)
             addAll(
                 sites.filter { it.isPlayable && it.searchable && it.runtimeKey != site.runtimeKey }
+                    .filterNot { isDiscoveryOnly(it) }
                     .sortedWith(
-                        compareByDescending<Site> { sourceSuccessRate(it.key).let { r -> if (r == null) 0 else 1 } }
+                        compareByDescending<Site> { lineScore(it) }
+                            .thenByDescending { sourceSuccessRate(it.key) }
                             .thenBy { if (it.isCms) 0 else 1 }
                     )
                     .take(crossSiteLimit.coerceAtLeast(6))
@@ -782,8 +902,25 @@ class AppRepository(private val context: Context) {
         AggregatedDetail(sorted).takeIf { it.sources.isNotEmpty() }
     }
 
+    /** 「饥饿游戏：收获日出」这类带副标题的片名，站点往往只按主标题收录。 */
+    private fun keywordVariants(keyword: String): List<String> {
+        val out = LinkedHashSet<String>()
+        out.add(keyword)
+        for (sep in listOf("：", ":", "·", " - ", "（", "(")) {
+            out.add(keyword.substringBefore(sep).trim())
+        }
+        return out.filter { it.isNotBlank() && it.length >= 2 }
+    }
+
     private suspend fun matchingVideo(site: Site, keyword: String, year: String): Vod? {
-        val list = search(site, keyword)
+        var list = search(site, keyword)
+        if (list.isEmpty()) {
+            for (variant in keywordVariants(keyword).drop(1)) {
+                if (variant == keyword) continue
+                list = search(site, variant)
+                if (list.isNotEmpty()) break
+            }
+        }
         // 先严格阈值，再放宽到 0.72，减少跨站「同名找不到」
         val ranked = list.map { it to TitleMatcher.score(keyword, year, it.name, it.year) }
             .filter { it.second >= 0.72 }

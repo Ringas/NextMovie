@@ -55,6 +55,16 @@ class SpiderService : Service() {
     private val executor = Executors.newFixedThreadPool(4).asCoroutineDispatcher()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /**
+     * Marco 模型：整个进程只起一个本地代理，并在建引擎时就把 `ProxyAddress.port` 同步给插件。
+     * 插件的 HTTP（Proxy 通道）走这个端口，UA/Referer 才带得上；只在播放时才设置端口，
+     * 会让 search / detail 拿站点返回的 HTML 挑战页（"<!DOCTYPE ... cannot be converted to JSONObject"）。
+     */
+    @Volatile private var pluginProxy: SpiderProxyServer? = null
+    private fun pluginProxyPort(): Int = synchronized(proxies) {
+        (pluginProxy ?: newProxy().also { pluginProxy = it }).port
+    }
+
     private fun newProxy(): SpiderProxyServer = synchronized(proxies) {
         if (proxies.size >= 8) proxies.removeFirst().close()
         SpiderProxyServer().also { proxies.addLast(it) }
@@ -159,6 +169,8 @@ class SpiderService : Service() {
         val spider = runBlocking { if (isJs) jsLoader.obtain(site) else loader.obtain(site) }
 
         android.util.Log.i("NextMovieTiming", "plugin-obtain action=$action ${(System.nanoTime() - loadStarted) / 1_000_000}ms")
+        if (!isJs) runCatching { loader.prepareProxy(site, pluginProxyPort()) }
+            .onFailure { android.util.Log.w("NextMovieSpider", "prepareProxy 失败: " + it.message) }
 
         if (action == SpiderProtocol.ACTION_INIT) return okBundle(id, "ready")
 
@@ -248,7 +260,7 @@ class SpiderService : Service() {
                 val first = runCatching { spider.searchContent(keyword, quick, page) }
                     .onFailure { android.util.Log.w("NextMovieDiag", "searchContent(k,quick,page) 失败: " + rootCause(it), it) }
                     .getOrNull()
-                android.util.Log.i("NextMovieDiag", "search kw=$keyword quick=$quick page=$page len=${first?.length ?: -1}")
+                android.util.Log.i("NextMovieDiag", "search kw=$keyword quick=$quick page=$page len=${first?.length ?: -1} head=" + (first?.take(240) ?: ""))
                 (first?.takeIf { it.isNotBlank() && it != "{}" }
                     ?: runCatching { spider.searchContent(keyword, quick) }
                         .onFailure { android.util.Log.w("NextMovieDiag", "searchContent(k,quick) 失败: " + rootCause(it), it) }
