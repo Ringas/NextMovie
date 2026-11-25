@@ -11,6 +11,8 @@
         android:name="android.hardware.touchscreen"
         android:required="false" />
 
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <application
         android:name=".NextMovieApp"
         android:allowBackup="false"
@@ -43,6 +45,15 @@
         <activity android:name=".PluginPlaybackHostActivity" android:process=":spider" android:exported="false" android:screenOrientation="landscape" android:theme="@style/Theme.NextMovie" />
 
         <!-- 插件进程：Guard 系插件会加载第三方 native 库，崩溃只影响本进程 -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
         <service
             android:name=".core.spider.SpiderService"
             android:exported="false"

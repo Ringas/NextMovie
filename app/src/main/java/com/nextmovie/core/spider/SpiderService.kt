@@ -73,6 +73,12 @@ class SpiderService : Service() {
 
     override fun onBind(intent: Intent?): IBinder = messenger.binder
 
+    /**
+     * 常驻：插件实例（含 4.8MB Go 代理）只在进程里活着，进程一死就要重新付 10–25s。
+     * START_STICKY 让系统在没有绑定时也把进程留着，开机预热完就一直待命。
+     */
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+
     override fun onDestroy() {
         PluginRuntime.release()
         scope.cancel()

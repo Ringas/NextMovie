@@ -278,3 +278,32 @@ plugin-step init-done  24958ms   ← Init.init 结束
 - 冷启动实测：`home-ready 38970ms`（无快照首启），暖启动 `home-ready 995ms`
 
 截图：`34-vc35-warming.jpg`（8s 时）、`35-vc35-warming-done.jpg`（40s 后内容就绪）
+
+## 十三、vc36 开机预热 + :spider 常驻（把 25s 挡在用户视线之外）
+
+设计：插件实例（含 4.8MB Go 代理）只在 `:spider` 进程里存活一次，进程一死就要重付 10–25s。
+所以把"付这笔账"的时机从「用户点开应用」挪到「开机」。
+
+- 新增 `BootReceiver`（BOOT_COMPLETED / QUICKBOOT_POWERON / `com.nextmovie.WARM`）→ `BootWarm.run`
+- `BootWarm`：`startService(:spider)`（避免预热完成即被回收）+ 恢复配置 + 预取 jar + `prewarmCurrentSite`
+- `SpiderService.onStartCommand` 返回 `START_STICKY`：无人绑定时进程也留住
+
+### 实测（模拟器，清空 jar/快照/AiWex 后只发预热广播，不开 UI）
+
+```
+boot-warm queued      161ms
+jar-prefetch-done    1024ms
+plugin-obtain action=2 8423ms      ← 代理+远程配置初始化（比首次冷启动的 25s 少 13s：AiWex 二进制已在）
+prewarm-ok          12169ms  items=20
+```
+
+### 之后打开应用
+
+| 场景 | 结果 |
+| --- | --- |
+| 预热后首次打开（无首页快照） | `plugin-obtain action=2 5ms`，`home-ready 2771ms` |
+| 已看过一次，再 cold 重启 | `home-snapshot-ready 432ms`，**`home-ready 984ms`** |
+| 详情（预热后点海报） | `plugin-obtain action=4 17ms`，`detail-ready 12480ms`（首个网盘源自身就要 ~10s） |
+
+结论：首页在"开机预热 + 快照"下已经进入 1 秒级，与 Marco 同档；
+详情慢在源自身的网盘直链接口（单源 9.8s），不是初始化，也不是我们的超时。
