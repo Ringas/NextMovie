@@ -53,7 +53,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nextmovie.core.AppRepository
 import com.nextmovie.core.config.Site
-import com.nextmovie.ui.common.AmbientBackdrop
 import com.nextmovie.ui.common.BrandLogo
 import com.nextmovie.ui.common.GlassCard
 import com.nextmovie.ui.common.TvPill
@@ -71,11 +70,11 @@ import kotlinx.coroutines.launch
  */
 private enum class Section(val title: String, val caption: String, val icon: ImageVector) {
     Appearance("外观与柔光", "主题、强度、海报取色", Icons.Filled.Star),
-    Sources("订阅与片源", "订阅地址、站点、加载状态", Icons.Filled.List),
-    Posters("海报与图片", "TMDB、增强、缓存", Icons.Filled.Search),
-    Network("网络与解析", "DNS 策略与线路", Icons.Filled.Home),
+    Sources("片源与订阅", "订阅地址、站点、海报、解析", Icons.Filled.List),
+    Netdisk("4K 网盘", "网盘账号与直链归属", Icons.Filled.Home),
+    Webdav("WebDAV 云同步", "跨设备同步与网络位置", Icons.Filled.Info),
     Playback("播放与体验", "连播、预热、返回行为", Icons.Filled.Settings),
-    Storage("数据与存储", "收藏、历史、清理", Icons.Filled.List),
+    Backup("备份与存储", "收藏、历史、缓存", Icons.Filled.List),
     Version("版本与更新", "版本号、项目主页", Icons.Filled.Info)
 }
 
@@ -84,9 +83,7 @@ fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -
     var section by remember { mutableStateOf(Section.Appearance) }
     val context = LocalContext.current
 
-    Box(Modifier.fillMaxSize()) {
-        AmbientBackdrop()
-        Row(Modifier.fillMaxSize()) {
+    Row(Modifier.fillMaxSize()) {
             Column(
                 Modifier
                     .width(328.dp)
@@ -154,18 +151,21 @@ fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -
                 ) {
                     when (section) {
                         Section.Appearance -> AppearanceCard()
-                        Section.Sources -> SourcesCard(repo, onConfigLoaded)
-                        Section.Posters -> PostersCard(repo)
-                        Section.Network -> NetworkCard(repo)
+                        Section.Sources -> {
+                            SourcesCard(repo, onConfigLoaded)
+                            Spacer(Modifier.height(16.dp))
+                            PostersCard(repo)
+                            Spacer(Modifier.height(16.dp))
+                            NetworkCard(repo)
+                        }
+                        Section.Netdisk -> NetdiskCard(repo)
+                        Section.Webdav -> WebdavCard()
                         Section.Playback -> PlaybackCard(repo)
-                        Section.Storage -> StorageCard(repo)
+                        Section.Backup -> StorageCard(repo)
                         Section.Version -> VersionCard(context, repo)
                     }
-                    Spacer(Modifier.height(18.dp))
-                    TvPill("‹ 返回首页", glass = true, onClick = onBack)
                 }
             }
-        }
     }
 }
 
@@ -469,6 +469,47 @@ private fun NetworkCard(repo: AppRepository) {
         )
         Spacer(Modifier.height(14.dp))
         TvPill("应用并刷新", prominent = true, onClick = { repo.setDns(mode, custom) })
+    }
+}
+
+/* ---------------- 4K 网盘 ---------------- */
+
+@Composable
+private fun NetdiskCard(repo: AppRepository) {
+    val site = repo.currentSite
+    GlassCard(
+        title = "4K 网盘",
+        subtitle = "网盘账号与直链都由来源插件托管，本机不保存任何凭据"
+    ) {
+        InfoRow("当前来源", site?.name ?: "未选择")
+        Spacer(Modifier.height(10.dp))
+        InfoRow("网盘入口", if (site?.isSpider == true) "可用（插件账户页面）" else "当前来源不提供")
+        Spacer(Modifier.height(16.dp))
+        Text(
+            "在顶部「网盘」标签页可以查看支持的网盘类型，并直接打开来源的账户页面完成扫码登录。",
+            color = Tokens.TextFaint,
+            fontSize = 13.sp
+        )
+    }
+}
+
+/* ---------------- WebDAV 云同步 ---------------- */
+
+@Composable
+private fun WebdavCard() {
+    GlassCard(
+        title = "WebDAV 云同步",
+        subtitle = "Marco 用 WebDAV 同步收藏与观看进度；NextMovie 目前只做本机存储"
+    ) {
+        Text(
+            "下一版会支持填写 WebDAV 地址与账号，把收藏、观看记录同步到自己的网盘；" +
+                "现阶段收藏与历史都保存在应用私有目录，卸载前请自行保留备份。",
+            color = Tokens.TextDim,
+            fontSize = 14.sp,
+            lineHeight = 22.sp
+        )
+        Spacer(Modifier.height(14.dp))
+        Text("说明：不内置任何云端账号，也不上传播放记录。", color = Tokens.TextFaint, fontSize = 13.sp)
     }
 }
 

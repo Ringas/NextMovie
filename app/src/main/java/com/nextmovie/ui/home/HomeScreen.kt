@@ -112,7 +112,9 @@ fun HomeScreen(
     reloadSignal: Int = 0,
     onTabChanged: (Int) -> Unit = {},
     onFocusIndexChanged: (Int) -> Unit = {},
-    onSiteChanged: () -> Unit = {}
+    onSiteChanged: () -> Unit = {},
+    /** 柔光取色上抛：shell 用同一层背景，不在页面里自己铺底 */
+    onTint: (Color?) -> Unit = {}
 ) {
     val screenStartedAt = remember { System.nanoTime() }
     var vods by remember { mutableStateOf<List<Vod>>(emptyList()) }
@@ -271,7 +273,6 @@ fun HomeScreen(
     }
 
     Box(Modifier.fillMaxSize()) {
-        AmbientBackdrop(posterTint = posterTint)
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -282,17 +283,6 @@ fun HomeScreen(
                     ) { onOpenSettings(); true } else false
                 }
         ) {
-            FloatingTopBar(
-                tabs = listOf(
-                    NavTab(Icons.Filled.Home, "发现", true) {},
-                    NavTab(Icons.Filled.Search, "搜索", false) { onSearch() },
-                    NavTab(Icons.Filled.List, "片库", false) { onFavorites() },
-                    NavTab(Icons.Filled.Settings, "设置", false) { onOpenSettings() }
-                ),
-                status = repo.configStatus()?.text ?: site.name,
-                modifier = Modifier.padding(start = 56.dp, end = 56.dp, top = 28.dp, bottom = 18.dp)
-            )
-
             // 子工具条：分类胶囊（左）+ 切换片源 / 扫码快传（右）
             Row(
                 modifier = Modifier.fillMaxWidth().padding(start = 56.dp, end = 56.dp, top = 8.dp, bottom = 22.dp),
@@ -399,9 +389,9 @@ fun HomeScreen(
                                 focusedVod = vod
                                 onFocusIndexChanged(index)
                                 val tint = PosterTint.cached(vod.displayPic)
-                                if (tint != null) posterTint = tint
+                                if (tint != null) { posterTint = tint; onTint(tint) }
                                 scope.launch {
-                                    PosterTint.resolve(context, vod.displayPic)?.let { posterTint = it }
+                                    PosterTint.resolve(context, vod.displayPic)?.let { posterTint = it; onTint(it) }
                                 }
                             },
                             modifier = Modifier.focusRequester(remember(vod.id) { FocusRequester() }),

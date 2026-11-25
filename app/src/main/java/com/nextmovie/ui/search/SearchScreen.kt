@@ -173,7 +173,6 @@ fun SearchScreen(
                 }
             }
     ) {
-        ScreenTopBar(title = "", onBack = onBack, trailing = "全网聚合 · 最多 $MAX_SOURCES 个可搜索源")
         Spacer(Modifier.height(6.dp))
         // ——— 顶栏 ———
 

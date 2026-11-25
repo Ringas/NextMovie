@@ -204,12 +204,14 @@ fun FloatingTopBar(
             clock = currentClock()
         }
     }
-    Box(
+    androidx.compose.foundation.layout.BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
             .height(62.dp)
     ) {
-        BrandLogo(
+        // 窄屏（手机的 730dp）放不下「品牌 + 5 个 tab + 状态」，按 Marco 的优先级让位给导航
+        val narrow = maxWidth < 1000.dp
+        if (!narrow) BrandLogo(
             iconSize = 42.dp,
             fontSize = 23f,
             modifier = Modifier.align(Alignment.CenterStart)
@@ -229,7 +231,7 @@ fun FloatingTopBar(
             modifier = Modifier.align(Alignment.CenterEnd),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (status != null) {
+            if (status != null && !narrow) {
                 Text(
                     text = status,
                     color = Tokens.TextFaint,

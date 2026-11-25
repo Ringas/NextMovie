@@ -376,23 +376,21 @@ private fun AppRoot(repo: AppRepository) {
             } else if (site == null) {
                 SetupHint(onOpenSettings = { route = Route.Settings })
             } else {
-                HomeScreen(
+                com.nextmovie.ui.shell.MainShell(
                     repo = repo,
                     site = site,
-                    onOpenDetail = { vod ->
-                        if (vod.action.isNotBlank() || vod.tag == "folder") accountLauncher.launch(PluginActivity.intent(context, site, vod.id, vod.action.takeIf { it.isNotBlank() }))
-                        else route = Route.Detail(vod)
+                    onOpenDetail = { source, vod ->
+                        if (vod.action.isNotBlank() || vod.tag == "folder") accountLauncher.launch(PluginActivity.intent(context, source, vod.id, vod.action.takeIf { it.isNotBlank() }))
+                        else route = Route.Detail(vod, source.key)
                     },
-                    onOpenSettings = { route = Route.Settings },
-                    onSearch = { route = Route.Search },
-                    onFavorites = { route = Route.Favorites },
-                    onHistory = { route = Route.History },
                     onResume = { resume(it) },
-                    initialFocusIndex = homeFocusIndex,
-                    initialTab = homeTab,
-                    reloadSignal = accountGeneration,
-                    onTabChanged = { homeTab = it; homeFocusIndex = 0 },
-                    onFocusIndexChanged = { homeFocusIndex = it }
+                    onOpenAccounts = { accountLauncher.launch(PluginActivity.intent(context, site, "", null)) },
+                    initialTab = 0,
+                    homeInitialFocusIndex = homeFocusIndex,
+                    homeInitialCategory = homeTab,
+                    homeReloadSignal = accountGeneration,
+                    onHomeTabChanged = { homeTab = it; homeFocusIndex = 0 },
+                    onHomeFocusIndexChanged = { homeFocusIndex = it }
                 )
             }
         }
