@@ -239,23 +239,62 @@ class AppRepository(private val context: Context) {
         homeSnapshots.read(site.runtimeKey, maxAgeMs = 86_400_000)
     }
 
-    suspend fun home(site: Site = requireSite(), refresh: Boolean = false): List<Vod> {
+    /**
+     * 首页数据：先信快照，再给网络一个硬预算。
+     *
+     * 插件源（jar / js）冷启动要下载、解压、跑 Init，几百 KB 的包在盒子上能耗掉十几秒；
+     * 旧实现在这条链上没有任何上限，超时还会被 `Retry.once` 翻倍，用户看到的就是「转圈几分钟」。
+     * 现在的规则：10 分钟内的快照直接返回；超过预算就先用旧快照渲染，网络请求本身继续在后台跑
+     * （`lists` 的共享 flight 不会被 await 超时取消），下一次进入首页即可命中。
+     */
+    suspend fun home(
+        site: Site = requireSite(),
+        refresh: Boolean = false,
+        budgetMs: Long = 8_000
+    ): List<Vod> {
         val key = "home|" + site.runtimeKey
+        val started = System.nanoTime()
         if (refresh) {
             withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.invalidate(site.runtimeKey) }
             lists.invalidate(key)
             spiderHost.clearCache()
-        }
-        val started = System.nanoTime()
-        val result = lists.get(key) {
-            val snapshotGeneration = homeSnapshots.generation
-            val saved = if (refresh) null else withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.read(site.runtimeKey) }
-            saved ?: (if (site.isCms) CmsSiteClient(http, site).home() else spiderHost.home(site)).also {
-                withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.write(site.runtimeKey, it, snapshotGeneration) }
+        } else {
+            val age = withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.ageMs(site.runtimeKey) }
+            if (age < FRESH_HOME_MS) {
+                val cached = lists.get(key) {
+                    withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.read(site.runtimeKey) }
+                        ?: loadHomeNetwork(site)
+                }
+                android.util.Log.i("NextMovieTiming", "home-cache ${(System.nanoTime() - started) / 1_000_000}ms age=${age}ms items=${cached.size}")
+                return cached
             }
         }
-        android.util.Log.i("NextMovieTiming", "home ${((System.nanoTime() - started) / 1_000_000)}ms items=${result.size}")
-        return result
+        val snapshot = withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.read(site.runtimeKey) }
+        val network = runCatching {
+            kotlinx.coroutines.withTimeoutOrNull(budgetMs) {
+                lists.get(key) { loadHomeNetwork(site) }
+            }
+        }
+        val fresh = network.getOrNull()
+        if (fresh != null) {
+            android.util.Log.i("NextMovieTiming", "home ${(System.nanoTime() - started) / 1_000_000}ms items=${fresh.size}")
+            return fresh
+        }
+        if (snapshot != null) {
+            android.util.Log.i("NextMovieTiming", "home-stale ${(System.nanoTime() - started) / 1_000_000}ms items=${snapshot.size} budget=$budgetMs")
+            return prepareForList(snapshot)
+        }
+        android.util.Log.w("NextMovieTiming", "home-timeout ${(System.nanoTime() - started) / 1_000_000}ms budget=$budgetMs site=${site.name}")
+        throw java.io.IOException(
+            "「${site.name}」首次读取超时（>${budgetMs / 1000}s）：插件源要先下载并初始化，已转到后台继续准备，稍后重试即可"
+        )
+    }
+
+    private suspend fun loadHomeNetwork(site: Site): List<Vod> {
+        val snapshotGeneration = homeSnapshots.generation
+        return (if (site.isCms) CmsSiteClient(http, site).home() else spiderHost.home(site)).also {
+            withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.write(site.runtimeKey, it, snapshotGeneration) }
+        }
     }
 
     suspend fun category(site: Site, tid: String, page: Int): List<Vod> =
@@ -653,6 +692,7 @@ class AppRepository(private val context: Context) {
         currentSite ?: throw IllegalStateException("还没有选择数据源")
 
     companion object {
+        private const val FRESH_HOME_MS = 10 * 60 * 1000L
         private const val PREFS = "nextmovie"
         private const val KEY_CONFIG_URL = "config_url"
         private const val KEY_TMDB_TOKEN = "tmdb_token"

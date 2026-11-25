@@ -345,23 +345,54 @@ var req = request;
 }
 
 /** 下载脚本并缓存成 [Spider]；`.js` 站点在 `:spider` 进程里走这条路径。 */
-class JsSpiderLoader(private val http: com.nextmovie.core.net.Http) {
+class JsSpiderLoader(
+    private val http: com.nextmovie.core.net.Http,
+    /** 脚本落盘目录：JS 源每次冷启动都重下几百 KB 脚本，盒子网络上就是几十秒。 */
+    private val cacheDir: java.io.File? = null
+) {
 
     private val cache = java.util.concurrent.ConcurrentHashMap<String, Spider>()
 
     suspend fun obtain(site: Site): Spider {
         cache[site.runtimeKey]?.let { return it }
         val url = if (site.api.startsWith("http")) site.api else com.nextmovie.core.net.Urls.resolve(site.origin, site.api) ?: site.api
-        val code = runCatching { http.text(url, site.headers) }.getOrElse {
+        val code = cachedScript(url) ?: runCatching { http.text(url, site.headers) }.getOrElse {
             throw JarSpiderLoader.SpiderLoadException(
                 "「${site.name}」JS 脚本下载失败：${it.message ?: it.javaClass.simpleName}", it
             )
         }
         if (code.isBlank()) throw JarSpiderLoader.SpiderLoadException("「${site.name}」JS 脚本内容为空")
+        storeScript(url, code)
         val spider = JsSpider(site, code, url)
         cache[site.runtimeKey] = spider
         Log.i("NextMovieJs", "site=${site.name} 脚本 ${code.length}B")
         return spider
+    }
+
+    /** 脚本按 URL 取 md5 落盘，24 小时内直接复用；失败静默降级为直连。 */
+    private fun scriptFile(url: String): java.io.File? {
+        val dir = cacheDir ?: return null
+        return runCatching {
+            dir.mkdirs()
+            java.io.File(dir, MessageDigest.getInstance("MD5").digest(url.toByteArray())
+                .joinToString("") { "%02x".format(it) } + ".js")
+        }.getOrNull()
+    }
+
+    private fun cachedScript(url: String): String? = runCatching {
+        val file = scriptFile(url) ?: return null
+        if (!file.exists() || file.length() <= 0) return null
+        if (System.currentTimeMillis() - file.lastModified() > 24 * 60 * 60 * 1000L) return null
+        file.readText().takeIf { it.isNotBlank() }
+    }.getOrNull()
+
+    private fun storeScript(url: String, code: String) {
+        runCatching {
+            val file = scriptFile(url) ?: return
+            val temp = java.io.File(file.parentFile, file.name + ".tmp")
+            temp.writeText(code)
+            if (!temp.renameTo(file)) { temp.copyTo(file, true); temp.delete() }
+        }
     }
 
     fun release() {

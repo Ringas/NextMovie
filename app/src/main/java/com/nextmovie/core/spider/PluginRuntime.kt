@@ -10,7 +10,7 @@ object PluginRuntime {
     private var users = 0
     @Synchronized fun acquire(context: Context): Engines {
         users++
-        return engines ?: Engines(JarSpiderLoader(context.applicationContext, Http()), JsSpiderLoader(Http())).also { engines = it }
+        return engines ?: Engines(JarSpiderLoader(context.applicationContext, Http()), JsSpiderLoader(Http(), java.io.File(context.applicationContext.filesDir, "js-cache"))).also { engines = it }
     }
     @Synchronized fun release() {
         users = (users - 1).coerceAtLeast(0)

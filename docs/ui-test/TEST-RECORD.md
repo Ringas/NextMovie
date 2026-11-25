@@ -154,3 +154,37 @@ HUD 显示 `00:29 / 1:53:55 / -1:53:26` 与「下一集：20261022-02」。截�
 
 已知边界：CDN 拒绝 Range 或返回整片 `200` 时探测拿不到分辨率，按「拿不到不加分」退化为旧打分；
 部分源只给媒体清单（无 `STREAM-INF`），面板上只显示集数不显示分辨率；探测对每源只打一次首集，切片中途换清晰度不会重测。
+
+---
+
+## 十、v0.6.15-dev（vc31）：首页冷启动对齐 Marco 的「1 秒」
+
+对照 `Pilipala9919/MarcoMovie`（GPL-3.0，Flutter）后确认，它的首页快不是网络快，而是三件事：
+① 首页只读**当前一个源**，`fetchHome` 结果落盘（`saveCachedSiteHome`），启动先渲染缓存、后台再刷新；
+② 整个取数链包在 `runSourceOperation` 里，外层 `timeout(15s)`，超时不重试直接降级；
+③ 配置里大量 `csp_*Guard` 在它这里走 `shared/catpaw/drpy-*-adapter.cjs` 的**内置适配器**，不下载远端 jar、不跑 DexClassLoader。
+
+我们的三条慢路径按此修正：
+
+| 改动 | 之前 | 现在 |
+| --- | --- | --- |
+| 首页快照 TTL | 5 分钟，过期就完全走网络 | 24 小时可渲染；10 分钟内直接命中，不再发请求 |
+| 首页硬预算 | 无上限：30s callTimeout × `Retry.once` | 8s 预算；超时先用旧快照渲染，网络请求在共享 flight 里继续，下次进入即命中 |
+| JS 脚本 | 每次冷启动重新下载 + eval | 按 URL 的 md5 落盘 `files/js-cache/*.js`，24h 复用 |
+| 插件源失败提示 | 转圈到超时 | 明确提示「插件源要先下载并初始化，已转后台准备」 |
+
+实测（Android 11 模拟器，配置 `szyyds.cn/tv/x.json` 62 站，当前源 `糯米` csp_NmyswvGuard）：
+
+| 场景 | 结果 | 证据 |
+| --- | --- | --- |
+| 冷启动（快照 age=503s） | `home-snapshot-ready 407ms` → `home-ready 1060ms`，`home-cache 199ms`，**0 次网络请求** | `29-home-cache-budget.jpg` |
+| 快照 age=1400s（过期） | 先用快照渲染，随后 `home 1205ms` 刷新成功 | 日志 `home 1205ms items=20` |
+| 旧版同机对照（量子 CMS） | `home 1106ms`；过期快照会直接等网络，插件源最坏 60s+ | 本节日志对照 |
+
+构建：`./scripts/build-tv.sh` →
+
+- `dist/NextMovie-0.6.15-dev-vc31-arm64-v8a.apk`（sha256 `e1d3c38b…49903ded`）
+- `dist/NextMovie-0.6.15-dev-vc31-armeabi-v7a.apk`（sha256 `b0d8f6b4…32dce874`）
+
+已知边界：插件源**首次**仍要下载并初始化 jar（盒子端 10–30s 区间），这段无法靠缓存消除；
+要真正做到 Marco 的 1 秒，需要对高频 `csp_*` 做本地原生适配器（Macro 走的就是这条），属于后续独立工程。
