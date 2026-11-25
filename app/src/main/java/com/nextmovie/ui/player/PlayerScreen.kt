@@ -115,6 +115,8 @@ fun PlayerScreen(
     val context = LocalContext.current
     var decodeMode by remember { mutableStateOf(session?.currentDecodeMode() ?: PlayerPrefs.decodeMode(context)) }
     var triedSoft by remember { mutableStateOf(session?.triedSoftFallback ?: false) }
+    // 软解降级成功后 +1，驱动下方 LaunchedEffect 用新 Renderers 重新 prepare
+    var softRetryToken by remember { mutableIntStateOf(0) }
     val player = session?.player ?: remember(decodeMode) {
         ExoPlayer.Builder(context, NmRenderersFactory.create(context, decodeMode)).build()
     }
@@ -238,15 +240,12 @@ fun PlayerScreen(
                         session?.triedSoftFallback = true
                         val mode = decision.nextDecodeMode ?: DecodeMode.SOFT
                         decodeMode = mode
-                        val rebuilt = session?.rebuildWithDecodeMode(mode)
-                        if (rebuilt == null) {
-                            // 无会话时在本页无法无缝重建，提示用户并展示错误
-                            playbackError = decision.message + "（请退出重进播放页）"
-                        } else {
-                            playbackError = null
-                            // 触发重新 setMedia：靠 url 状态由外层 LaunchedEffect 感知较难，这里直接标记
-                            flash("已切软解，请按确认重试或自动续播")
+                        if (session != null) {
+                            session.rebuildWithDecodeMode(mode)
                         }
+                        // 无论有无会话：bump token 让 prepare LaunchedEffect 用当前 player 重跑
+                        playbackError = null
+                        softRetryToken += 1
                         hudVisible = true
                     }
                     PlaybackRecovery.Action.SWITCH_LINE -> {
@@ -297,7 +296,8 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(url, headers, startPositionMs, subtitles, requestedAtNanos) {
+    LaunchedEffect(url, headers, startPositionMs, subtitles, requestedAtNanos, softRetryToken, decodeMode) {
+        val activePlayer = session?.player ?: player
         requestStarted = System.nanoTime()
         trackBadges = emptyList()
         buffering = true
@@ -373,17 +373,17 @@ fun PlayerScreen(
             subtitleConfigs = captionConfigs,
             drmConfig = drmConfig,
         )
-        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+        activePlayer.trackSelectionParameters = activePlayer.trackSelectionParameters.buildUpon()
             .clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_AUDIO)
             .clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_TEXT).build()
-        player.setMediaSource(mediaSource)
+        activePlayer.setMediaSource(mediaSource)
         if (startPositionMs > 0L) {
-            player.seekTo(startPositionMs)
+            activePlayer.seekTo(startPositionMs)
             resumedHint = true
         }
-        player.setPlaybackSpeed(speed)
-        player.prepare()
-        player.playWhenReady = true
+        activePlayer.setPlaybackSpeed(speed)
+        activePlayer.prepare()
+        activePlayer.playWhenReady = true
     }
 
     // 播完自动连播：5 秒倒计时，期间按「确认」立即切，按 Esc 取消

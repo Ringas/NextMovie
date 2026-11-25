@@ -671,7 +671,7 @@ private fun PlaybackCard(repo: AppRepository) {
             PlayerPrefs.setAutoLineOnError(context, it)
         }
         Spacer(Modifier.height(12.dp))
-        ToggleRow("弹幕层（实验）", "需引入 DanmakuFlameMaster 后生效", danmaku) {
+        ToggleRow("弹幕层（暂缓）", "脚手架已留，当前版本不排期；开了也不会加载弹幕库", danmaku) {
             danmaku = it
             PlayerPrefs.setDanmakuEnabled(context, it)
         }

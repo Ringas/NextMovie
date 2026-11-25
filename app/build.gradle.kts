@@ -92,6 +92,9 @@ dependencies {
     // CatVod 插件普遍直接依赖宿主内置的 Gson（TypeToken/JsonObject），
     // 缺少它会在 DexClassLoader 里抛 ClassNotFoundException。
     implementation(files("libs/gson-2.10.1.jar"))
+    // 可选：音频 FFmpeg 软解。将 media3-decoder-ffmpeg-*.aar 放入 app/libs/ 即可被反射挂载
+    // 官方不发布预编译包，需自编译或使用兼容 AAR（注意 ABI: armeabi-v7a / arm64-v8a）
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("media3-decoder-ffmpeg*.aar", "lib-decoder-ffmpeg*.aar"))))
 
     testImplementation(libs.junit)
     testImplementation(libs.org.json)
