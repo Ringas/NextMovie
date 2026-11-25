@@ -41,3 +41,14 @@ Marco 放弃执行，改成"读常量 → 直连 HTTP"：
 
 - wex 家族站点：首页/详情 1s 级（与 Marco 持平），无需 Go 代理（网盘直链改由播放器直接拿 `url`）。
 - 未覆盖家族：维持 vc34 现状（30s 预算 + 计秒提示 + 快照兜底），不会退步。
+
+## 实现进度（原生适配）
+
+| 家族 | 类 | 状态 |
+|------|-----|------|
+| AppTT / AppsX | `AppTtNativeSpider` | 已实现 MD5(sign+ts) form POST，需 ext 含 api+signKey |
+| Wex 直连子集 | `WexHttpNativeSpider` | ext 为 CMS/JSON 时可秒开；需 Go 代理的回退 JAR |
+| 通用 CMS ext | `ExtHostNativeSpider` | `native:` 或 csp_+provide/vod |
+| 常量扫描 | `GuardStringScanner` | jar/zip 只读字符串，不执行 |
+
+路由：`SpiderHost.tryNative` → 成功跳过 Init；失败日志 `NativeSpider … fallback` 后走原插件路径。

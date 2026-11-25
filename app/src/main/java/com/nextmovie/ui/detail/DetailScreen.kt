@@ -118,6 +118,13 @@ fun DetailScreen(
         if (cachedMetadata != null) {
             android.util.Log.i("NextMovieTiming", "detail-metadata-ready ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms")
         }
+        // 进页即补海报/评分/简介（不挡聚合）
+        val seed = cachedMetadata?.withMetadataFrom(initial) ?: initial
+        val enriched = runCatching { repo.enrichPoster(seed, detail = true) }.getOrDefault(seed)
+        if (enriched != seed) {
+            cachedMetadata = enriched
+            android.util.Log.i("NextMovieTiming", "detail-meta-enrich ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms")
+        }
     }
     val scope = rememberCoroutineScope()
     var agg by remember { mutableStateOf<AppRepository.AggregatedDetail?>(null) }

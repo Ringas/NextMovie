@@ -21,6 +21,7 @@ import com.nextmovie.core.spider.SpiderProtocol.KEY_PAGE
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import com.nextmovie.core.spider.native.NativeSpiderRegistry
 
 /**
  * 插件调度层：按 `api` 前缀把请求分发给 JAR / JS / PY / CMS。
@@ -37,6 +38,10 @@ class SpiderHost(
 
     private val client = SpiderClient(context.applicationContext)
 
+    init {
+        NativeSpiderRegistry.install(http)
+    }
+
     @Volatile private var cancelledLogin = false
     fun cancelPlayback() { cancelledLogin = true }
     suspend fun preparePlayback() {
@@ -52,6 +57,23 @@ class SpiderHost(
     /** home 的原始 JSON 按站点缓存：分类 Tab 与首页列表来自同一次请求，避免重复打源站。 */
     private val homeRequests = com.nextmovie.core.cache.RequestCache<String, JSONObject>(120_000, 32)
 
+    
+    /**
+     * 原生适配优先：成功则完全跳过 JAR Init / Go 代理。
+     * 失败（协议不匹配、缺 signKey、需人机验证）返回 null，由调用方走插件路径。
+     */
+    private suspend fun <T> tryNative(site: Site, label: String, block: suspend (com.nextmovie.core.spider.native.NativeSpider) -> T): T? {
+        val spider = NativeSpiderRegistry.resolve(site) ?: return null
+        return runCatching { block(spider) }
+            .onSuccess {
+                android.util.Log.i("NativeSpider", "$label ok api=${site.api} site=${site.name}")
+            }
+            .onFailure {
+                android.util.Log.w("NativeSpider", "$label fallback api=${site.api} ${it.message}")
+            }
+            .getOrNull()
+    }
+
     fun startBinding() = client.startBinding()
 
     suspend fun preconnect() = client.preconnect()
@@ -59,6 +81,7 @@ class SpiderHost(
     suspend fun clearCache() { homeRequests.clear() }
 
     suspend fun home(site: Site): List<Vod> = withContext(Dispatchers.IO) {
+        tryNative(site, "home") { it.home(site) }?.let { return@withContext it }
         ensureSpider(site, "home")
         val obj = requestHome(site)
         val listed = VodParser.list(obj)
@@ -73,6 +96,7 @@ class SpiderHost(
 
     /** 插件源的分类：TVBox 的 `class` 数组（type_id / type_name）。 */
     suspend fun categories(site: Site): List<Pair<String, String>> = withContext(Dispatchers.IO) {
+        tryNative(site, "categories") { it.categories(site) }?.let { return@withContext it }
         ensureSpider(site, "home")
         val obj = requestHome(site)
         val arr = obj.optJSONArray("class") ?: return@withContext emptyList()
@@ -108,6 +132,7 @@ class SpiderHost(
 
     suspend fun category(site: Site, tid: String, page: Int, filter: Boolean, extend: String): List<Vod> =
         withContext(Dispatchers.IO) {
+            tryNative(site, "category") { it.category(site, tid, page) }?.let { return@withContext it }
             ensureSpider(site, "category")
             val raw = client.request(ACTION_CATEGORY, site) {
                 putString(KEY_ARG1, tid)
@@ -119,6 +144,7 @@ class SpiderHost(
         }
 
     suspend fun detail(site: Site, id: String, altId: String? = null): VodDetail? = withContext(Dispatchers.IO) {
+        tryNative(site, "detail") { it.detail(site, id) }?.let { return@withContext it }
         ensureSpider(site, "detail")
         var raw = client.request(ACTION_DETAIL, site) { putString(KEY_ARG1, id) }
         // 有些插件 homeVod 根本不带 vod_id，只给片名；拿名字当 id 再试一次，
@@ -133,6 +159,7 @@ class SpiderHost(
     }
 
     suspend fun search(site: Site, keyword: String): List<Vod> = withContext(Dispatchers.IO) {
+        tryNative(site, "search") { it.search(site, keyword) }?.let { return@withContext it }
         ensureSpider(site, "search")
         val raw = client.request(ACTION_SEARCH, site) {
             putString(KEY_ARG1, keyword)
@@ -144,6 +171,7 @@ class SpiderHost(
 
     suspend fun play(site: Site, flag: String, id: String, vip: List<String> = emptyList()): PlayResult? =
         withContext(Dispatchers.IO) {
+            tryNative(site, "play") { it.play(site, flag, id) }?.let { return@withContext it }
             ensureSpider(site, "play")
             val raw = client.request(ACTION_PLAY, site, timeoutMs = 325_000) {
                 putString(KEY_ARG1, flag)

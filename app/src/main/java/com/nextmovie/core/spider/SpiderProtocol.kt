@@ -46,12 +46,16 @@ object SpiderProtocol {
         put("searchable", searchable)
         put("quickSearch", quickSearch)
         put("filter", filterable)
+        put("filterable", filterable)
+        put("timeout", if (timeoutMs > 0) timeoutMs / 1000 else 0)
         put("headers", JSONObject(headers))
     }.toString()
 
     fun siteFromTransport(json: String): Site =
         JSONObject(json).let { obj ->
-            Site.fromJson(obj, origin = obj.optString("origin")).copy(jarHash = obj.optString("jarHash"))
+            Site.fromJson(obj, origin = obj.optString("origin")).copy(
+                jarHash = obj.optString("jarHash")
+            )
         }
 
     data class Reply(val ok: Boolean, val data: String, val error: String)

@@ -103,7 +103,16 @@ class TmdbClient(private val http: Http) {
     suspend fun enrich(vod: Vod): Vod {
         if (!isConfigured()) return vod
         val meta = lookup(vod.name, vod.displayYear) ?: return vod
-        return vod.copy(tmdb = meta)
+        return vod.copy(
+            tmdb = meta,
+            pic = meta.posterUrl.ifBlank { vod.pic },
+            backdrop = meta.backdropUrl.ifBlank { vod.backdrop },
+            content = vod.content.ifBlank { meta.overview },
+            year = vod.year.ifBlank { meta.year },
+            score = vod.score.ifBlank {
+                if (meta.voteAverage > 0) String.format(java.util.Locale.ROOT, "%.1f", meta.voteAverage) else ""
+            }
+        )
     }
 
     private suspend fun lookup(title: String, year: String): TmdbMeta? {

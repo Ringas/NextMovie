@@ -17,12 +17,20 @@ data class Site(
     val quickSearch: Boolean = true,
     val filterable: Boolean = false,
     val headers: Map<String, String> = emptyMap(),
+    /**
+     * 单站请求超时（毫秒）。配置里常见 `timeout` 为秒；0 表示用全局默认。
+     * 对齐 FongMi：站点可单独加长慢源超时。
+     */
+    val timeoutMs: Int = 0,
     /** 站点所属配置的真实地址，用于解析 ext / jar 的相对路径 */
     val origin: String = ""
 ) {
     /** Identity includes configuration and plugin inputs; site keys alone are not globally unique. */
     val runtimeKey: String get() = java.security.MessageDigest.getInstance("SHA-256")
-        .digest(listOf(origin, key, api, jar, jarHash, ext, headers.toSortedMap().toString()).joinToString("\u0000").toByteArray())
+        .digest(
+            listOf(origin, key, api, jar, jarHash, ext, headers.toSortedMap().toString(), timeoutMs.toString())
+                .joinToString("\u0000").toByteArray()
+        )
         .joinToString("") { "%02x".format(it) }
 
     val isJavaScript: Boolean get() = isJavaScriptApi(api)
@@ -81,13 +89,14 @@ data class Site(
                 name = o.optString("name", o.optString("key", "未命名")),
                 api = api,
                 type = type,
-                ext = o.optString("ext", ""),
+                ext = readExt(o),
                 jar = jarUrl,
                 jarHash = jarHash,
                 searchable = flag(o, "searchable", true),
-                quickSearch = flag(o, "quickSearch", true),
-                filterable = flag(o, "filter", false),
-                headers = jsonToHeaders(o.optJSONObject("headers")),
+                quickSearch = flag(o, "quickSearch", true) || flag(o, "quicksearch", false),
+                filterable = flag(o, "filterable", false) || flag(o, "filter", false),
+                headers = readHeaders(o),
+                timeoutMs = readTimeoutMs(o),
                 origin = origin
             )
         }
@@ -99,11 +108,55 @@ data class Site(
             else -> default
         }
 
-        private fun jsonToHeaders(o: JSONObject?): Map<String, String> {
+        /**
+         * FongMi/TVBox：`ext` 可为字符串、对象或数组；对象/数组序列化后交给 spider.init。
+         */
+        private fun readExt(o: JSONObject): String = when (val v = o.opt("ext")) {
+            null, JSONObject.NULL -> ""
+            is JSONObject, is JSONArray -> v.toString()
+            is Number, is Boolean -> v.toString()
+            else -> v.toString().trim()
+        }
+
+        /**
+         * 生态里既有 `headers` 对象，也有 `header`（对象或 JSON 字符串）。
+         */
+        private fun readHeaders(o: JSONObject): Map<String, String> {
+            val fromHeaders = jsonToHeaders(o.opt("headers"))
+            if (fromHeaders.isNotEmpty()) return fromHeaders
+            return jsonToHeaders(o.opt("header"))
+        }
+
+        private fun jsonToHeaders(raw: Any?): Map<String, String> {
+            val o: JSONObject? = when (raw) {
+                null, JSONObject.NULL -> null
+                is JSONObject -> raw
+                is String -> {
+                    val t = raw.trim()
+                    if (t.startsWith("{")) runCatching { JSONObject(t) }.getOrNull() else null
+                }
+                else -> null
+            }
             if (o == null) return emptyMap()
             val out = LinkedHashMap<String, String>()
-            o.keys().forEach { k -> out[k] = o.optString(k, "") }
+            o.keys().forEach { k ->
+                val value = o.opt(k) ?: return@forEach
+                out[k] = value.toString()
+            }
             return out
+        }
+
+        /** 配置 timeout 多为秒；>1000 视为已是毫秒。 */
+        private fun readTimeoutMs(o: JSONObject): Int {
+            if (!o.has("timeout")) return 0
+            val v = o.opt("timeout") ?: return 0
+            val n = when (v) {
+                is Number -> v.toInt()
+                is String -> v.trim().toIntOrNull() ?: return 0
+                else -> return 0
+            }
+            if (n <= 0) return 0
+            return if (n > 1000) n else n * 1000
         }
     }
 }

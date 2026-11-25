@@ -16,7 +16,8 @@ class PosterCache(dir: File) {
         val poster: String,
         val backdrop: String,
         val overview: String,
-        val savedAt: Long
+        val savedAt: Long,
+        val score: String = ""
     )
 
     private val file = File(dir.apply { mkdirs() }, "posters.json")
@@ -76,7 +77,8 @@ class PosterCache(dir: File) {
                     poster = o.optString("p", ""),
                     backdrop = o.optString("b", ""),
                     overview = o.optString("d", ""),
-                    savedAt = o.optLong("t", 0L)
+                    savedAt = o.optLong("t", 0L),
+                    score = o.optString("s", "")
                 )
             }
         }
@@ -98,6 +100,7 @@ class PosterCache(dir: File) {
                     .put("b", entry.backdrop)
                     .put("d", entry.overview)
                     .put("t", entry.savedAt)
+                    .put("s", entry.score)
             )
         }
         val payload = JSONObject().put("v", 1).put("items", items).toString()

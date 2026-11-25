@@ -90,9 +90,23 @@ class CmsSiteClient(
     private suspend fun request(params: Map<String, String>): String {
         val extension = if (site.isHttpT4) extension() else ""
         val requestParams = if (extension.isNotEmpty()) params + ("extend" to extension) else params
-        if (site.isHttpT4 && extension.length > 1000) return http.text(site.api, site.headers, referer = site.api, form = requestParams)
+        val timeout = site.timeoutMs.takeIf { it > 0 }
+        if (site.isHttpT4 && extension.length > 1000) {
+            return http.text(
+                site.api,
+                site.headers,
+                referer = site.api,
+                callTimeoutMs = timeout,
+                form = requestParams
+            )
+        }
         val builder = site.api.toHttpUrl().newBuilder()
         requestParams.forEach { (key, value) -> builder.setQueryParameter(key, value) }
-        return http.text(builder.build().toString(), site.headers, referer = site.api)
+        return http.text(
+            builder.build().toString(),
+            site.headers,
+            referer = site.api,
+            callTimeoutMs = timeout
+        )
     }
 }

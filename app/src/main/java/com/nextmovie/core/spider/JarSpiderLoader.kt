@@ -309,19 +309,16 @@ class JarSpiderLoader(
         val bytes = runCatching { http.bytes(spec.url) }.getOrElse {
             throw SpiderLoadException("「$siteName」的插件下载失败：${it.message ?: it.javaClass.simpleName}", it)
         }
-        if (bytes.size < 1024) throw SpiderLoadException("插件体积异常：${bytes.size}B")
-        if (hash.isNotBlank()) {
-            val actual = md5(bytes)
-            if (!actual.equals(hash, ignoreCase = true)) {
-                throw SpiderLoadException(
-                    "「$siteName」插件校验失败：期望 ${hash.take(8)}…，实际 ${actual.take(8)}…（可能被替换或下载不完整）"
-                )
-            }
+        val material = runCatching {
+            com.nextmovie.core.config.JarBytes.materialize(bytes, hash)
+        }.getOrElse { err ->
+            throw SpiderLoadException(
+                "「$siteName」" + (err.message ?: "插件无效"),
+                err
+            )
         }
-        // CatVod 插件是 zip（jar）包，头四个字节应为 PK；不是就当坏包处理，避免 DexClassLoader 抛底层异常
-        if (!bytes.startsWithZip()) throw SpiderLoadException("「$siteName」的插件不是有效的 jar 包")
         val temp = File(jarDir, "$name.tmp")
-        temp.writeBytes(bytes)
+        temp.writeBytes(material.jar)
         if (!temp.renameTo(target)) {
             temp.copyTo(target, overwrite = true)
             temp.delete()

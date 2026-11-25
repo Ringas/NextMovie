@@ -2,6 +2,7 @@ package com.nextmovie.core.config
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SiteHealthTest {
@@ -34,6 +35,8 @@ class SiteHealthTest {
         // 插件包信息要能从站点里回溯出来，面板上直接展示 md5 是否启用
         assertEquals("https://example.com/tv/x.jpg", report.jarUrl)
         assertEquals("4ce29ce27eeff6a73a230dd92d98ba0c", report.jarHash)
+        assertTrue(report.probes.isEmpty())
+        assertTrue(report.summary.contains("可直接用 2"))
     }
 
     @Test
@@ -48,6 +51,7 @@ class SiteHealthTest {
         assertEquals(2, report.unsupported)
         assertEquals(0, report.ready)
     }
+
     @Test
     fun `module and script URLs with query and fragment are JavaScript sources`() {
         val sites = parse(
@@ -59,5 +63,26 @@ class SiteHealthTest {
         assertEquals(listOf(3, 3), sites.map { it.type })
         assertEquals(listOf(true, true), sites.map { it.isSpider && it.isPlayable })
         assertEquals(2, SiteHealth.audit(sites).js)
+    }
+
+    @Test
+    fun `summary mentions probe counts when probes present`() {
+        val report = HealthReport(
+            total = 3,
+            ready = 1,
+            plugin = 1,
+            js = 1,
+            unsupported = 0,
+            probes = listOf(
+                SiteProbeResult("a", "A", SiteKind.READY, ProbeStatus.OK, 120, "120ms"),
+                SiteProbeResult("b", "B", SiteKind.PLUGIN, ProbeStatus.SKIPPED, detail = "需 JAR"),
+                SiteProbeResult("c", "C", SiteKind.READY, ProbeStatus.FAIL, detail = "超时")
+            )
+        )
+        assertEquals(1, report.probeOk)
+        assertEquals(1, report.probeFail)
+        assertTrue(report.summary.contains("探活"))
+        assertTrue(report.summary.contains("可达 1"))
+        assertTrue(report.summary.contains("失败 1"))
     }
 }

@@ -41,6 +41,12 @@ class RequestCache<K, V>(
         }
         return task.await()
     }
+
+    /** 不触发加载：有有效缓存就返回，否则 null。用于首页秒开。 */
+    suspend fun peek(key: K): V? = mutex.withLock {
+        values[key]?.takeIf { now() - it.time < ttlMs }?.value
+    }
+
     suspend fun invalidate(key: K) { mutex.withLock { values.remove(key); flights.remove(key) } }
     suspend fun clear() { mutex.withLock { values.clear(); flights.clear() } }
     override fun close() { scope.cancel() }

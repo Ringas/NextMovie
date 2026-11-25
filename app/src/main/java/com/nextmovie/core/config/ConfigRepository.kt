@@ -54,6 +54,7 @@ class ConfigRepository(private val http: Http) {
 
         for (ua in userAgents) {
             val text = try {
+                // Http.text 内部已走 ConfigDecoder.decode（gzip / JPEG 尾部 / 2423 AES / Base64）
                 http.text(asciiUrl, ua = ua)
             } catch (e: Exception) {
                 httpError = e
@@ -63,8 +64,30 @@ class ConfigRepository(private val http: Http) {
                 html = text
                 continue
             }
-            val root = runCatching { JSONObject(absolutize(ConfigDecoder.sanitizeJson(text), asciiUrl)) }
-                .getOrNull() ?: run { decodeError = ConfigError("配置不是合法 JSON：$asciiUrl"); null }
+            val normalized = runCatching {
+                // 再兜一层：若上游误把已解码文本又包了一层，或仅 sanitize 后仍带 BOM
+                val body = ConfigDecoder.decodeText(text)
+                ConfigDecoder.sanitizeJson(body)
+            }.getOrElse { err ->
+                decodeError = ConfigError(
+                    "配置解密/清洗失败：${err.message ?: err.javaClass.simpleName} @ $asciiUrl",
+                    err
+                )
+                null
+            } ?: continue
+            val root = runCatching { JSONObject(absolutize(normalized, asciiUrl)) }
+                .getOrNull()
+                ?: run {
+                    val head = normalized.trimStart().take(24)
+                    decodeError = ConfigError(
+                        if (head.startsWith("2423")) {
+                            "配置仍是 2423 密文，解密失败：$asciiUrl"
+                        } else {
+                            "配置不是合法 JSON（开头「$head」）：$asciiUrl"
+                        }
+                    )
+                    null
+                }
             if (root != null) return root to asciiUrl
         }
 

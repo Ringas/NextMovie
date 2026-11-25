@@ -51,7 +51,8 @@ class PosterResolver(
                 poster = hit.poster,
                 backdrop = hit.backdrop,
                 overview = hit.overview,
-                savedAt = System.currentTimeMillis()
+                savedAt = System.currentTimeMillis(),
+                score = hit.score
             )
             cache.put(key, fresh)
             fresh
@@ -60,8 +61,9 @@ class PosterResolver(
         return base.copy(
             pic = entry.poster.ifBlank { base.pic },
             backdrop = entry.backdrop.ifBlank { base.backdrop },
-            // B站 的简介只在源站没提供时才补，避免覆盖更准确的 CMS 文案
-            content = base.content.ifBlank { entry.overview }
+            // B站 的简介 / 评分只在源站没提供时才补
+            content = base.content.ifBlank { entry.overview },
+            score = base.score.ifBlank { entry.score }
         )
     }
 

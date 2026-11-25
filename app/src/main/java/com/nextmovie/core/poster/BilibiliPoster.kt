@@ -33,7 +33,8 @@ class BilibiliPoster(private val http: Http) {
         val poster: String,
         val backdrop: String,
         val overview: String,
-        val year: String
+        val year: String,
+        val score: String = ""
     )
 
     suspend fun find(title: String, year: String): Hit? {
@@ -125,12 +126,16 @@ class BilibiliPoster(private val http: Http) {
                 val backdrop = firstEpisodeCover(o)
                 val overview = cleanText(o.optString("desc", ""))
                     .trimEnd('。', '.', '…')
+                val scoreObj = o.optJSONObject("media_score")
+                val score = scoreObj?.optDouble("score", 0.0)?.takeIf { it > 0 }
+                    ?.let { String.format(java.util.Locale.ROOT, "%.1f", it) }.orEmpty()
                 out += Hit(
                     title = title,
                     poster = poster,
                     backdrop = backdrop,
                     overview = overview,
-                    year = yearOf(o, overview)
+                    year = yearOf(o, overview),
+                    score = score
                 )
             }
             return out

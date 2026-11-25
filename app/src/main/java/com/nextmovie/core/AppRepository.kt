@@ -7,8 +7,11 @@ import androidx.compose.runtime.setValue
 import com.nextmovie.core.cms.CmsSiteClient
 import com.nextmovie.core.config.ConfigBundle
 import com.nextmovie.core.config.ConfigRepository
+import com.nextmovie.core.config.HealthReport
 import com.nextmovie.core.config.Site
+import com.nextmovie.core.config.SiteHealth
 import com.nextmovie.core.config.SiteSelector
+import com.nextmovie.core.spider.JarPrefetch
 import com.nextmovie.core.history.HistoryStore
 import com.nextmovie.core.match.TitleMatcher
 import com.nextmovie.core.model.PlayLine
@@ -54,7 +57,7 @@ class AppRepository(private val context: Context) {
     }
 
     private val lists = com.nextmovie.core.cache.RequestCache<String, List<Vod>>(120_000, 48, cacheIf = { it.isNotEmpty() })
-    private val details = com.nextmovie.core.cache.RequestCache<String, VodDetail?>(120_000, 128, cacheIf = { it != null && it.lines.isNotEmpty() })
+    private val details = com.nextmovie.core.cache.RequestCache<String, VodDetail?>(300_000, 128, cacheIf = { it != null && it.lines.isNotEmpty() })
     private val aggregations = com.nextmovie.core.cache.RequestCache<String, AggregatedDetail?>(180_000, 32, cacheIf = { it != null && it.sources.isNotEmpty() })
     private val homeSnapshots = com.nextmovie.core.cache.HomeSnapshotStore(File(context.filesDir, "home-snapshots"))
     private val warmSites = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -264,15 +267,31 @@ class AppRepository(private val context: Context) {
         }
     }
 
-    /** 配置根部的 spyder jar 先拉到本地，别等第一次点开插件源才开始下载。 */
+    /** 配置根部的 spider jar 先拉到本地，别等第一次点开插件源才开始下载。 */
     fun prefetchSpiderJar(reason: String = "startup") {
-        val raw = sites.firstOrNull { it.jar.isNotBlank() }?.let { it.jar } ?: return
+        val siteWithJar = sites.firstOrNull { it.jar.isNotBlank() } ?: return
+        // 还原 `url;md5;hash` 形态，供 JarPrefetch 校验
+        val raw = if (siteWithJar.jarHash.isNotBlank()) {
+            "${siteWithJar.jar};md5;${siteWithJar.jarHash}"
+        } else {
+            siteWithJar.jar
+        }
         prefetchScope.launch {
             val started = System.nanoTime()
-            val ok = runCatching { com.nextmovie.core.spider.JarPrefetch.prefetch(context, http, raw) }.getOrDefault(false)
+            val ok = runCatching { JarPrefetch.prefetch(context, http, raw) }.getOrDefault(false)
             android.util.Log.i("NextMovieTiming", "jar-prefetch-done ${(System.nanoTime() - started) / 1_000_000}ms ok=$ok reason=$reason")
         }
     }
+
+    /** 静态站点分类报告（不探活）。 */
+    fun siteHealthReport(): HealthReport = SiteHealth.audit(sites)
+
+    /** 对 CMS 做短超时探活，返回带 probes 的报告。 */
+    suspend fun probeSiteHealth(): HealthReport = SiteHealth.probe(sites, http)
+
+    fun jarDownloadState(): JarPrefetch.State = JarPrefetch.state()
+
+    suspend fun retryJarDownload(): Boolean = JarPrefetch.retryLast(context, http)
 
     suspend fun connectPluginHost(site: Site) {
         if (site.isSpider && site.isPlayable) spiderHost.preconnect()
@@ -341,12 +360,9 @@ class AppRepository(private val context: Context) {
     }
 
     /**
-     * 首页数据：先信快照，再给网络一个硬预算。
-     *
-     * 插件源（jar / js）冷启动要下载、解压、跑 Init，几百 KB 的包在盒子上能耗掉十几秒；
-     * 旧实现在这条链上没有任何上限，超时还会被 `Retry.once` 翻倍，用户看到的就是「转圈几分钟」。
-     * 现在的规则：10 分钟内的快照直接返回；超过预算就先用旧快照渲染，网络请求本身继续在后台跑
-     * （`lists` 的共享 flight 不会被 await 超时取消），下一次进入首页即可命中。
+     * 首页：Stale-While-Revalidate。
+     * - 有磁盘/内存快照 → **立即返回**（秒开），网络在后台刷新；
+     * - 无快照 → 等网络（插件冷启最多 30s）。
      */
     suspend fun home(
         site: Site = requireSite(),
@@ -359,21 +375,49 @@ class AppRepository(private val context: Context) {
             withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.invalidate(site.runtimeKey) }
             lists.invalidate(key)
             spiderHost.clearCache()
-        } else {
-            val age = withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.ageMs(site.runtimeKey) }
-            if (age < FRESH_HOME_MS) {
-                val cached = lists.get(key) {
-                    withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.read(site.runtimeKey) }
-                        ?: loadHomeNetwork(site)
-                }
-                android.util.Log.i("NextMovieTiming", "home-cache ${(System.nanoTime() - started) / 1_000_000}ms age=${age}ms items=${cached.size}")
-                return cached
+        }
+
+        val age = withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.ageMs(site.runtimeKey) }
+        val snapshot = withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.read(site.runtimeKey) }
+        val mem = lists.peek(key)
+
+        fun kickBackgroundRefresh() {
+            prefetchScope.launch {
+                runCatching { lists.get(key) { loadHomeNetwork(site) } }
+                    .onSuccess {
+                        android.util.Log.i(
+                            "NextMovieTiming",
+                            "home-bg-refresh ok items=${it.size} site=${site.name}"
+                        )
+                    }
+                    .onFailure {
+                        android.util.Log.w("NextMovieTiming", "home-bg-refresh fail ${it.message}")
+                    }
             }
         }
-        val snapshot = withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.read(site.runtimeKey) }
-        // 没有任何快照时是真正的首次冷启动：插件要下载并初始化，硬砍到 8s 只会让用户看到"失败"，
-        // 这里放宽到 30s；有快照时仍然只等 8s，超时直接渲染旧内容。
-        val effectiveBudget = if (snapshot == null && site.isSpider && site.runtimeKey !in warmSites) 30_000L else budgetMs
+
+        if (!refresh && snapshot != null) {
+            // 新鲜：内存优先，否则磁盘；超过 2 分钟软刷新
+            if (age < FRESH_HOME_MS) {
+                if (age > SOFT_HOME_REFRESH_MS) kickBackgroundRefresh()
+                val ready = mem ?: prepareForList(snapshot)
+                android.util.Log.i(
+                    "NextMovieTiming",
+                    "home-instant ${(System.nanoTime() - started) / 1_000_000}ms age=${age}ms items=${ready.size}"
+                )
+                return ready
+            }
+            // 过期但仍有快照：立刻出屏，后台拉新
+            kickBackgroundRefresh()
+            android.util.Log.i(
+                "NextMovieTiming",
+                "home-stale-instant ${(System.nanoTime() - started) / 1_000_000}ms items=${snapshot.size}"
+            )
+            return prepareForList(snapshot)
+        }
+
+        val effectiveBudget =
+            if (snapshot == null && site.isSpider && site.runtimeKey !in warmSites) 30_000L else budgetMs
         val network = runCatching {
             kotlinx.coroutines.withTimeoutOrNull(effectiveBudget) {
                 lists.get(key) { loadHomeNetwork(site) }
@@ -385,10 +429,19 @@ class AppRepository(private val context: Context) {
             return fresh
         }
         if (snapshot != null) {
-            android.util.Log.i("NextMovieTiming", "home-stale ${(System.nanoTime() - started) / 1_000_000}ms items=${snapshot.size} budget=$budgetMs")
+            kickBackgroundRefresh()
+            android.util.Log.i(
+                "NextMovieTiming",
+                "home-stale ${(System.nanoTime() - started) / 1_000_000}ms items=${snapshot.size}"
+            )
             return prepareForList(snapshot)
         }
-        android.util.Log.w("NextMovieTiming", "home-timeout ${(System.nanoTime() - started) / 1_000_000}ms budget=$effectiveBudget site=${site.name}")
+        // 无快照且超时：仍后台拉，下次可秒开
+        kickBackgroundRefresh()
+        android.util.Log.w(
+            "NextMovieTiming",
+            "home-timeout ${(System.nanoTime() - started) / 1_000_000}ms budget=$effectiveBudget site=${site.name}"
+        )
         throw java.io.IOException(
             "「${site.name}」首次读取超时（>${effectiveBudget / 1000}s）：插件源要先下载并初始化，已转到后台继续准备，稍后重试即可"
         )
@@ -478,7 +531,7 @@ class AppRepository(private val context: Context) {
         val targets = sites.filter { it.isPlayable && it.searchable }
             .sortedBy { if (it.runtimeKey == site.runtimeKey) 0 else if (it.isCms) 1 else 2 }
             .filterNot { preferSearch && it.runtimeKey == site.runtimeKey }
-            .take(crossSiteLimit)
+            .take(crossSiteLimit.coerceAtLeast(6))
         return coroutineScope {
             val replies = Channel<DetailHit?>(targets.size.coerceAtLeast(1))
             val workers = targets.map { candidate ->
@@ -518,7 +571,7 @@ class AppRepository(private val context: Context) {
     suspend fun aggregateDetail(
         site: Site,
         vod: Vod,
-        crossSiteLimit: Int = 8,
+        crossSiteLimit: Int = 12,
         onPartial: (AggregatedDetail) -> Unit = {}
     ): AggregatedDetail? {
         val keyword = vod.name.trim()
@@ -538,7 +591,7 @@ class AppRepository(private val context: Context) {
             addAll(
                 sites.filter { it.isPlayable && it.searchable && it.runtimeKey != site.runtimeKey }
                     .sortedBy { if (it.isCms) 0 else 1 }
-                    .take(crossSiteLimit)
+                    .take(crossSiteLimit.coerceAtLeast(6))
             )
         }
         val replies = Channel<SourceDetail?>(candidates.size.coerceAtLeast(1))
@@ -579,9 +632,19 @@ class AppRepository(private val context: Context) {
                                     probe?.label?.takeIf { it.isNotBlank() },
                                     quality.label.takeIf { it.isNotBlank() }
                                 ).joinToString(" · ")
+                                val resLabel = when {
+                                    (probe?.height ?: 0) >= 2160 -> "4K"
+                                    (probe?.height ?: 0) >= 1440 -> "1440p"
+                                    (probe?.height ?: 0) >= 1080 -> "1080p"
+                                    (probe?.height ?: 0) >= 720 -> "720p"
+                                    else -> ""
+                                }
+                                val detailWithRes = if (resLabel.isNotBlank() && resolvedDetail.vod.resolution.isBlank()) {
+                                    resolvedDetail.copy(vod = resolvedDetail.vod.copy(resolution = resLabel))
+                                } else resolvedDetail
                                 SourceDetail(
                                     site = candidate,
-                                    detail = resolvedDetail,
+                                    detail = detailWithRes,
                                     score = quality.score + probeBonus,
                                     badge = badge,
                                     bestLineIndex = bestIndex,
@@ -615,10 +678,15 @@ class AppRepository(private val context: Context) {
         AggregatedDetail(sorted).takeIf { it.sources.isNotEmpty() }
     }
 
-    private suspend fun matchingVideo(site: Site, keyword: String, year: String): Vod? =
-        search(site, keyword).firstOrNull {
-            TitleMatcher.score(keyword, year, it.name, it.year) >= TitleMatcher.ACCEPT_THRESHOLD
-        }
+    private suspend fun matchingVideo(site: Site, keyword: String, year: String): Vod? {
+        val list = search(site, keyword)
+        // 先严格阈值，再放宽到 0.72，减少跨站「同名找不到」
+        val ranked = list.map { it to TitleMatcher.score(keyword, year, it.name, it.year) }
+            .filter { it.second >= 0.72 }
+            .sortedByDescending { it.second }
+        return ranked.firstOrNull { it.second >= TitleMatcher.ACCEPT_THRESHOLD }?.first
+            ?: ranked.firstOrNull()?.first
+    }
 
     private suspend fun <T> detailAttempt(block: suspend () -> T): T? = try {
         block()
@@ -754,6 +822,88 @@ class AppRepository(private val context: Context) {
         } ?: throw IllegalStateException("网页解析未取得媒体地址，请更换线路")
     }
 
+    /**
+     * 跨站聚合搜索：多源并发，按 TitleMatcher 去重合并，当前站优先。
+     * 结果带上 [SearchHit.site] 便于一键换源进详情。
+     */
+    data class SearchHit(val site: Site, val vod: Vod, val score: Double)
+
+    suspend fun searchAll(
+        keyword: String,
+        limitSites: Int = 10,
+        onPartial: (List<SearchHit>) -> Unit = {}
+    ): List<SearchHit> = coroutineScope {
+        val q = keyword.trim()
+        if (q.isEmpty()) return@coroutineScope emptyList()
+        val targets = searchableSites(limitSites)
+        val gate = kotlinx.coroutines.sync.Semaphore(4)
+        val collected = java.util.concurrent.ConcurrentLinkedQueue<SearchHit>()
+        targets.map { site ->
+            launch(kotlinx.coroutines.Dispatchers.IO) {
+                gate.withPermit {
+                    val list = withTimeoutOrNull(8_000) {
+                        runCatching { search(site, q) }.getOrDefault(emptyList())
+                    }.orEmpty()
+                    list.forEach { vod ->
+                        val score = TitleMatcher.score(q, "", vod.name, vod.year)
+                        if (score >= 0.55 || vod.name.contains(q, ignoreCase = true)) {
+                            collected += SearchHit(site, vod, score.coerceAtLeast(0.55))
+                        }
+                    }
+                    if (collected.isNotEmpty()) {
+                        onPartial(collected.sortedByDescending { it.score }.distinctBy { it.vod.name to it.site.key })
+                    }
+                }
+            }
+        }.forEach { it.join() }
+        collected.sortedWith(
+            compareByDescending<SearchHit> { it.score }
+                .thenBy { if (it.site.runtimeKey == currentSite?.runtimeKey) 0 else 1 }
+        ).distinctBy { TitleMatcher.normalize(it.vod.name) to it.site.key }
+    }
+
+    /**
+     * 播放失败自动换线：按聚合源顺序尝试 [alternatives] 中同一集（按集名/序号对齐）。
+     * 成功则 [recordPlayOutcome]；全部失败抛最后错误。
+     */
+    suspend fun resolvePlayWithFailover(
+        primary: Site,
+        flag: String,
+        episodeUrl: String,
+        episodeName: String = "",
+        alternatives: List<SourceDetail> = emptyList(),
+        onStage: (String) -> Unit = {}
+    ): Pair<Site, PlayResult> {
+        val queue = ArrayList<Pair<Site, String>>()
+        queue += primary to episodeUrl
+        alternatives.forEach { alt ->
+            if (alt.site.runtimeKey == primary.runtimeKey) return@forEach
+            val line = alt.detail.lines.getOrNull(alt.bestLineIndex) ?: alt.detail.lines.firstOrNull()
+            val ep = line?.episodes?.firstOrNull { episodeName.isNotBlank() && it.name == episodeName }
+                ?: line?.episodes?.firstOrNull()
+            if (ep != null) queue += alt.site to ep.url
+        }
+        var lastError: Throwable? = null
+        for ((site, url) in queue) {
+            onStage("尝试「${site.name}」…")
+            val result = runCatching { resolvePlay(site, flag, url, onStage) }.getOrElse {
+                lastError = it
+                recordPlayOutcome(site.key, false)
+                null
+            }
+            if (result != null && result.url.isNotBlank()) {
+                // 网盘兜底头
+                val headers = com.nextmovie.core.source.netdisk.NetdiskProxy.mergePlayHeaders(
+                    result.url, result.headers
+                )
+                recordPlayOutcome(site.key, true)
+                return site to result.copy(headers = headers)
+            }
+            recordPlayOutcome(site.key, false)
+        }
+        throw lastError ?: IllegalStateException("所有线路均无法播放，请稍后再试或换源")
+    }
+
     private fun PlayResult.withAuxiliaryMedia(original: PlayResult): PlayResult = copy(
         subtitles = (subtitles + original.subtitles).distinctBy { it.url },
         danmaku = danmaku.ifBlank { original.danmaku }
@@ -819,6 +969,8 @@ class AppRepository(private val context: Context) {
 
     companion object {
         private const val FRESH_HOME_MS = 10 * 60 * 1000L
+        /** 有快照时超过此时长后台软刷新，不挡首屏。 */
+        private const val SOFT_HOME_REFRESH_MS = 2 * 60 * 1000L
         private const val PREFS = "nextmovie"
         private const val KEY_CONFIG_URL = "config_url"
         private const val KEY_TMDB_TOKEN = "tmdb_token"
