@@ -17,6 +17,10 @@ open class Spider {
     @JvmField
     var siteKey: String = ""
 
+    /** FongMi / Marco 生态同名字段：插件从这里拿宿主 Cookie（网盘登录态）。 */
+    @JvmField
+    var net: com.github.catvod.net.Net? = null
+
     open fun getActivity(): android.app.Activity? = com.nextmovie.core.spider.PluginDialogs.current()
 
     open fun dialog(options: org.json.JSONObject): org.json.JSONObject? = com.nextmovie.core.spider.PluginDialogs.show(this, options)

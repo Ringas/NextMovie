@@ -229,6 +229,9 @@ class JarSpiderLoader(
         initialized.add(jarFile.absolutePath)
         android.util.Log.i("NextMoviePlugin", "class=" + instance.javaClass.name + " init2=" + instance.javaClass.getMethod("init", Context::class.java, String::class.java).declaringClass.name + " init1=" + instance.javaClass.getMethod("init", Context::class.java).declaringClass.name)
         instance.siteKey = site.key
+        instance.net = com.github.catvod.net.Net(com.github.catvod.net.HostCookies(context), site.name)
+        runCatching { syncCookiesToWebView(context) }
+        runCatching { dumpDexPaths(site, instance.javaClass.classLoader) }
         try {
             SpiderInitializer.initialize(instance, context, site.ext)
         } catch (e: Throwable) {
@@ -686,5 +689,48 @@ class JarSpiderLoader(
     private fun md5(value: String): String {
         val digest = MessageDigest.getInstance("MD5").digest(value.toByteArray())
         return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    /** 诊断：把来源 ClassLoader 实际加载的 dex 路径打出来，便于 dump 已解密的 payload。 */
+    private fun dumpDexPaths(site: Site, loader: ClassLoader?) {
+        if (loader == null) return
+        runCatching {
+            val base = Class.forName("dalvik.system.BaseDexClassLoader")
+            val pathListField = base.getDeclaredField("pathList").apply { isAccessible = true }
+            val pathList = pathListField.get(loader) ?: return
+            val elemsField = pathList.javaClass.getDeclaredField("dexElements").apply { isAccessible = true }
+            val elems = elemsField.get(pathList) as? Array<*> ?: return
+            for (e in elems) {
+                if (e == null) continue
+                val dexField = e.javaClass.getDeclaredField("dexFile").apply { isAccessible = true }
+                val dexFile = dexField.get(e) ?: continue
+                val name = runCatching { dexFile.javaClass.getMethod("getName").invoke(dexFile) as? String }.getOrNull()
+                    ?: dexFile.toString()
+                android.util.Log.i("NextMovieDex", "site=${site.name} loader=${loader.javaClass.simpleName} dex=$name")
+            }
+        }.onFailure { android.util.Log.w("NextMovieDex", "dump failed: $it") }
+    }
+
+    /** 把宿主网盘 Cookie 同步进 WebView 的 CookieManager（Guard 插件常从这里取登录态）。 */
+    private fun syncCookiesToWebView(context: Context) {
+        val prefs = context.getSharedPreferences("nextmovie", Context.MODE_PRIVATE)
+        val manager = android.webkit.CookieManager.getInstance()
+        manager.setAcceptCookie(true)
+        val hosts = mapOf(
+            "quark" to "https://pan.quark.cn",
+            "uc" to "https://drive.uc.cn",
+            "ali" to "https://www.alipan.com",
+            "baidu" to "https://pan.baidu.com"
+        )
+        for ((id, url) in hosts) {
+            val cookie = prefs.getString("pan_cookie_" + id, "").orEmpty()
+            if (cookie.isBlank()) continue
+            manager.setCookie(url, cookie)
+            android.util.Log.i(
+                "NextMoviePan",
+                "webview-sync id=" + id + " set=" + cookie.length + " readback=" + manager.getCookie(url).orEmpty().length
+            )
+        }
+        manager.flush()
     }
 }
