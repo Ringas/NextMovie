@@ -450,7 +450,7 @@ fun PlayerScreen(
         val bufferedFraction = if (duration > 0) (bufferedMs.toFloat() / duration).coerceIn(0f, 1f) else 0f
 
         androidx.compose.animation.AnimatedVisibility(
-            visible = hudVisible,
+            visible = hudVisible && !controlsVisible,
             enter = androidx.compose.animation.fadeIn(),
             exit = androidx.compose.animation.fadeOut()
         ) {
@@ -508,7 +508,9 @@ fun PlayerScreen(
                         Spacer(Modifier.width(22.dp))
                         Column {
                             Text(
-                                text = title,
+                                text = title.split(" · ").let { parts ->
+                                    if (parts.size > 1 && parts.distinct().size == 1) parts[0] else title
+                                },
                                 color = Tokens.Text,
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.SemiBold,
@@ -572,7 +574,7 @@ fun PlayerScreen(
                                 modifier = Modifier.padding(top = 8.dp)
                             )
                         }
-                        keyHint != null && !player.isPlaying -> FloatCard(accent = false) {
+                        keyHint != null && !player.isPlaying && !controlsVisible -> FloatCard(accent = false) {
                             Text(
                                 text = keyHint!!,
                                 color = Tokens.Text,
@@ -832,12 +834,12 @@ private fun PlayerSheet(
 
     Column(
         modifier = modifier
-            .padding(start = 32.dp, end = 32.dp, bottom = 24.dp)
+            .padding(start = 32.dp, end = 32.dp, bottom = 18.dp)
             .fillMaxWidth()
             .clip(RoundedCornerShape(Tokens.Corner.sheet))
             .background(Color(0xF2141720))
             .border(1.dp, Color(0x24FFFFFF), RoundedCornerShape(Tokens.Corner.sheet))
-            .padding(start = 28.dp, end = 28.dp, top = 22.dp, bottom = 24.dp)
+            .padding(start = 26.dp, end = 26.dp, top = 16.dp, bottom = 16.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("播控与音画设置", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
@@ -862,7 +864,7 @@ private fun PlayerSheet(
                 onClick = onClose
             )
         }
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(10.dp))
 
         // 传输控制
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -897,7 +899,7 @@ private fun PlayerSheet(
                 fontSize = 13.sp
             )
         }
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(10.dp))
 
         SheetRow("播放倍速") {
             speeds.forEach { v ->
@@ -905,37 +907,37 @@ private fun PlayerSheet(
                     text = if (v == 1f) "1.0×" else "${v}×",
                     selected = speed == v,
                     glass = speed != v,
-                    horizontalPadding = 15.dp,
-                    verticalPadding = 8.dp,
+                    horizontalPadding = 14.dp,
+                    verticalPadding = 7.dp,
                     onClick = { onSpeed(v) }
                 )
                 Spacer(Modifier.width(8.dp))
             }
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(8.dp))
         SheetRow("画面比例") {
             ratios.forEach { (mode, label) ->
                 com.nextmovie.ui.common.TvPill(
                     text = label,
                     selected = resizeMode == mode,
                     glass = resizeMode != mode,
-                    horizontalPadding = 15.dp,
-                    verticalPadding = 8.dp,
+                    horizontalPadding = 14.dp,
+                    verticalPadding = 7.dp,
                     onClick = { onResizeMode(mode) }
                 )
                 Spacer(Modifier.width(8.dp))
             }
         }
         if (slots.isNotEmpty()) {
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
             SheetRow("播放线路") {
                 slots.take(4).forEachIndexed { index, slot ->
                     com.nextmovie.ui.common.TvPill(
                         text = slot.siteName + (if (slot.badge.isNotBlank()) " · ${slot.badge}" else ""),
                         selected = index == currentSlot,
                         glass = index != currentSlot,
-                        horizontalPadding = 14.dp,
-                        verticalPadding = 8.dp,
+                        horizontalPadding = 13.dp,
+                        verticalPadding = 7.dp,
                         onClick = { onSwitchSlot(index) }
                     )
                     Spacer(Modifier.width(8.dp))

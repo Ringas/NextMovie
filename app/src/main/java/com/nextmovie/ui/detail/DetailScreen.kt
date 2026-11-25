@@ -44,6 +44,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
@@ -134,6 +135,10 @@ fun DetailScreen(
     var episodeSheet by remember { mutableStateOf(false) }
     var posterTint by remember { mutableStateOf<Color?>(null) }
     val playFocus = remember { FocusRequester() }
+    // Marco 的焦点是「返回 → 播放按钮 → 线路 → 选集」一条纵向链，不交给 2D 就近搜索乱跳
+    val backFocus = remember { FocusRequester() }
+    val lineFocus = remember { FocusRequester() }
+    val epFocus = remember { FocusRequester() }
 
     LaunchedEffect(initial.id, site.key, reload) {
         loading = true
@@ -375,7 +380,16 @@ fun DetailScreen(
                 .fillMaxWidth()
                 .padding(start = horizontalPad, end = horizontalPad, top = 24.dp)
         ) {
-            TvPill(text = "← 返回", glass = true, horizontalPadding = 18.dp, verticalPadding = 10.dp, onClick = onBack)
+            TvPill(
+                text = "← 返回",
+                glass = true,
+                horizontalPadding = 18.dp,
+                verticalPadding = 10.dp,
+                modifier = Modifier
+                    .focusRequester(backFocus)
+                    .focusProperties { down = playFocus },
+                onClick = onBack
+            )
             Spacer(Modifier.weight(1f))
             BrandLogo(iconSize = 34.dp, fontSize = 20f, showWordmark = false)
         }
@@ -479,6 +493,10 @@ fun DetailScreen(
                         TvPill(
                             text = ctaLabel,
                             prominent = true,
+                            modifier = Modifier.focusProperties {
+                                up = backFocus
+                                if (lines.isNotEmpty()) down = lineFocus
+                            },
                             enabled = line != null && line.episodes.isNotEmpty(),
                             autofocus = true,
                             horizontalPadding = 28.dp,
@@ -586,6 +604,12 @@ fun DetailScreen(
                                         count = item.episodes.size,
                                         drive = detectDrive(item.name),
                                         selected = index == lineIndex,
+                                        modifier = if (index == 0) Modifier
+                                            .focusRequester(lineFocus)
+                                            .focusProperties {
+                                                up = playFocus
+                                                if (item.episodes.isNotEmpty()) down = epFocus
+                                            } else Modifier,
                                         onClick = {
                                             lineIndex = index
                                             groupIndex = 0
@@ -722,11 +746,14 @@ fun DetailScreen(
                                 .heightInGrid(totalEpisodes)
                                 .mouseWheel(epState)
                         ) {
-                            itemsIndexed(episodeIndices) { _, epIndex ->
+                            itemsIndexed(episodeIndices) { slot, epIndex ->
                                 val ep = line!!.episodes[epIndex]
                                 val watched = resumeEntry?.episodeUrl == ep.url
                                 EpisodeTile(
                                     number = epIndex + 1,
+                                    modifier = if (slot == 0) Modifier
+                                        .focusRequester(epFocus)
+                                        .focusProperties { up = lineFocus } else Modifier,
                                     title = ep.name,
                                     watched = watched,
                                     isNetdisk = detectDrive(line.name) != null,
@@ -758,12 +785,20 @@ private fun Modifier.heightInGrid(total: Int) = this.height(
 )
 
 @Composable
-private fun LinePill(name: String, count: Int, drive: String?, selected: Boolean, onClick: () -> Unit) {
+private fun LinePill(
+    name: String,
+    count: Int,
+    drive: String?,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         TvPill(
             text = "$name ($count)",
             glass = true,
             selected = selected,
+            modifier = modifier,
             horizontalPadding = 18.dp,
             verticalPadding = 9.dp,
             onClick = onClick
@@ -794,6 +829,7 @@ private fun EpisodeTile(
     title: String,
     watched: Boolean,
     isNetdisk: Boolean,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -810,7 +846,7 @@ private fun EpisodeTile(
     }
     Column(
         verticalArrangement = Arrangement.SpaceBetween,
-        modifier = Modifier
+        modifier = modifier
             .height(76.dp)
             .clip(RoundedCornerShape(Tokens.Corner.tile))
             .background(bg)
