@@ -239,6 +239,14 @@ class JarSpiderLoader(
         instances[site.runtimeKey] = instance
         apiKeys[site.api] = site.runtimeKey
         PluginDiag.record(context, site.name, site.api, true, "Init ok，实例已就绪")
+        // P0 诊断：插件是否把 catvod 的 Net 暴露成实例字段/Getter（决定 Cookie 能不能注进去）
+        runCatching {
+            val net = findNet(instance.javaClass, instance)
+            android.util.Log.i(
+                "NextMoviePan",
+                "net-probe site=${site.name} found=${net != null} type=${net?.javaClass?.name ?: "-"}"
+            )
+        }
         instance
     }
 
@@ -295,8 +303,62 @@ class JarSpiderLoader(
      * 把宿主扫码拿到的网盘 Cookie 交给来源。
      * 来源实现不统一，这里按常见写法依次尝试：`api.<Pan>.setCookie`、`utils.Pref.putString`。
      */
+    /**
+     * Marco / FongMi 的注入点：插件的 `com.github.catvod.net.Net.setCookie(url, cookie)`。
+     * 插件自己所有 HTTP 都走这个 Net 的 CookieStore，写进去之后 detailContent/解析网盘
+     * 才会带上登录态；之前只反射 `api.Quark.setCookie`，Guard 混淆后基本打不中。
+     */
+    private fun injectViaNet(site: Site, panId: String, cookie: String): Boolean {
+        val spider = cached(site) ?: return false
+        val net = findNet(spider.javaClass, spider) ?: return false
+        val urls = when (panId.lowercase()) {
+            "quark" -> listOf("https://pan.quark.cn", "https://uop.quark.cn")
+            "uc" -> listOf("https://drive.uc.cn", "https://open.uc.cn")
+            "ali", "aliyun" -> listOf("https://www.alipan.com", "https://openapi.alipan.com")
+            "baidu" -> listOf("https://pan.baidu.com")
+            else -> return false
+        }
+        val set = net.javaClass.methods.firstOrNull { it.name == "setCookie" && it.parameterTypes.size == 2 }
+            ?: return false
+        set.isAccessible = true
+        var wrote = 0
+        for (u in urls) {
+            val r = runCatching { set.invoke(net, u, cookie) }.getOrNull()
+            if (r == true) wrote++
+        }
+        val get = net.javaClass.methods.firstOrNull { it.name == "getCookie" && it.parameterTypes.size == 1 }
+        val back = if (get != null) runCatching { get.invoke(net, urls.first()) as? String }.getOrNull().orEmpty() else ""
+        android.util.Log.i(
+            "NextMoviePan",
+            "inject Net set=$wrote/${urls.size} readback=${back.length} pan=$panId site=${site.name}"
+        )
+        return wrote > 0 || back.isNotBlank()
+    }
+
+    /** 在插件实例（含父类）里找 `com.github.catvod.net.Net`：先找字段，再找无参 getter。 */
+    private fun findNet(cls: Class<*>, instance: Any, depth: Int = 0): Any? {
+        if (depth > 4) return null
+        for (f in cls.declaredFields) {
+            if (f.type.name == "com.github.catvod.net.Net") {
+                runCatching { f.isAccessible = true }
+                runCatching { return f.get(instance) }.getOrNull()?.let { return it }
+            }
+        }
+        for (m in cls.methods) {
+            if (m.parameterTypes.isEmpty() && m.returnType.name == "com.github.catvod.net.Net") {
+                runCatching { return m.invoke(instance) }.getOrNull()?.let { return it }
+            }
+        }
+        val parent = cls.superclass ?: return null
+        if (parent == Any::class.java) return null
+        return findNet(parent, instance, depth + 1)
+    }
+
     fun injectPanCookie(site: Site, panId: String, cookie: String): Boolean {
         if (cookie.isBlank()) return false
+        // 先走官方通道（插件自己的 Net CookieStore），失败再退回各家 setCookie / Pref。
+        runCatching { if (injectViaNet(site, panId, cookie)) return true }
+            .onFailure { android.util.Log.i("NextMoviePan", "inject Net 异常: ${it.message}") }
         val apiNames = when (panId.lowercase()) {
             "quark" -> listOf("Quark")
             "uc" -> listOf("UC", "Uc")

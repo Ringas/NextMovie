@@ -88,7 +88,7 @@ class PluginActivity : ComponentActivity() {
         }
         // 网盘登录：直接打开官方登录页（页面本身就是扫码），轮询 WebView Cookie，抓到后注入来源
         fun panLoginUrl(id: String): Pair<String, String> = when (id) {
-            "quark" -> "https://pan.quark.cn/" to "__puus"
+            "quark" -> "https://pan.quark.cn/#/login" to "__puus"
             "uc" -> "https://drive.uc.cn/login" to "__puus"
             "ali" -> "https://www.alipan.com/" to "SESSIONID"
             "baidu" -> "https://pan.baidu.com/" to "BDUSS"
@@ -182,7 +182,8 @@ class PluginActivity : ComponentActivity() {
             val marker = cookieMarker
             while (true) {
                 delay(1_500)
-                val cookie = android.webkit.CookieManager.getInstance().getCookie(url).orEmpty()
+                val probe = url.substringBefore('#')
+                val cookie = android.webkit.CookieManager.getInstance().getCookie(probe).orEmpty()
                 android.util.Log.i("NextMoviePan", "cookie poll marker=$marker len=${cookie.length}")
                 if (cookie.isNotBlank() && (marker.isBlank() || cookie.contains(marker, ignoreCase = true))) {
                     finishPanLogin(site, activePan, cookie)
@@ -212,11 +213,13 @@ class PluginActivity : ComponentActivity() {
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             listOf("quark" to "夸克", "uc" to "UC", "ali" to "阿里", "baidu" to "百度·嘟嘟").forEach { (id, label) ->
                                 SettingsButton(if (activePan == id) "$label ✓" else label, enabled = !busy) {
-                                    if (id == "quark" || id == "uc") startCasLogin(id) else startPanLogin(id)
+                                    // 统一走官方网页登录：页面内的官方二维码才是真 payload，
+                                    // 宿主自建 CAS token 的二维码扫出来只是文本（已实测）。
+                                    startPanLogin(id)
                                 }
                             }
-                            if (activePan == "quark" || activePan == "uc") {
-                                SettingsButton("扫码没反应？改用网页登录", enabled = !busy) { startPanLogin(activePan) }
+                            if (activePan.isNotBlank()) {
+                                SettingsButton("重新打开登录页", enabled = !busy) { startPanLogin(activePan) }
                             }
                         }
                     }

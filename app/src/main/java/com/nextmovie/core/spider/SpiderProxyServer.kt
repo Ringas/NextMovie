@@ -54,6 +54,18 @@ class SpiderProxyServer : java.io.Closeable {
     }
 
     fun rewrite(url: String): String {
+        // FongMi / Marco 形态：插件直接把 `proxy://?do=jar&siteKey=...` 交给播放器，
+        // 宿主必须把它接成自己的回环接口，否则播放器会当成非法协议。
+        val raw = url.trim()
+        if (raw.startsWith("proxy://", ignoreCase = true)) {
+            val rest = raw.substring(8)
+            val query = when {
+                rest.startsWith("/") -> rest.substringAfter('?', "")
+                rest.startsWith("?") -> rest.substring(1)
+                else -> rest
+            }
+            return if (query.isBlank()) url else "http://127.0.0.1:${server.localPort}/proxy?$query"
+        }
         // 端口可能是 -1（插件没拿到宿主端口时写成 -1），java.net.URI 会直接判非法，
         // 所以这里按字符串拆，port <= 0 一律视作「在找宿主代理」。
         val m = Regex("^https?://(?:127\\.0\\.0\\.1|localhost|\\[::1\\]):(-?\\d+)(/[^?#]*)(\\?.*)?$")
@@ -67,6 +79,37 @@ class SpiderProxyServer : java.io.Closeable {
         if (path !in listOf("/proxy", "/proxy/") || query.isEmpty()) return url
         if (declared > 0 && declared !in 9978..9999 && declared != port) return url
         return "http://127.0.0.1:${server.localPort}$path$query"
+    }
+
+    private class Cached(val status: Int, val mime: String, val headers: Map<* , *>, val body: ByteArray)
+
+    /** 播放器会重复请求同一个分片（seek / 拖回），命中即回，省一次插件往返。 */
+    private val cache = object : LinkedHashMap<String, Cached>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Cached>?): Boolean =
+            size > 24
+    }
+    private val cacheLock = Any()
+    private val ALLOW_RESPONSE = setOf(
+        "content-length", "content-range", "accept-ranges", "location",
+        "cache-control", "content-disposition", "etag", "last-modified"
+    )
+
+    private fun cached(key: String?): Cached? {
+        if (key == null) return null
+        return synchronized(cacheLock) { cache[key] }
+    }
+
+    private fun store(key: String?, entry: Cached) {
+        if (key == null || entry.body.size > 4 * 1024 * 1024) return
+        synchronized(cacheLock) {
+            cache[key] = entry
+            while (cache.size > 24) {
+                val it = cache.entries.iterator()
+                if (!it.hasNext()) break
+                it.next()
+                it.remove()
+            }
+        }
     }
 
     private fun serve(socket: Socket) {
@@ -106,41 +149,96 @@ class SpiderProxyServer : java.io.Closeable {
         // 部分插件用 method 字段区分 GET/HEAD
         params.putIfAbsent("method", method)
 
-        val reply = if (method in listOf("GET", "HEAD")) route?.invoke(params) else null
-        val status = (reply?.getOrNull(0) as? Number)?.toInt() ?: 502
-        val mime = reply?.getOrNull(1)?.toString()
-            ?.takeUnless { it.contains('\r') || it.contains('\n') }
-            ?: "text/plain"
-        val body: InputStream = when (val value = reply?.getOrNull(2)) {
-            is InputStream -> value
-            is ByteArray -> value.inputStream()
-            is String -> value.byteInputStream()
-            else -> "Plugin proxy unavailable".byteInputStream()
-        }
-        body.use { stream ->
-            val out = socket.getOutputStream().buffered()
-            val reason = when {
-                status in 200..299 -> "OK"
-                status == 206 -> "Partial Content"
-                else -> "Error"
+        val cacheKey = params["url"]?.takeIf { it.isNotBlank() }?.let { "${it}\u0000${params["range"].orEmpty()}" }
+        val hit = cached(cacheKey)
+
+        out@ run {
+            val outStream = socket.getOutputStream().buffered()
+            fun head(status: Int, mime: String, headers: Any?) {
+                val reason = when (status) {
+                    206 -> "Partial Content"
+                    200 -> "OK"
+                    else -> "Error"
+                }
+                outStream.write("HTTP/1.1 $status $reason\r\nContent-Type: $mime\r\nConnection: close\r\n".toByteArray())
+                (headers as? Map<*, *>)?.forEach { (k, v) ->
+                    val key = k.toString()
+                    val value = v.toString()
+                    if (key.lowercase() in ALLOW_RESPONSE && !value.contains('\r') && !value.contains('\n')) {
+                        outStream.write("$key: $value\r\n".toByteArray())
+                    }
+                }
+                outStream.write("\r\n".toByteArray())
             }
-            out.write("HTTP/1.1 $status $reason\r\nContent-Type: $mime\r\nConnection: close\r\n".toByteArray())
-            val allowResponse = setOf(
-                "content-length", "content-range", "accept-ranges", "location",
-                "cache-control", "content-disposition", "etag", "last-modified"
-            )
-            (reply?.getOrNull(3) as? Map<*, *>)?.forEach { (k, v) ->
-                val key = k.toString()
-                val value = v.toString()
-                if (key.lowercase() in allowResponse &&
-                    !value.contains('\r') && !value.contains('\n')
-                ) {
-                    out.write("$key: $value\r\n".toByteArray())
+
+            if (hit != null) {
+                head(hit.status, hit.mime, hit.headers)
+                if (method != "HEAD") outStream.write(hit.body)
+                outStream.flush()
+                return@run
+            }
+
+            var reply: Array<*>? = null
+            var status = 502
+            var body: InputStream? = null
+            if (method in listOf("GET", "HEAD")) {
+                // 插件偶发一次网络抖动就回 null/5xx，重试比把错误甩给播放器划算。
+                for (attempt in 1..3) {
+                    val r = runCatching { route?.invoke(params) }.getOrNull()
+                    val st = (r?.getOrNull(0) as? Number)?.toInt() ?: 502
+                    val b = r?.getOrNull(2)
+                    if (st in 200..299 && b != null) {
+                        reply = r; status = st; break
+                    }
+                    if (attempt < 3) Thread.sleep(80L * attempt)
                 }
             }
-            out.write("\r\n".toByteArray())
-            if (method != "HEAD") stream.copyTo(out)
-            out.flush()
+            body = when (val v = reply?.getOrNull(2)) {
+                is InputStream -> v
+                is ByteArray -> v.inputStream()
+                is String -> v.byteInputStream()
+                else -> null
+            }
+            if (status !in 200..299 || body == null) {
+                status = 502
+                head(502, "text/plain", null)
+                if (method != "HEAD") outStream.write("Plugin proxy unavailable".toByteArray())
+                outStream.flush()
+                return@run
+            }
+            val mime = reply?.getOrNull(1)?.toString()?.takeUnless { it.contains('\r') || it.contains('\n') } ?: "application/octet-stream"
+            val headers = reply?.getOrNull(3)
+            body.use { stream ->
+                head(status, mime, headers)
+                if (method != "HEAD") {
+                    // 小体量（分片）先收全再写：既能命中缓存，也不占着插件流。
+                    val buf = java.io.ByteArrayOutputStream()
+                    var total = 0L
+                    var cachedAll = true
+                    val chunkBuf = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = stream.read(chunkBuf)
+                        if (n <= 0) break
+                        total += n
+                        if (total > 4L * 1024 * 1024) cachedAll = false
+                        if (cachedAll) {
+                            buf.write(chunkBuf, 0, n)
+                        } else {
+                            buf.writeTo(outStream)
+                            outStream.write(chunkBuf, 0, n)
+                            buf.reset()
+                            break
+                        }
+                    }
+                    if (cachedAll) {
+                        outStream.write(buf.toByteArray())
+                        store(cacheKey, Cached(status, mime, (headers as? Map<*, *>) ?: emptyMap<String, String>(), buf.toByteArray()))
+                    } else {
+                        stream.copyTo(outStream)
+                    }
+                }
+                outStream.flush()
+            }
         }
     }
 

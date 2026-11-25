@@ -267,36 +267,13 @@ private fun AppRoot(repo: AppRepository) {
         }
     }
 
-    /** 未登录网盘时：夸克/UC 当场出二维码，阿里/百度走账户页网页登录。 */
+    /** 未登录网盘时一律走账户页的官方网页登录：二维码由官方页面渲染，Cookie 回来再回灌插件。 */
     fun askPanLogin(activeSite: Site, panId: String, retry: (() -> Unit)?) {
-        panQrLabel = when (panId) { "quark" -> "夸克"; "uc" -> "UC"; "ali" -> "阿里"; else -> "百度·嘟嘟" }
-        if (panId == "quark" || panId == "uc") {
-            panQrId = panId
-            panQrLabel = if (panId == "quark") "夸克" else "UC"
-            panQrBitmap = null
-            panQrMsg = "正在获取「$panQrLabel」登录二维码…"
-            panQrRetry = retry
-            android.util.Log.i("NextMoviePan", "auto-pop qr pan=$panId site=${activeSite.key}")
-            com.nextmovie.core.pan.PanLogin.start(panId) { snap ->
-                scope.launch {
-                    panQrBitmap = snap.qr
-                    panQrMsg = snap.message
-                    if (snap.state == com.nextmovie.core.pan.PanLogin.State.SUCCESS) {
-                        context.getSharedPreferences("nextmovie", android.content.Context.MODE_PRIVATE)
-                            .edit().putString("pan_cookie_$panId", snap.cookie).apply()
-                        panQrMsg = "「$panQrLabel」登录成功，正在接着播放…"
-                        panQrBitmap = null
-                        val r = panQrRetry
-                        kotlinx.coroutines.delay(900)
-                        panQrId = ""
-                        r?.invoke()
-                    }
-                }
-            }
-        } else {
-            Toast.makeText(context, "「${panQrLabel.ifBlank { panId }}」需要网页登录，已打开账户页", Toast.LENGTH_LONG).show()
-            accountLauncher.launch(PluginActivity.intent(context, activeSite, "", null))
-        }
+        val label = when (panId) { "quark" -> "夸克"; "uc" -> "UC"; "ali" -> "阿里"; else -> "百度·嘟嘟" }
+        android.util.Log.i("NextMoviePan", "auto-pop web-login pan=$panId site=${activeSite.key}")
+        Toast.makeText(context, "「$label」未登录，已打开账户页，登录后回来点播放", Toast.LENGTH_LONG).show()
+        accountLauncher.launch(PluginActivity.intent(context, activeSite, "", null))
+        panQrRetry = retry
     }
 
     /** 把插件异常翻成人话，别再让用户对着「解析失败」猜。 */
