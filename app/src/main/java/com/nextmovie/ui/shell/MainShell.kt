@@ -10,6 +10,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import com.nextmovie.ui.common.TvKeys
 import androidx.compose.ui.graphics.Color
 import com.nextmovie.core.AppRepository
 import com.nextmovie.core.config.Site
@@ -51,7 +53,17 @@ fun MainShell(
 
     Box(Modifier.fillMaxSize()) {
         AmbientBackdrop(tint = tint)
-        Row(Modifier.fillMaxSize()) {
+        Row(
+            Modifier
+                .fillMaxSize()
+                .onPreviewKeyEvent { e ->
+                    val d = TvKeys.sectionDigit(e)
+                    if (d != null && d in ShellTab.entries.indices) {
+                        tab = d
+                        true
+                    } else false
+                }
+        ) {
             NavRail(
                 selected = selected,
                 status = repo.configStatus()?.text ?: site.name,

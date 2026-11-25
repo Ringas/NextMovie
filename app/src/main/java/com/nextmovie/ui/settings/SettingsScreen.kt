@@ -41,6 +41,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.nextmovie.ui.common.TvAction
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -61,6 +63,8 @@ import com.nextmovie.core.config.Site
 import com.nextmovie.ui.common.BrandLogo
 import com.nextmovie.ui.common.GlassCard
 import com.nextmovie.ui.common.TvPill
+import com.nextmovie.ui.common.TvHintBar
+import com.nextmovie.ui.common.TvKeys
 import com.nextmovie.ui.theme.Ambient
 import com.nextmovie.ui.theme.AmbientState
 import com.nextmovie.ui.theme.Tokens
@@ -74,21 +78,32 @@ import kotlinx.coroutines.launch
  * 右栏：一张滚动玻璃卡，内容随左侧选中段落切换。
  */
 private enum class Section(val title: String, val caption: String, val icon: ImageVector) {
-    Appearance("外观与柔光", "主题、强度、海报取色", Icons.Filled.Star),
-    Sources("片源与订阅", "订阅地址、站点、海报、解析", Icons.Filled.List),
-    Netdisk("4K 网盘", "网盘账号与直链归属", Icons.Filled.Home),
-    Webdav("WebDAV 云同步", "跨设备同步与网络位置", Icons.Filled.Info),
-    Playback("播放与体验", "连播、预热、返回行为", Icons.Filled.Settings),
-    Backup("备份与存储", "收藏、历史、缓存", Icons.Filled.List),
-    Version("版本与更新", "版本号、项目主页", Icons.Filled.Info)
+    Sources("片源", "订阅、站点、海报解析", Icons.Filled.List),
+    Playback("播放", "连播、解码、失败换线", Icons.Filled.Settings),
+    Appearance("外观", "柔光、主题、取色", Icons.Filled.Star),
+    Connect("连接", "网盘账号与 WebDAV", Icons.Filled.Home),
+    Backup("数据", "收藏、历史、缓存", Icons.Filled.List),
+    Version("关于", "版本与快捷键", Icons.Filled.Info)
 }
 
 @Composable
 fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -> Unit) {
-    var section by remember { mutableStateOf(Section.Appearance) }
+    var section by remember { mutableStateOf(Section.Sources) }
     val context = LocalContext.current
 
-    Row(Modifier.fillMaxSize()) {
+    Row(
+        Modifier
+            .fillMaxSize()
+            .onPreviewKeyEvent { e ->
+                val digit = TvKeys.sectionDigit(e)
+                if (digit != null && digit in Section.entries.indices) {
+                    section = Section.entries[digit]
+                    true
+                } else if (TvKeys.isBackUp(e)) {
+                    onBack(); true
+                } else false
+            }
+    ) {
             Column(
                 Modifier
                     .width(328.dp)
@@ -97,7 +112,7 @@ fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -
             ) {
                 Text("系统设置", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
-                Text("全部设置项都在这一屏", color = Tokens.TextFaint, fontSize = 13.5.sp)
+                Text("方向键切换 · 确认进入 · 键盘 1–6 跳段 · Esc 返回", color = Tokens.TextFaint, fontSize = 13.sp)
                 Spacer(Modifier.height(18.dp))
                 val first = remember { FocusRequester() }
                 Column(
@@ -155,7 +170,6 @@ fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -
                         .padding(bottom = 44.dp)
                 ) {
                     when (section) {
-                        Section.Appearance -> AppearanceCard()
                         Section.Sources -> {
                             SourcesCard(repo, onConfigLoaded)
                             Spacer(Modifier.height(16.dp))
@@ -163,9 +177,13 @@ fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -
                             Spacer(Modifier.height(16.dp))
                             NetworkCard(repo)
                         }
-                        Section.Netdisk -> NetdiskCard(repo)
-                        Section.Webdav -> WebdavCard(repo)
                         Section.Playback -> PlaybackCard(repo)
+                        Section.Appearance -> AppearanceCard()
+                        Section.Connect -> {
+                            NetdiskCard(repo)
+                            Spacer(Modifier.height(16.dp))
+                            WebdavCard(repo)
+                        }
                         Section.Backup -> StorageCard(repo)
                         Section.Version -> VersionCard(context, repo)
                     }
@@ -627,7 +645,6 @@ private fun PlaybackCard(repo: AppRepository) {
     var decodeMode by remember { mutableStateOf(PlayerPrefs.decodeMode(context)) }
     var autoSoft by remember { mutableStateOf(PlayerPrefs.autoSoftOnDecodeError(context)) }
     var autoLine by remember { mutableStateOf(PlayerPrefs.autoLineOnError(context)) }
-    var danmaku by remember { mutableStateOf(PlayerPrefs.danmakuEnabled(context)) }
     GlassCard(
         title = "播放与体验",
         subtitle = "对齐 Marco：从播放器退回详情页，影片仍在详情页底层继续播放"
@@ -670,11 +687,6 @@ private fun PlaybackCard(repo: AppRepository) {
             autoLine = it
             PlayerPrefs.setAutoLineOnError(context, it)
         }
-        Spacer(Modifier.height(12.dp))
-        ToggleRow("弹幕层（暂缓）", "脚手架已留，当前版本不排期；开了也不会加载弹幕库", danmaku) {
-            danmaku = it
-            PlayerPrefs.setDanmakuEnabled(context, it)
-        }
         Spacer(Modifier.height(18.dp))
         HLine()
         Spacer(Modifier.height(16.dp))
@@ -700,7 +712,7 @@ private fun PlaybackCard(repo: AppRepository) {
         }
         Spacer(Modifier.height(18.dp))
         Text(
-            "线路聚合：详情页会按连通性、分辨率把同一影片的多条线路排序，播放器内可随时换源。支持 HLS / DASH / 直链；DRM 与第二引擎按依赖可选启用。",
+            "线路聚合：详情页按连通性与分辨率排序多线路；播放器内可换源。格式支持 HLS / DASH / 直链。",
             color = Tokens.TextFaint,
             fontSize = 13.sp
         )
@@ -754,8 +766,8 @@ private fun VersionCard(context: Context, repo: AppRepository) {
     val scope = rememberCoroutineScope()
     var snapshotFresh by remember { mutableStateOf<Boolean?>(null) }
     GlassCard(
-        title = "版本与更新",
-        subtitle = "开源、零内置源：订阅地址与 Key 都由你自己填"
+        title = "关于",
+        subtitle = "版本、开源说明与快捷键"
     ) {
         InfoRow("版本", versionLabel(context))
         Spacer(Modifier.height(12.dp))
@@ -787,6 +799,14 @@ private fun VersionCard(context: Context, repo: AppRepository) {
             color = Tokens.TextFaint,
             fontSize = 13.sp
         )
+        Spacer(Modifier.height(22.dp))
+        Text("快捷键", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(8.dp))
+        Text("遥控：方向移动 · OK 确认 · 返回键退出 · 菜单键打开线路/菜单", color = Tokens.TextFaint, fontSize = 13.sp)
+        Spacer(Modifier.height(4.dp))
+        Text("键盘：↑↓←→ · Enter/空格确认 · Esc 返回 · Tab 菜单 · 设置内 1–6 跳段", color = Tokens.TextFaint, fontSize = 13.sp)
+        Spacer(Modifier.height(4.dp))
+        Text("播放页：空格/媒体键暂停 · ←→ 快退快进 · 菜单切换线路", color = Tokens.TextFaint, fontSize = 13.sp)
     }
     LaunchedEffect(Unit) { snapshotFresh = repo.configSnapshotIsFresh() }
 }

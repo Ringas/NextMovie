@@ -68,7 +68,17 @@ class MainActivity : ComponentActivity() {
 
     /** Esc / 鼠标右键都按「返回」处理，方便模拟器与外接键鼠调试。 */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.keyCode == KeyEvent.KEYCODE_ESCAPE && event.action == KeyEvent.ACTION_UP) {
+        // 键盘 Esc / 部分键盘 Back 统一当返回（与遥控返回键一致）
+        if (event.action == KeyEvent.ACTION_UP &&
+            (event.keyCode == KeyEvent.KEYCODE_ESCAPE || event.keyCode == KeyEvent.KEYCODE_DEL)
+        ) {
+            // DEL 仅在无输入框抢焦点时当返回；有输入时交给系统
+            if (event.keyCode == KeyEvent.KEYCODE_DEL) {
+                val focused = currentFocus
+                if (focused is android.widget.EditText || focused?.onCheckIsTextEditor() == true) {
+                    return super.dispatchKeyEvent(event)
+                }
+            }
             onBackPressedDispatcher.onBackPressed()
             return true
         }

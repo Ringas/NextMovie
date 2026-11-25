@@ -30,6 +30,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import com.nextmovie.ui.theme.Tokens
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import kotlinx.coroutines.launch
@@ -151,7 +152,7 @@ fun Modifier.tvFocusRing(corner: Dp = 8.dp, visible: Boolean = true): Modifier =
 fun Modifier.tvClickable(
     enabled: Boolean = true,
     corner: Dp = 8.dp,
-    scaleOnFocus: Float = 1f,
+    scaleOnFocus: Float = 1.04f,
     showRing: Boolean = true,
     onClick: () -> Unit
 ): Modifier = composed {
@@ -168,5 +169,12 @@ fun Modifier.tvClickable(
             scaleY = scale
         }
         .tvFocusRing(corner = corner, visible = focused && showRing)
+        // 遥控 OK / 键盘 Enter·空格 在部分机型上不会走 clickable，这里再兜一层
+        .onPreviewKeyEvent { e ->
+            if (enabled && TvKeys.isConfirmUp(e)) {
+                onClick()
+                true
+            } else false
+        }
         .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick)
 }
