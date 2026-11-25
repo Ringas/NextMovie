@@ -355,18 +355,37 @@ fun DetailScreen(
             )
         }
 
+        // 顶栏遮罩：滚动内容从返回钮下面淡出，避免文字压字
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(132.dp)
+                .background(
+                    Brush.verticalGradient(
+                        0f to Color(0xF2121D2C),
+                        0.62f to Color(0x99121D2C),
+                        1f to Color(0x00121D2C)
+                    )
+                )
+        )
+        // Marco 的详情页返回钮固定在顶部，不随内容滚动
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = horizontalPad, end = horizontalPad, top = 24.dp)
+        ) {
+            TvPill(text = "← 返回", glass = true, horizontalPadding = 18.dp, verticalPadding = 10.dp, onClick = onBack)
+            Spacer(Modifier.weight(1f))
+            BrandLogo(iconSize = 34.dp, fontSize = 20f, showWordmark = false)
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(start = horizontalPad, end = horizontalPad, top = 24.dp, bottom = 40.dp)
+                .padding(start = horizontalPad, end = horizontalPad, top = 92.dp, bottom = 40.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                TvPill(text = "← 返回", glass = true, horizontalPadding = 18.dp, verticalPadding = 10.dp, onClick = onBack)
-                Spacer(Modifier.weight(1f))
-                BrandLogo(iconSize = 34.dp, fontSize = 20f)
-            }
-
             Spacer(Modifier.height(topBreathing))
 
             Column(modifier = Modifier.widthIn(max = 880.dp).fillMaxWidth(0.62f)) {

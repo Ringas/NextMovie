@@ -12,6 +12,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -52,8 +53,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -289,9 +294,22 @@ fun HomeScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 val catState = rememberLazyListState()
+                Box(modifier = Modifier.weight(1f).height(44.dp)) {
                 LazyRow(
                     state = catState,
-                    modifier = Modifier.weight(1f).mouseWheel(catState, horizontal = true),
+                    modifier = Modifier.fillMaxSize()
+                        .mouseWheel(catState, horizontal = true)
+                        .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                        .drawWithContent {
+                            drawContent()
+                            drawRect(
+                                brush = Brush.horizontalGradient(
+                                    0.82f to Color.Black, 1f to Color.Transparent
+                                ),
+                                blendMode = BlendMode.DstIn
+                            )
+                        },
+                    contentPadding = PaddingValues(end = 48.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     item {
@@ -312,6 +330,7 @@ fun HomeScreen(
                             onClick = { tab = index + 1; onTabChanged(index + 1) }
                         )
                     }
+                }
                 }
                 Spacer(Modifier.width(16.dp))
                 TvPill(

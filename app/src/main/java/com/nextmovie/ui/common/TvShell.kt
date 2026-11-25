@@ -135,6 +135,7 @@ fun BrandLogo(
     iconSize: Dp = 42.dp,
     fontSize: Float = 23f,
     stacked: Boolean = false,
+    showWordmark: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val mark: @Composable () -> Unit = {
@@ -168,14 +169,18 @@ fun BrandLogo(
     if (stacked) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = modifier) {
             mark()
-            Spacer(Modifier.height(10.dp))
-            wordmark()
+            if (showWordmark) {
+                Spacer(Modifier.height(10.dp))
+                wordmark()
+            }
         }
     } else {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier) {
             mark()
-            Spacer(Modifier.width(8.dp))
-            wordmark()
+            if (showWordmark) {
+                Spacer(Modifier.width(8.dp))
+                wordmark()
+            }
         }
     }
 }
@@ -210,10 +215,12 @@ fun FloatingTopBar(
             .height(62.dp)
     ) {
         // 窄屏（手机的 730dp）放不下「品牌 + 5 个 tab + 状态」，按 Marco 的优先级让位给导航
-        val narrow = maxWidth < 1000.dp
+        val narrow = maxWidth < 780.dp
+        val compact = maxWidth < 1040.dp
         if (!narrow) BrandLogo(
-            iconSize = 42.dp,
-            fontSize = 23f,
+            iconSize = if (compact) 36.dp else 42.dp,
+            fontSize = if (compact) 20f else 23f,
+            showWordmark = !compact,
             modifier = Modifier.align(Alignment.CenterStart)
         )
         Row(
@@ -231,7 +238,7 @@ fun FloatingTopBar(
             modifier = Modifier.align(Alignment.CenterEnd),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (status != null && !narrow) {
+            if (status != null && !compact) {
                 Text(
                     text = status,
                     color = Tokens.TextFaint,
