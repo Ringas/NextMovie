@@ -26,6 +26,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
@@ -53,7 +54,7 @@ fun LibraryScreen(
     onResume: (HistoryEntry) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var segment by remember { mutableIntStateOf(0) }
+    var segment by androidx.compose.runtime.saveable.rememberSaveable { mutableIntStateOf(0) }
     var version by remember { mutableIntStateOf(0) }
     val history = remember(version, segment) { repo.history.list() }
     val favorites = remember(version, segment) { repo.favorites.list() }
@@ -62,6 +63,14 @@ fun LibraryScreen(
         else -> 4
     }
     val gridState = rememberLazyGridState()
+    val focus = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
+    var restoreKey by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        if (restoreKey != null) {
+            kotlinx.coroutines.delay(80)
+            runCatching { focus.requestFocus() }
+        }
+    }
 
     Column(modifier.fillMaxSize().padding(start = 56.dp, end = 56.dp, top = 8.dp, bottom = 28.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -161,7 +170,13 @@ fun LibraryScreen(
                     val site = repo.siteByKey(entry.siteKey)
                     PosterCard(
                         vod = Vod(id = entry.vodId, name = entry.name, pic = entry.pic, remark = entry.remark),
-                        onClick = { if (site != null) onOpenDetail(site, vodOf(entry)) },
+                        onClick = {
+                            if (site != null) {
+                                restoreKey = entry.key
+                                onOpenDetail(site, vodOf(entry))
+                            }
+                        },
+                        modifier = if (entry.key == restoreKey) Modifier.focusRequester(focus) else Modifier,
                         onFocused = {},
                         fillWidth = true
                     )

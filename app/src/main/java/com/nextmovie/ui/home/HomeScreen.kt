@@ -117,6 +117,7 @@ fun HomeScreen(
     }
     LaunchedEffect(site.runtimeKey) {
         continueList = repo.history.list().take(12)
+        if (initialSnapshot.await() != null) backgroundReady.await()
         cats = try {
             repo.categories(site)
         } catch (_: Throwable) {
@@ -131,7 +132,8 @@ fun HomeScreen(
             delay(400)
         }
     }
-    LaunchedEffect(site.runtimeKey, tab, reloadTick, reloadSignal, cats) {
+    val selectedCategoryId = if (tab == 0) null else cats.getOrNull(tab)?.first
+    LaunchedEffect(site.runtimeKey, tab, reloadTick, reloadSignal, selectedCategoryId) {
         loading = true
         error = null
         warming = false
@@ -189,7 +191,7 @@ fun HomeScreen(
     LaunchedEffect(site.runtimeKey, focusedVod?.id) {
         val focused = focusedVod ?: return@LaunchedEffect
         delay(450)
-        if (repo.cachedDetailMetadata(site, focused.id) == null) repo.prefetchDetail(site, focused)
+        repo.prefetchDetail(site, focused)
     }
     LaunchedEffect(site.runtimeKey, vods) {
         val targets = vods.filter { it.displayPic.isBlank() && it.id !in requested }.take(4)

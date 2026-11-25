@@ -22,6 +22,7 @@ object SpiderProtocol {
     const val ACTION_CANCEL = 7
     const val ACTION_RESTART = 8
     const val ACTION_RELEASE_PROXY = 9
+    const val ACTION_INIT = 10
 
     const val KEY_ID = "id"
     const val KEY_OK = "ok"

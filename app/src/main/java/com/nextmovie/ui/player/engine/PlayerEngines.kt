@@ -43,8 +43,13 @@ class ExoPlayerEngine(
 
     private var playerView: PlayerView? = null
 
-    private fun buildPlayer(decodeMode: DecodeMode): ExoPlayer =
-        ExoPlayer.Builder(appContext, NmRenderersFactory.create(appContext, decodeMode)).build()
+    private fun buildPlayer(decodeMode: DecodeMode): ExoPlayer {
+        val started = System.nanoTime()
+        return ExoPlayer.Builder(appContext, NmRenderersFactory.create(appContext, decodeMode))
+            .setLoadControl(playbackLoadControl(appContext)).build().also {
+                android.util.Log.i("NextMovieTiming", "player-create ${(System.nanoTime() - started) / 1_000_000}ms")
+            }
+    }
 
     /** 切换硬/软解需要重建 ExoPlayer（RenderersFactory 在 builder 时固化） */
     fun rebuild(decodeMode: DecodeMode): ExoPlayer {

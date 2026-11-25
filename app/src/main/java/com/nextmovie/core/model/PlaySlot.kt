@@ -13,5 +13,7 @@ data class PlaySlot(
     /** 排序分（越高越优先），仅用于展示与默认选中 */
     val score: Int,
     val episodeName: String,
-    val episodeUrl: String
+    val episodeUrl: String,
+    val vod: Vod? = null,
+    val remaining: List<Episode> = emptyList()
 )

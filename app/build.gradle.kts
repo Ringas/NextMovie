@@ -56,6 +56,12 @@ android {
         compose = true
     }
 
+    lint {
+        // This sideloaded TV host intentionally targets 28 for native plugin compatibility.
+        // The Google Play submission target is not applicable to its release APKs.
+        disable += "ExpiredTargetSdkVersion"
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

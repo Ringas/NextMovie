@@ -109,6 +109,9 @@ fun PlayerScreen(
     /** 聚合出来的可切换线路（同一集在不同源的对应地址），按优选顺序 */
     slots: List<com.nextmovie.core.model.PlaySlot> = emptyList(),
     currentSlot: Int = 0,
+    availableRecoverySlot: Int? = null,
+    onAutomaticSwitch: (Int) -> Unit = {},
+    onPlaybackOutcome: (Boolean) -> Unit = {},
     onSwitchSlot: (Int) -> Unit = {},
     /** 跨页面会话：从播放器退回详情页时用它继续播，不销毁播放器 */
     session: PlaybackSession? = null,
@@ -122,7 +125,8 @@ fun PlayerScreen(
     // 软解降级成功后 +1，驱动下方 LaunchedEffect 用新 Renderers 重新 prepare
     var softRetryToken by remember { mutableIntStateOf(0) }
     val player = session?.player ?: remember(decodeMode) {
-        ExoPlayer.Builder(context, NmRenderersFactory.create(context, decodeMode)).build()
+        ExoPlayer.Builder(context, NmRenderersFactory.create(context, decodeMode))
+            .setLoadControl(com.nextmovie.ui.player.engine.playbackLoadControl(context)).build()
     }
     val lifecycleOwner = LocalLifecycleOwner.current
     val view = LocalView.current
@@ -191,6 +195,15 @@ fun PlayerScreen(
     }
 
     val latestRequestedAt by androidx.compose.runtime.rememberUpdatedState(requestedAtNanos)
+    val recoverySlot by androidx.compose.runtime.rememberUpdatedState(availableRecoverySlot)
+    val automaticSwitch by androidx.compose.runtime.rememberUpdatedState(onAutomaticSwitch)
+    val reportOutcome by androidx.compose.runtime.rememberUpdatedState(onPlaybackOutcome)
+    var reportedRequest by remember { mutableStateOf<Long?>(null) }
+    fun outcome(success: Boolean) {
+        if (reportedRequest == latestRequestedAt) return
+        reportedRequest = latestRequestedAt
+        reportOutcome(success)
+    }
     DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
@@ -220,6 +233,7 @@ fun PlayerScreen(
 
             override fun onRenderedFirstFrame() {
                 if (requestStarted > 0) {
+                    outcome(true)
                     val now = System.nanoTime()
                     android.util.Log.i("NextMovieTiming", "first-frame ${(now - requestStarted) / 1_000_000}ms")
                     if (latestRequestedAt > 0) {
@@ -230,10 +244,10 @@ fun PlayerScreen(
             }
             override fun onPlayerError(error: PlaybackException) {
                 val decision = PlaybackRecovery.decide(
-                    error = error,
+                    errorCode = error.errorCode,
                     currentMode = decodeMode,
                     alreadyTriedSoft = triedSoft || (session?.triedSoftFallback == true),
-                    hasMoreLines = slots.size > 1 && lineAttempts < slots.size,
+                    hasMoreLines = recoverySlot != null,
                     autoSoft = PlayerPrefs.autoSoftOnDecodeError(context),
                     autoLine = PlayerPrefs.autoLineOnError(context),
                     // 没装 FFmpeg AAR 时「切软解」只是同一套 MediaCodec 再来一次，直接跳过
@@ -256,20 +270,13 @@ fun PlayerScreen(
                     }
                     PlaybackRecovery.Action.SWITCH_LINE -> {
                         flash(decision.message)
-                        if (slots.size > 1) {
-                            val next = (currentSlot + 1) % slots.size
-                            pickerIndex = next
-                            lineAttempts += 1
-                            session?.triedLines = lineAttempts
-                            playbackError = null
-                            // 真的切：由上层重新解析这条线路并起播（旧实现只弹了句提示）
-                            onSwitchSlot(next)
-                        } else {
-                            playbackError = decision.message
-                        }
+                        outcome(false)
+                        recoverySlot?.let { next -> scope.launch { automaticSwitch(next) } }
+                        playbackError = "播放失败 · 可手动换线"
                         hudVisible = true
                     }
                     PlaybackRecovery.Action.SHOW_ERROR -> {
+                        outcome(false)
                         playbackError = decision.message
                         hudVisible = true
                     }
@@ -277,6 +284,7 @@ fun PlayerScreen(
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
+                if (latestRequestedAt > 0) android.util.Log.i("NextMovieTiming", "player-state=$playbackState ${(System.nanoTime() - latestRequestedAt) / 1_000_000}ms")
                 buffering = playbackState == Player.STATE_BUFFERING
                 if (playbackState == Player.STATE_ENDED) {
                     ended = true
@@ -582,6 +590,7 @@ fun PlayerScreen(
         if (controlsVisible) {
             PlayerSheet(
                 player = player,
+                initialFocus = toolbarFocus,
                 speed = speed,
                 onSpeed = { v ->
                     speed = v
@@ -988,6 +997,7 @@ private suspend fun sniffHls(url: String, headers: Map<String, String>): Boolean
 @Composable
 private fun PlayerSheet(
     player: androidx.media3.exoplayer.ExoPlayer,
+    initialFocus: FocusRequester,
     speed: Float,
     onSpeed: (Float) -> Unit,
     resizeMode: Int,
@@ -1054,6 +1064,7 @@ private fun PlayerSheet(
         Row(verticalAlignment = Alignment.CenterVertically) {
             com.nextmovie.ui.common.TvPill(
                 text = if (playing) "⏸ 暂停" else "▶ 继续",
+                modifier = Modifier.focusRequester(initialFocus),
                 prominent = true,
                 onClick = onToggle
             )

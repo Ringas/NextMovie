@@ -160,6 +160,8 @@ class SpiderService : Service() {
 
         android.util.Log.i("NextMovieTiming", "plugin-obtain action=$action ${(System.nanoTime() - loadStarted) / 1_000_000}ms")
 
+        if (action == SpiderProtocol.ACTION_INIT) return okBundle(id, "ready")
+
         val sourceStarted = System.nanoTime()
         val raw = when (action) {
             // TVBox 的两段式首页：homeContent 只给分类（class），homeVideoContent 才给视频列表。

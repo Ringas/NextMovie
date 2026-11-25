@@ -78,6 +78,13 @@ class SpiderHost(
 
     suspend fun preconnect() = client.preconnect()
 
+    /** Initialize the engine without queuing a source home refresh ahead of a detail tap. */
+    suspend fun warm(site: Site) {
+        if (NativeSpiderRegistry.resolve(site) != null) return
+        ensureSpider(site, "init")
+        client.request(SpiderProtocol.ACTION_INIT, site)
+    }
+
     suspend fun clearCache() { homeRequests.clear() }
 
     suspend fun home(site: Site): List<Vod> = withContext(Dispatchers.IO) {

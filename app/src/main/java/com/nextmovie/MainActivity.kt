@@ -138,7 +138,8 @@ data class PlayRequest(
     /** 当前正在播的槽位下标 */
     val slotIndex: Int = 0,
     val subtitles: List<com.nextmovie.core.model.ExternalSubtitle> = emptyList(),
-    val requestedAtNanos: Long = 0L
+    val requestedAtNanos: Long = 0L,
+    val attemptedSlots: Set<Int> = emptySet()
 )
 
 @Composable
@@ -149,6 +150,9 @@ private fun AppRoot(repo: AppRepository) {
     // 首页海报行的焦点索引放在这里，跨页面存活，回来时能复原位置
     var homeFocusIndex by remember { mutableStateOf(0) }
     var homeTab by remember { mutableStateOf(0) }
+    var shellTab by remember { mutableStateOf(0) }
+    val searchState = remember { com.nextmovie.ui.search.TvSearchState() }
+    val shellState = androidx.compose.runtime.saveable.rememberSaveableStateHolder()
     var booting by remember { mutableStateOf(false) }
     var resolveStage by remember { mutableStateOf("正在读取来源播放地址…") }
     var resolving by remember { mutableStateOf(false) }
@@ -250,7 +254,9 @@ private fun AppRoot(repo: AppRepository) {
         source: Site? = null,
         queue: List<Episode> = emptyList(),
         slots: List<com.nextmovie.core.model.PlaySlot> = emptyList(),
-        slotIndex: Int = -1
+        slotIndex: Int = -1,
+        attemptedSlots: Set<Int> = emptySet(),
+        onResolveFailure: (() -> Unit)? = null
     ) {
         val activeSite = source ?: site
         if (activeSite == null) {
@@ -262,6 +268,7 @@ private fun AppRoot(repo: AppRepository) {
         playJob = scope.launch {
             resolveStage = "正在读取来源播放地址…"
             resolving = true
+            var retry = false
             try {
                 val result = try {
                     repo.preparePlayback(activeSite)
@@ -271,6 +278,10 @@ private fun AppRoot(repo: AppRepository) {
                 catch (e: kotlinx.coroutines.CancellationException) { repo.cancelPlayback(activeSite); throw e }
                 catch (e: Exception) {
                     repo.recordPlayOutcome(activeSite.key, false)
+                    if (onResolveFailure != null) {
+                        retry = true
+                        return@launch
+                    }
                     Toast.makeText(context, if (e is IllegalStateException && e.message == "网页解析未取得媒体地址，请更换线路") e.message else "来源解析失败，请重试或换一条线路", Toast.LENGTH_LONG).show()
                     return@launch
                 }
@@ -278,18 +289,19 @@ private fun AppRoot(repo: AppRepository) {
             when {
                 result == null -> {
                     repo.recordPlayOutcome(activeSite.key, false)
-                    Toast.makeText(context, "解析失败，换个线路试试", Toast.LENGTH_SHORT).show()
+                    if (onResolveFailure != null) retry = true
+                    else Toast.makeText(context, "解析失败，换个线路试试", Toast.LENGTH_SHORT).show()
                 }
 
                 result.parse != 0 -> {
                     repo.recordPlayOutcome(activeSite.key, false)
-                    Toast.makeText(context, "该线路未能取得直链，请换一条线路", Toast.LENGTH_LONG).show()
+                    if (onResolveFailure != null) retry = true
+                    else Toast.makeText(context, "该线路未能取得直链，请换一条线路", Toast.LENGTH_LONG).show()
                 }
 
                 else -> {
-                    repo.recordPlayOutcome(activeSite.key, true)
                     val effectiveSlot = if (slotIndex >= 0) slotIndex else slots.indexOfFirst {
-                        it.siteKey == activeSite.key && it.episodeUrl == episode.url
+                        it.siteKey == activeSite.key && it.lineName == line.name && it.episodeUrl == episode.url
                     }
                     lastPositionMs = startMs
                     route = Route.Player(
@@ -310,34 +322,47 @@ private fun AppRoot(repo: AppRepository) {
                         backTo = vod,
                         queue = queue,
                         slots = slots,
-                        slotIndex = effectiveSlot.coerceAtLeast(0),
+                        slotIndex = effectiveSlot,
+                        attemptedSlots = if (effectiveSlot >= 0) attemptedSlots + effectiveSlot else attemptedSlots,
                         subtitles = result.subtitles,
                         requestedAtNanos = resolveStarted
                     )
                 )
                 }
             }
-            } finally { resolving = false }
+            } finally {
+                resolving = false
+                if (retry) onResolveFailure?.invoke()
+            }
         }
     }
 
     /** 播放器里换线路：换源重新解析同一集，并从当前时间点接着播。 */
-    fun switchSlot(req: PlayRequest, index: Int) {
-        val slot = req.slots.getOrNull(index) ?: return
-        val target = repo.siteByKey(slot.siteKey)
-        if (target == null) {
-            Toast.makeText(context, "这个来源已经不在配置里了", Toast.LENGTH_SHORT).show()
+    fun switchSlot(req: PlayRequest, index: Int, automatic: Boolean = false) {
+        val candidates = if (automatic) (listOf(index) + req.slots.indices)
+            .distinct().filter { it in req.slots.indices && it !in req.attemptedSlots }
+        else listOf(index)
+        val chosen = candidates.firstOrNull { repo.siteByKey(req.slots.getOrNull(it)?.siteKey.orEmpty()) != null }
+        if (chosen == null) {
+            Toast.makeText(context, "没有其他可用线路", Toast.LENGTH_SHORT).show()
             return
         }
+        val slot = req.slots[chosen]
+        val target = repo.siteByKey(slot.siteKey) ?: return
+        val attempted = if (automatic) req.attemptedSlots + chosen else emptySet()
         playEpisode(
-            vod = req.backTo,
+            vod = slot.vod ?: req.backTo,
             line = com.nextmovie.core.model.PlayLine(slot.lineName, listOf(Episode(slot.episodeName, slot.episodeUrl))),
             episode = Episode(slot.episodeName, slot.episodeUrl),
-            startMs = playbackSession.player.currentPosition.takeIf { it > 0L } ?: lastPositionMs.coerceAtLeast(req.startMs),
+            startMs = playbackSession.player.currentPosition.takeIf { it > 0L } ?: lastPositionMs,
             source = target,
-            queue = req.queue,
+            queue = slot.remaining,
             slots = req.slots,
-            slotIndex = index
+            slotIndex = chosen,
+            attemptedSlots = attempted,
+            onResolveFailure = if (automatic) {
+                { switchSlot(req.copy(attemptedSlots = attempted), chosen, true) }
+            } else null
         )
     }
 
@@ -391,6 +416,7 @@ private fun AppRoot(repo: AppRepository) {
             } else if (site == null) {
                 SetupHint(onOpenSettings = { route = Route.Settings })
             } else {
+                shellState.SaveableStateProvider("main-shell") {
                 com.nextmovie.ui.shell.MainShell(
                     repo = repo,
                     site = site,
@@ -400,13 +426,16 @@ private fun AppRoot(repo: AppRepository) {
                     },
                     onResume = { resume(it) },
                     onOpenAccounts = { accountLauncher.launch(PluginActivity.intent(context, site, "", null)) },
-                    initialTab = 0,
+                    initialTab = shellTab,
+                    onTabChanged = { shellTab = it },
+                    searchState = searchState,
                     homeInitialFocusIndex = homeFocusIndex,
                     homeInitialCategory = homeTab,
                     homeReloadSignal = accountGeneration,
                     onHomeTabChanged = { homeTab = it; homeFocusIndex = 0 },
                     onHomeFocusIndexChanged = { homeFocusIndex = it }
                 )
+                }
             }
         }
 
@@ -445,6 +474,9 @@ private fun AppRoot(repo: AppRepository) {
             },
             slots = current.req.slots,
             currentSlot = current.req.slotIndex,
+            availableRecoverySlot = current.req.slots.indices.firstOrNull { it !in current.req.attemptedSlots },
+            onAutomaticSwitch = { index -> switchSlot(current.req, index, true) },
+            onPlaybackOutcome = { ok -> repo.recordPlayOutcome(current.req.siteKey, ok) },
             onSwitchSlot = { index -> switchSlot(current.req, index) },
             session = playbackSession,
             nextEpisodeName = current.req.queue.firstOrNull()?.name,
@@ -456,7 +488,15 @@ private fun AppRoot(repo: AppRepository) {
                     episode = next,
                     startMs = 0L,
                     source = repo.siteByKey(current.req.siteKey),
-                    queue = current.req.queue.drop(1)
+                    queue = current.req.queue.drop(1),
+                    slots = current.req.slots.mapNotNull { slot ->
+                        val selected = slot.siteKey == current.req.siteKey && slot.lineName == current.req.playFrom
+                        val index = if (selected) 0 else slot.remaining.indexOfFirst { it.name == next.name }
+                            .takeIf { it >= 0 } ?: 0.takeIf { slot.remaining.size == current.req.queue.size }
+                            ?: return@mapNotNull null
+                        val episode = slot.remaining.getOrNull(index) ?: return@mapNotNull null
+                        slot.copy(episodeName = episode.name, episodeUrl = episode.url, remaining = slot.remaining.drop(index + 1))
+                    }
                 )
             },
             onBack = { route = Route.Detail(current.req.backTo, current.req.siteKey) }

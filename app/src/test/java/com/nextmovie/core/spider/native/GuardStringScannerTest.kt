@@ -12,7 +12,7 @@ class GuardStringScannerTest {
         val f = File.createTempFile("guard", ".jar")
         ZipOutputStream(f.outputStream()).use { z ->
             z.putNextEntry(ZipEntry("config.txt"))
-            z.write("hello https://api.example.com/v3/ and key ABCDEF0123456789ABCDEF01".toByteArray())
+            z.write("hello\u0000https://api.example.com/v3/\u0000ABCDEF0123456789ABCDEF01".toByteArray())
             z.closeEntry()
         }
         val findings = GuardStringScanner.scan(f)

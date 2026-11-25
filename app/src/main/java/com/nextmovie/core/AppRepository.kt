@@ -62,6 +62,7 @@ class AppRepository(private val context: Context) {
     private val homeSnapshots = com.nextmovie.core.cache.HomeSnapshotStore(File(context.filesDir, "home-snapshots"))
     private val warmSites = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val detailSnapshots = com.nextmovie.core.cache.HomeSnapshotStore(File(context.filesDir, "detail-metadata"))
+    private val playableDetails = com.nextmovie.core.cache.DetailSnapshotStore(File(context.cacheDir, "playable-details"))
     private val prefetchScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
     private val prefetchSlot = java.util.concurrent.Semaphore(1)
     private val configGeneration = java.util.concurrent.atomic.AtomicLong()
@@ -250,7 +251,7 @@ class AppRepository(private val context: Context) {
     }
 
     /**
-     * 启动预热：在当前源上提前把插件跑起来（下载 jar → DexClassLoader → Init → home）。
+     * 启动预热仅准备插件，不请求 home；首页刷新不能挡住用户刚启动时点开的详情。
      *
      * 对照 Marco：它靠内置适配器不走 jar，我们仍走生态的 jar 路径，那就把这段耗时挪到
      * 用户还在看首页的时候（有快照时首页 200ms 就出画，用户不会察觉）。等真正点开海报时，
@@ -261,8 +262,8 @@ class AppRepository(private val context: Context) {
         if (!site.isSpider || !site.isPlayable || site.runtimeKey in warmSites) return
         prefetchScope.launch {
             val started = System.nanoTime()
-            runCatching { spiderHost.home(site) }
-                .onSuccess { warmSites.add(site.runtimeKey); android.util.Log.i("NextMovieTiming", "prewarm-ok ${(System.nanoTime() - started) / 1_000_000}ms site=${site.name} reason=$reason items=${it.size}") }
+            runCatching { spiderHost.warm(site) }
+                .onSuccess { warmSites.add(site.runtimeKey); android.util.Log.i("NextMovieTiming", "prewarm-ok ${(System.nanoTime() - started) / 1_000_000}ms site=${site.name} reason=$reason initOnly=true") }
                 .onFailure { android.util.Log.w("NextMovieTiming", "prewarm-fail ${(System.nanoTime() - started) / 1_000_000}ms site=${site.name} reason=$reason ${it.message}") }
         }
     }
@@ -465,6 +466,7 @@ class AppRepository(private val context: Context) {
         if (vod.id.startsWith("action://", true)) return null
         val sourceLabel = "${site.api} ${site.name}"
         if (listOf("wogg", "网盘", "玩偶", "夸克", "alist", "netdisk").any { sourceLabel.contains(it, true) }) return null
+        details.peek("detail|${site.runtimeKey}|${vod.id}")?.let { return it.vod }
         if (!prefetchSlot.tryAcquire()) return null
         val task = prefetchScope.async { detailAttempt { detail(site, vod.id, vod.name)?.vod } }
         task.invokeOnCompletion { prefetchSlot.release() }
@@ -479,12 +481,37 @@ class AppRepository(private val context: Context) {
         detailSnapshots.read(detailSnapshotKey(site, id), maxAgeMs = 7 * 86_400_000L)?.firstOrNull()
     }
 
+    fun readyDetail(site: Site, id: String): AggregatedDetail? {
+        val ready = details.peekNow("detail|${site.runtimeKey}|$id")?.takeIf { it.lines.isNotEmpty() } ?: return null
+        val rank = com.nextmovie.core.match.SourceRanker.sourceScore(site, ready, sourceSuccessRate(site.key), true)
+        return AggregatedDetail(listOf(SourceDetail(site, ready, rank.score, rank.label,
+            com.nextmovie.core.match.SourceRanker.bestLineIndex(ready))))
+    }
+
     suspend fun detail(site: Site, id: String, altId: String? = null): VodDetail? =
         details.get("detail|${site.runtimeKey}|$id") {
+            val started = System.nanoTime()
+            val diskKey = detailSnapshotKey(site, id)
+            // Interactive/netdisk IDs can be login or folder actions. They must stay live.
+            val canPersist = !listOf("wogg", "网盘", "玩偶", "夸克", "alist", "netdisk", "config")
+                .any { "${site.api} ${site.name}".contains(it, true) } &&
+                !listOf("action", "login", "cookie", "token", "clear").any { id.contains(it, true) }
+            if (canPersist) {
+                val cached = withContext(kotlinx.coroutines.Dispatchers.IO) { playableDetails.read(diskKey) }
+                if (cached != null) {
+                    android.util.Log.i("NextMovieTiming", "detail-source cache=disk ${(System.nanoTime() - started) / 1_000_000}ms")
+                    return@get cached
+                }
+            }
             val generation = detailSnapshots.generation
+            val playableGeneration = playableDetails.generation
             val result = if (site.isCms) cms(site).detail(id) else spiderHost.detail(site, id, altId)
+            android.util.Log.i("NextMovieTiming", "detail-source cache=miss ${(System.nanoTime() - started) / 1_000_000}ms")
             if (result != null) withContext(kotlinx.coroutines.Dispatchers.IO) {
-                detailSnapshots.write(detailSnapshotKey(site, id), listOf(result.vod.copy(action = "")), generation)
+                detailSnapshots.write(diskKey, listOf(result.vod.copy(action = "")), generation)
+                if (canPersist && result.vod.action.isBlank() && result.vod.tag != "folder") {
+                    playableDetails.write(diskKey, result, playableGeneration)
+                }
             }
             result
         }
@@ -576,6 +603,13 @@ class AppRepository(private val context: Context) {
     ): AggregatedDetail? {
         val keyword = vod.name.trim()
         val cacheKey = "agg|${site.runtimeKey}|${vod.id}|$keyword"
+        // A second screen can join an aggregation whose first callback belonged to
+        // a previous screen. Replay the already usable current-source detail first.
+        details.peek("detail|${site.runtimeKey}|${vod.id}")?.takeIf { it.lines.isNotEmpty() }?.let { ready ->
+            val rank = com.nextmovie.core.match.SourceRanker.sourceScore(site, ready, sourceSuccessRate(site.key), true)
+            onPartial(AggregatedDetail(listOf(SourceDetail(site, ready, rank.score, rank.label,
+                com.nextmovie.core.match.SourceRanker.bestLineIndex(ready)))))
+        }
         return aggregations.get(cacheKey) { resolveAggregate(site, vod, keyword, crossSiteLimit, onPartial) }
     }
 
@@ -596,8 +630,12 @@ class AppRepository(private val context: Context) {
         }
         val replies = Channel<SourceDetail?>(candidates.size.coerceAtLeast(1))
         val gate = Semaphore(4)
+        val primaryReturned = kotlinx.coroutines.CompletableDeferred<Unit>()
         candidates.mapIndexed { index, candidate ->
             launch(kotlinx.coroutines.Dispatchers.IO) {
+                // Give the selected source a head start. Background cross-source searches
+                // must not occupy the plugin/network queue before its detail request.
+                if (index != 0) withTimeoutOrNull(1_500) { primaryReturned.await() }
                 gate.withPermit {
                     val hit = withTimeoutOrNull(if (index == 0 && candidate.isSpider && candidate.runtimeKey !in warmSites) 30_000L else if (index == 0) 8_000L else 10_000L) {
                         detailAttempt {
@@ -614,12 +652,13 @@ class AppRepository(private val context: Context) {
                                     candidate.runtimeKey == site.runtimeKey
                                 )
                                 val bestIndex = com.nextmovie.core.match.SourceRanker.bestLineIndex(resolvedDetail)
-                                // 真实清晰度：探一次首集地址，拿到 HLS 主清单的 RESOLUTION / BANDWIDTH
+                                // Read known quality without putting a CDN request on the detail path.
                                 val probeUrl = resolvedDetail.lines.getOrNull(bestIndex)
                                     ?.episodes?.firstOrNull()?.url.orEmpty()
-                                val probe = if (probeUrl.isNotBlank()) {
-                                    runCatching { com.nextmovie.core.match.StreamProbe.probe(probeUrl) }.getOrNull()
-                                } else null
+                                // Detail is usable as soon as the source returns it. A media/CDN
+                                // request here used to hold synopsis and episodes for up to 6s.
+                                // Reuse known quality only; the player reports actual tracks later.
+                                val probe = com.nextmovie.core.match.StreamProbe.cached(probeUrl)
                                 val probeBonus = when {
                                     probe == null -> 0
                                     probe.height >= 2160 -> 10
@@ -655,6 +694,7 @@ class AppRepository(private val context: Context) {
                             }
                         }
                     }
+                    if (index == 0) primaryReturned.complete(Unit)
                     replies.send(hit)
                 }
             }
@@ -918,10 +958,11 @@ class AppRepository(private val context: Context) {
         runCatching { poster.resolve(vod, detail, posterEnhance) }.getOrDefault(vod)
 
     suspend fun invalidateContent() {
-        withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.clear(); detailSnapshots.clear() }
+        withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.clear(); detailSnapshots.clear(); playableDetails.clear() }
         t4Extensions.clear()
         lists.clear()
         details.clear()
+        aggregations.clear()
         spiderHost.clearCache()
     }
 
@@ -930,6 +971,7 @@ class AppRepository(private val context: Context) {
         t4Extensions.close()
         lists.close()
         details.close()
+        aggregations.close()
         poster.flush()
         spiderHost.release()
     }

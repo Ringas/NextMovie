@@ -17,6 +17,7 @@ class JarBytesTest {
     private fun miniJar(): ByteArray {
         val out = ByteArrayOutputStream()
         ZipOutputStream(out).use { z ->
+            z.setLevel(java.util.zip.Deflater.NO_COMPRESSION)
             z.putNextEntry(ZipEntry("com/github/catvod/spider/Demo.class"))
             // 必须用高熵内容：全 0 会被 deflate 压到几百字节，触发生产侧「插件体积异常」护栏
             val payload = ByteArray(4096)

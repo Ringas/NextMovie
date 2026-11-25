@@ -25,7 +25,7 @@ object PlaybackRecovery {
     )
 
     fun decide(
-        error: PlaybackException,
+        errorCode: Int,
         currentMode: DecodeMode,
         alreadyTriedSoft: Boolean,
         hasMoreLines: Boolean,
@@ -34,9 +34,9 @@ object PlaybackRecovery {
         /** 本机是否真的存在扩展软解（FFmpeg AAR）；没有时切 SOFT 只是空转 */
         softAvailable: Boolean = true,
     ): Decision {
-        val decodeFail = error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
-            error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED ||
-            error.errorCode == PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED
+        val decodeFail = errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
+            errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED ||
+            errorCode == PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED
 
         if (decodeFail && autoSoft && softAvailable && !alreadyTriedSoft && currentMode != DecodeMode.SOFT) {
             return Decision(
@@ -47,7 +47,7 @@ object PlaybackRecovery {
         }
 
         if (autoLine && hasMoreLines) {
-            val reason = when (error.errorCode) {
+            val reason = when (errorCode) {
                 PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> "源站拒绝请求"
                 PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> "网络连不上源站"
                 PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED -> "容器无法解析"
@@ -61,7 +61,7 @@ object PlaybackRecovery {
             )
         }
 
-        val msg = when (error.errorCode) {
+        val msg = when (errorCode) {
             PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
                 "源站拒绝了这次请求（403/404，多为区域限制或防盗链），换条线路试试"
             PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ->
@@ -71,7 +71,7 @@ object PlaybackRecovery {
             PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
             PlaybackException.ERROR_CODE_DECODING_FAILED ->
                 "解码失败。可在设置中改为「软解优先」，或换线路"
-            else -> error.errorCodeName
+            else -> PlaybackException.getErrorCodeName(errorCode)
         }
         return Decision(Action.SHOW_ERROR, msg)
     }

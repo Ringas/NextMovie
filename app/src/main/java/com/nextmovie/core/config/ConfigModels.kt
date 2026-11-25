@@ -26,12 +26,13 @@ data class Site(
     val origin: String = ""
 ) {
     /** Identity includes configuration and plugin inputs; site keys alone are not globally unique. */
-    val runtimeKey: String get() = java.security.MessageDigest.getInstance("SHA-256")
+    val runtimeKey: String by lazy(LazyThreadSafetyMode.PUBLICATION) { java.security.MessageDigest.getInstance("SHA-256")
         .digest(
             listOf(origin, key, api, jar, jarHash, ext, headers.toSortedMap().toString(), timeoutMs.toString())
                 .joinToString("\u0000").toByteArray()
         )
         .joinToString("") { "%02x".format(it) }
+    }
 
     val isJavaScript: Boolean get() = isJavaScriptApi(api)
     val isSpider: Boolean get() = type == 3 || api.startsWith("csp_") || isJavaScript || api.endsWith(".py") || api.startsWith("node:")

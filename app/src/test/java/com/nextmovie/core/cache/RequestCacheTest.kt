@@ -6,6 +6,23 @@ import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
 
 class RequestCacheTest {
+    @Test fun synchronousSnapshotTracksExpiryEvictionAndInvalidation() = runBlocking {
+        var now = 100L
+        RequestCache<String, Int>(100, maxEntries = 2, now = { now }).use { cache ->
+            assertNull(cache.peekNow("a"))
+            cache.get("a") { 1 }; cache.get("b") { 2 }; cache.get("c") { 3 }
+            assertNull(cache.peekNow("a"))
+            assertEquals(2, cache.peekNow("b"))
+            cache.invalidate("b")
+            assertNull(cache.peekNow("b"))
+            now = 200L
+            assertNull(cache.peekNow("c"))
+            cache.get("c") { 4 }
+            assertEquals(4, cache.peekNow("c"))
+            cache.clear()
+            assertNull(cache.peekNow("c"))
+        }
+    }
     @Test fun concurrentHomeAndCategoryShareOneRequest() = runBlocking {
         val calls = AtomicInteger()
         val entered = CompletableDeferred<Unit>()
@@ -50,6 +67,7 @@ class RequestCacheTest {
             finish.complete(Unit)
             assertEquals(1, old.await())
             assertEquals(2, cache.get("site") { error("fresh value was overwritten") })
+            assertEquals(2, cache.peekNow("site"))
         }
     }
 }

@@ -7,12 +7,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class PlaybackRecoveryTest {
-    private fun err(code: Int) = PlaybackException("t", null, code)
-
     @Test
     fun decodeFailSwitchesToSoft() {
         val d = PlaybackRecovery.decide(
-            error = err(PlaybackException.ERROR_CODE_DECODER_INIT_FAILED),
+            errorCode = PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
             currentMode = DecodeMode.AUTO,
             alreadyTriedSoft = false,
             hasMoreLines = true,
@@ -26,7 +24,7 @@ class PlaybackRecoveryTest {
     @Test
     fun afterSoftTriesLine() {
         val d = PlaybackRecovery.decide(
-            error = err(PlaybackException.ERROR_CODE_DECODING_FAILED),
+            errorCode = PlaybackException.ERROR_CODE_DECODING_FAILED,
             currentMode = DecodeMode.SOFT,
             alreadyTriedSoft = true,
             hasMoreLines = true,
@@ -39,7 +37,7 @@ class PlaybackRecoveryTest {
     @Test
     fun ioWithoutLinesShowsError() {
         val d = PlaybackRecovery.decide(
-            error = err(PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS),
+            errorCode = PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
             currentMode = DecodeMode.AUTO,
             alreadyTriedSoft = false,
             hasMoreLines = false,
@@ -52,7 +50,7 @@ class PlaybackRecoveryTest {
     @Test
     fun noSoftRendererSkipsStraightToLine() {
         val d = PlaybackRecovery.decide(
-            error = err(PlaybackException.ERROR_CODE_DECODER_INIT_FAILED),
+            errorCode = PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
             currentMode = DecodeMode.AUTO,
             alreadyTriedSoft = false,
             hasMoreLines = true,

@@ -45,8 +45,11 @@ fun MainShell(
     onHomeTabChanged: (Int) -> Unit = {},
     onHomeFocusIndexChanged: (Int) -> Unit = {},
     initialTab: Int = 0,
+    onTabChanged: (Int) -> Unit = {},
+    searchState: com.nextmovie.ui.search.TvSearchState = remember { com.nextmovie.ui.search.TvSearchState() },
 ) {
     var tab by remember { mutableIntStateOf(initialTab.coerceIn(0, ShellTab.entries.lastIndex)) }
+    androidx.compose.runtime.LaunchedEffect(tab) { onTabChanged(tab) }
     var tint by remember { mutableStateOf<Color?>(null) }
     var pairing by remember { mutableStateOf(false) }
     val selected = ShellTab.entries.getOrElse(tab) { ShellTab.Home }
@@ -95,6 +98,7 @@ fun MainShell(
                         site = site,
                         onOpenDetail = { foundSite, vod -> onOpenDetail(foundSite, vod) },
                         onBack = { tab = ShellTab.Home.ordinal },
+                        state = searchState,
                     )
                     ShellTab.Library -> LibraryScreen(
                         repo = repo,

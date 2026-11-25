@@ -63,7 +63,18 @@ private const val MAX_SOURCES = 12
 private const val CONCURRENCY = 4
 private const val PER_SOURCE_TIMEOUT_MS = 8_000L
 
-private data class SearchGroup(val site: Site, val vods: List<Vod>)
+internal data class SearchGroup(val site: Site, val vods: List<Vod>)
+
+class TvSearchState {
+    internal var keyword by mutableStateOf("")
+    internal var submitted by mutableStateOf("")
+    internal var groups by mutableStateOf<List<SearchGroup>>(emptyList())
+    internal var doneCount by mutableStateOf(0)
+    internal var totalCount by mutableStateOf(0)
+    internal var message by mutableStateOf<String?>(null)
+    internal var editing by mutableStateOf(true)
+    internal var restoreKey by mutableStateOf<String?>(null)
+}
 
 /**
  * 搜索页（V2）：一次搜索同时打多个可搜索源，结果按源分组。
@@ -75,12 +86,12 @@ fun SearchScreen(
     repo: AppRepository,
     site: Site,
     onOpenDetail: (Site, Vod) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    state: TvSearchState = remember { TvSearchState() }
 ) {
     val scope = rememberCoroutineScope()
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
 
-    var keyword by remember { mutableStateOf("") }
     var phoneticTitles by remember(site.runtimeKey) { mutableStateOf<List<Triple<String, String, String>>>(emptyList()) }
     androidx.compose.runtime.LaunchedEffect(site.runtimeKey) {
         if (android.os.Build.VERSION.SDK_INT < 29) return@LaunchedEffect
@@ -96,49 +107,45 @@ fun SearchScreen(
             }
         }
     }
-    val pinyin = keyword.lowercase().filter { it.isLetterOrDigit() }
+    val pinyin = state.keyword.lowercase().filter { it.isLetterOrDigit() }
     val suggestions = remember(pinyin, phoneticTitles) {
         if (pinyin.length < 2 || !pinyin.all { it in 'a'..'z' || it.isDigit() }) emptyList()
         else phoneticTitles.filter { (_, full, initials) -> full.startsWith(pinyin) || initials.startsWith(pinyin) }
             .take(4).map { it.first }
     }
-    var submitted by remember { mutableStateOf("") }
-    var groups by remember { mutableStateOf<List<SearchGroup>>(emptyList()) }
-    var doneCount by remember { mutableStateOf(0) }
-    var totalCount by remember { mutableStateOf(0) }
     var loading by remember { mutableStateOf(false) }
-    var message by remember { mutableStateOf<String?>(null) }
     var fieldFocused by remember { mutableStateOf(false) }
-    var editing by remember { mutableStateOf(true) }
     val listState = rememberLazyListState()
     val fieldFocus = remember { FocusRequester() }
     val firstResultFocus = remember { FocusRequester() }
     val firstResultKey = remember { mutableStateOf<String?>(null) }
 
     // 第一批结果到达后，把焦点直接送到第一张海报，遥控器不用先摸位置
-    androidx.compose.runtime.LaunchedEffect(groups.firstOrNull()?.site?.runtimeKey, submitted) {
-        val first = groups.firstOrNull()?.let { g -> g.vods.firstOrNull()?.let { g.site.runtimeKey + "|" + it.id } }
+    androidx.compose.runtime.LaunchedEffect(state.groups.firstOrNull()?.site?.runtimeKey, state.submitted) {
+        val first = state.groups.firstOrNull()?.let { g -> g.vods.firstOrNull()?.let { g.site.runtimeKey + "|" + it.id } }
         if (first != null && firstResultKey.value == null) {
-            firstResultKey.value = first
+            firstResultKey.value = state.restoreKey ?: first
+            state.restoreKey = null
             kotlinx.coroutines.delay(80)
             runCatching { firstResultFocus.requestFocus() }
         }
     }
 
-    fun submit(input: String = keyword) {
+    fun submit(input: String = state.keyword) {
         val query = input.trim()
         if (query.isEmpty() || loading) return
         val targets = repo.searchableSites(MAX_SOURCES)
         if (targets.isEmpty()) {
-            message = "这份配置里没有可搜索的来源（searchable=0），去设置里换一份配置吧"
+            state.message = "这份配置里没有可搜索的来源（searchable=0），去设置里换一份配置吧"
             return
         }
-        editing = false
-        submitted = query
-        groups = emptyList()
-        doneCount = 0
-        totalCount = targets.size
-        message = null
+        state.editing = false
+        state.restoreKey = null
+        state.submitted = query
+        state.groups = emptyList()
+        state.doneCount = 0
+        state.totalCount = targets.size
+        state.message = null
         firstResultKey.value = null
         scope.launch {
             loading = true
@@ -154,9 +161,9 @@ fun SearchScreen(
                             val list = if (raw.isEmpty()) emptyList() else repo.prepareForList(raw)
                             if (list.isNotEmpty()) hits[index] = list
                             withContext(Dispatchers.Main) {
-                                doneCount += 1
+                                state.doneCount += 1
                                 // 按配置顺序稳定排列，先回的结果先显示但不会乱跳位置
-                                groups = targets.indices.mapNotNull { i ->
+                                state.groups = targets.indices.mapNotNull { i ->
                                     hits[i]?.let { SearchGroup(targets[i], it) }
                                 }
                             }
@@ -165,7 +172,7 @@ fun SearchScreen(
                 }
             }
             loading = false
-            if (groups.isEmpty()) message = "「$query」在 $totalCount 个来源里都没搜到，换个片名试试"
+            if (state.groups.isEmpty()) state.message = "「$query」在 ${state.totalCount} 个来源里都没搜到，换个片名试试"
         }
     }
 
@@ -184,17 +191,17 @@ fun SearchScreen(
                 val native = event.nativeKeyEvent
                 when {
                     action == TvAction.Confirm || native.keyCode == android.view.KeyEvent.KEYCODE_ENTER -> {
-                        if (fieldFocused || editing) { submit(); true } else false
+                        if (fieldFocused || state.editing) { submit(); true } else false
                     }
                     native.keyCode == android.view.KeyEvent.KEYCODE_DEL -> {
-                        if (fieldFocused) false else { keyword = keyword.dropLast(1); true }
+                        if (fieldFocused) false else { state.keyword = state.keyword.dropLast(1); true }
                     }
                     else -> {
                         if (fieldFocused) return@onPreviewKeyEvent false
                         val ch = native.unicodeChar.toChar()
                         if (ch.isLetterOrDigit() || ch == ' ') {
-                            keyword = (keyword + ch).take(40)
-                            if (!editing) editing = true
+                            state.keyword = (state.keyword + ch).take(40)
+                            if (!state.editing) state.editing = true
                             true
                         } else false
                     }
@@ -214,16 +221,16 @@ fun SearchScreen(
                 fontSize = Tokens.Type.display,
                 fontWeight = FontWeight.SemiBold
             )
-            if (!editing && submitted.isNotBlank()) {
+            if (!state.editing && state.submitted.isNotBlank()) {
                 Spacer(Modifier.width(14.dp))
                 Text(
-                    text = "“$submitted” · ${groups.sumOf { it.vods.size }} 条 · $doneCount/$totalCount 源",
+                    text = "“${state.submitted}” · ${state.groups.sumOf { it.vods.size }} 条 · ${state.doneCount}/${state.totalCount} 源",
                     color = Tokens.TextFaint,
                     style = MaterialTheme.typography.labelLarge
                 )
             }
             Spacer(Modifier.weight(1f))
-            if (!editing) {
+            if (!state.editing) {
                 Text(
                     text = "修改关键词",
                     color = Tokens.TextDim,
@@ -233,7 +240,7 @@ fun SearchScreen(
                         .background(Tokens.Surface)
                         .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
                         .tvClickable(corner = Tokens.Corner.pill) {
-                            editing = true
+                            state.editing = true
                             scope.launch { runCatching { fieldFocus.requestFocus() } }
                         }
                         .padding(horizontal = 18.dp, vertical = 9.dp)
@@ -243,7 +250,7 @@ fun SearchScreen(
 
         Spacer(Modifier.height(12.dp))
 
-        if (editing) {
+        if (state.editing) {
             // 输入框：给了输入法一条路，也给外接键盘一条路
             val fieldShape = RoundedCornerShape(Tokens.Corner.card)
             Row(
@@ -259,12 +266,12 @@ fun SearchScreen(
                 Text("⌕", color = Tokens.Accent, style = MaterialTheme.typography.titleLarge)
                 Spacer(Modifier.width(10.dp))
                 Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                    if (keyword.isEmpty()) {
+                    if (state.keyword.isEmpty()) {
                         Text("输入片名，选中后按确认开始全网搜索", color = Tokens.TextFaint, style = MaterialTheme.typography.bodyMedium)
                     }
                     BasicTextField(
-                        value = keyword,
-                        onValueChange = { keyword = it },
+                        value = state.keyword,
+                        onValueChange = { state.keyword = it },
                         singleLine = true,
                         textStyle = TextStyle(color = Tokens.Text, fontSize = 15.sp),
                         cursorBrush = SolidColor(Tokens.Accent),
@@ -277,12 +284,12 @@ fun SearchScreen(
                             }
                     )
                 }
-                if (keyword.isNotEmpty()) {
+                if (state.keyword.isNotEmpty()) {
                     Text(
                         text = "清空",
                         color = Tokens.TextFaint,
                         style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.tvClickable(onClick = { keyword = "" }, corner = Tokens.Corner.pill).padding(8.dp)
+                        modifier = Modifier.tvClickable(onClick = { state.keyword = "" }, corner = Tokens.Corner.pill).padding(8.dp)
                     )
                 }
             }
@@ -300,7 +307,7 @@ fun SearchScreen(
                 androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     suggestions.forEach { title ->
                         com.nextmovie.ui.common.TvPill(title.take(22), glass = true, onClick = {
-                            keyword = title
+                            state.keyword = title
                             submit(title)
                         })
                     }
@@ -308,21 +315,21 @@ fun SearchScreen(
                 Spacer(Modifier.height(10.dp))
             }
             Keypad(
-                onChar = { keyword = (keyword + it).take(40) },
-                onBackspace = { keyword = keyword.dropLast(1) },
-                onClear = { keyword = "" },
+                onChar = { state.keyword = (state.keyword + it).take(40) },
+                onBackspace = { state.keyword = state.keyword.dropLast(1) },
+                onClear = { state.keyword = "" },
                 onSubmit = { submit() }
             )
         }
 
         // ——— 状态行 ———
-        val msg = message
+        val msg = state.message
         if (loading || msg != null) {
             Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (loading) {
                     Text(
-                        text = if (doneCount == 0) "正在搜索 $totalCount 个来源…" else "搜索中 · 已完成 $doneCount/$totalCount 源",
+                        text = if (state.doneCount == 0) "正在搜索 ${state.totalCount} 个来源…" else "搜索中 · 已完成 ${state.doneCount}/${state.totalCount} 源",
                         color = Tokens.Accent,
                         style = MaterialTheme.typography.labelLarge
                     )
@@ -334,7 +341,7 @@ fun SearchScreen(
                             .clip(RoundedCornerShape(999.dp))
                             .background(Tokens.Stroke)
                     ) {
-                        val p = if (totalCount == 0) 0f else doneCount.toFloat() / totalCount
+                        val p = if (state.totalCount == 0) 0f else state.doneCount.toFloat() / state.totalCount
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth(p)
@@ -350,15 +357,15 @@ fun SearchScreen(
         }
 
         // ——— 结果：按源分组 ———
-        if (groups.isNotEmpty()) {
+        if (state.groups.isNotEmpty()) {
             Spacer(Modifier.height(10.dp))
             LazyColumn(
                 state = listState,
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier.fillMaxSize().mouseWheel(listState)
             ) {
-                groups.forEach { group ->
-                    val groupKey = "h|" + group.site.runtimeKey + "|" + submitted
+                state.groups.forEach { group ->
+                    val groupKey = "h|" + group.site.runtimeKey + "|" + state.submitted
                     item(key = groupKey) {
                         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
                             Text(
@@ -381,13 +388,16 @@ fun SearchScreen(
                             )
                         }
                     }
-                    item(key = "r|" + group.site.runtimeKey + "|" + submitted) {
+                    item(key = "r|" + group.site.runtimeKey + "|" + state.submitted) {
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                             items(group.vods, key = { it.id + "|" + it.name }) { vod ->
                                 val key = group.site.runtimeKey + "|" + vod.id
                                 PosterCard(
                                     vod = vod,
-                                    onClick = { onOpenDetail(group.site, vod) },
+                                    onClick = {
+                                        state.restoreKey = key
+                                        onOpenDetail(group.site, vod)
+                                    },
                                     onFocused = {},
                                     modifier = if (key == firstResultKey.value) Modifier.focusRequester(firstResultFocus) else Modifier
                                 )

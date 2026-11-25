@@ -133,11 +133,17 @@ fun DetailScreen(
         }
     }
     val scope = rememberCoroutineScope()
-    var agg by remember { mutableStateOf<AppRepository.AggregatedDetail?>(null) }
+    val prefetched = remember(site.runtimeKey, initial.id) { repo.readyDetail(site, initial.id) }
+    var agg by remember(site.runtimeKey, initial.id) { mutableStateOf(prefetched) }
+    LaunchedEffect(agg != null) {
+        if (agg == null) return@LaunchedEffect
+        androidx.compose.runtime.withFrameNanos { }
+        android.util.Log.i("NextMovieTiming", "detail-presented ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms")
+    }
     var error by remember { mutableStateOf<String?>(null) }
     var sourceIndex by remember { mutableIntStateOf(0) }
-    var lineIndex by remember { mutableIntStateOf(0) }
-    var loading by remember { mutableStateOf(true) }
+    var lineIndex by remember { mutableIntStateOf(prefetched?.best?.bestLineIndex ?: 0) }
+    var loading by remember { mutableStateOf(prefetched == null) }
     var hint by remember { mutableStateOf("正在聚合全网来源…") }
     var manual by remember { mutableStateOf(false) }
     var filter by remember { mutableIntStateOf(0) }
@@ -154,12 +160,13 @@ fun DetailScreen(
     val epFocus = remember { FocusRequester() }
 
     LaunchedEffect(initial.id, site.key, reload) {
-        loading = true
+        val ready = repo.readyDetail(site, initial.id)
+        loading = ready == null
         hint = "正在聚合全网来源…"
-        agg = null
+        agg = ready
         error = null
         sourceIndex = 0
-        lineIndex = 0
+        lineIndex = ready?.best?.bestLineIndex ?: 0
         manual = false
         groupIndex = 0
         val result = runCatching {
@@ -214,11 +221,15 @@ fun DetailScreen(
         val best = currentAgg.best ?: return@LaunchedEffect
         val enriched = repo.enrichPoster(best.detail.vod, detail = true)
         if (enriched !== best.detail.vod) {
-            agg = currentAgg.copy(
-                sources = currentAgg.sources.map {
-                    if (it.site.key == best.site.key) it.copy(detail = it.detail.copy(vod = enriched)) else it
-                }
-            )
+            agg = agg?.let { latest ->
+                latest.copy(sources = latest.sources.map { source ->
+                    if (source.site.runtimeKey == best.site.runtimeKey && source.detail.vod.id == best.detail.vod.id) {
+                        source.copy(detail = source.detail.copy(vod = source.detail.vod.withMetadataFrom(enriched).copy(
+                            tmdb = enriched.tmdb ?: source.detail.vod.tmdb
+                        )))
+                    } else source
+                })
+            }
         }
     }
 
@@ -267,19 +278,18 @@ fun DetailScreen(
     fun slotsOf(episodeIndex: Int, episode: Episode): List<com.nextmovie.core.model.PlaySlot> {
         val out = ArrayList<com.nextmovie.core.model.PlaySlot>(sources.size)
         sources.forEach { src ->
-            val best = src.detail.lines.getOrNull(src.bestLineIndex) ?: src.detail.lines.firstOrNull() ?: return@forEach
-            val ep = best.episodes.firstOrNull { it.name == episode.name }
-                ?: best.episodes.getOrNull(episodeIndex).takeIf { best.episodes.size == line?.episodes?.size }
-                ?: return@forEach
-            out += com.nextmovie.core.model.PlaySlot(
-                siteKey = src.site.key,
-                siteName = src.site.name,
-                lineName = best.name,
-                badge = src.badge,
-                score = src.score,
-                episodeName = ep.name,
-                episodeUrl = ep.url
-            )
+            val orderedLines = listOfNotNull(src.detail.lines.getOrNull(src.bestLineIndex)) + src.detail.lines
+            orderedLines.distinct().forEach lineOption@{ option ->
+                val sameLine = src.site.key == active.key && option == line
+                val ep = if (sameLine) episode else option.episodes.firstOrNull { it.name == episode.name }
+                    ?: option.episodes.getOrNull(episodeIndex).takeIf { option.episodes.size == line?.episodes?.size }
+                    ?: return@lineOption
+                val index = option.episodes.indexOf(ep)
+                out += com.nextmovie.core.model.PlaySlot(
+                    src.site.key, src.site.name, option.name, src.badge, src.score, ep.name, ep.url,
+                    src.detail.vod, if (index >= 0) option.episodes.drop(index + 1) else emptyList()
+                )
+            }
         }
         return out
     }
