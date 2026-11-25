@@ -239,12 +239,46 @@ class JarSpiderLoader(
         instances[site.runtimeKey] = instance
         apiKeys[site.api] = site.runtimeKey
         PluginDiag.record(context, site.name, site.api, true, "Init ok，实例已就绪")
+        // 方案A探针：枚举插件暴露的登录/Cookie 钩子，并试调一次 action("login")
+        runCatching {
+            val sb = StringBuilder()
+            var c: Class<*>? = instance.javaClass
+            var depth = 0
+            while (c != null && c != Spider::class.java && depth < 4) {
+                sb.append("|").append(c.simpleName).append("[m:")
+                for (m in c.declaredMethods) {
+                    if (m.name.contains("cookie", true) || m.name.contains("login", true) ||
+                        m.name.contains("qr", true) || m.name.contains("dialog", true)
+                    ) sb.append(m.name).append('/').append(m.parameterTypes.size).append(',')
+                }
+                sb.append(" f:")
+                for (f in c.declaredFields) {
+                    val t = f.type.name
+                    if (t.contains("Net") || t.contains("Cookie") || f.name.contains("cookie", true) ||
+                        f.name.contains("net", true) || f.name.contains("login", true) || f.name.contains("api", true)
+                    ) sb.append(f.name).append(':').append(t.substringAfterLast('.')).append(',')
+                }
+                c = c.superclass; depth++
+            }
+            android.util.Log.i("NextMoviePan", "hook-probe site=${site.name} $sb")
+        }
         // P0 诊断：插件是否把 catvod 的 Net 暴露成实例字段/Getter（决定 Cookie 能不能注进去）
         runCatching {
             val net = findNet(instance.javaClass, instance)
             android.util.Log.i(
                 "NextMoviePan",
                 "net-probe site=${site.name} found=${net != null} type=${net?.javaClass?.name ?: "-"}"
+            )
+        }
+        runCatching {
+            val task = java.util.concurrent.FutureTask<String> {
+                runCatching { instance.action("login") }.getOrDefault("")
+            }
+            Thread(task, "probe-login").apply { isDaemon = true; start() }
+            val raw = runCatching { task.get(6, java.util.concurrent.TimeUnit.SECONDS) }.getOrDefault("")
+            android.util.Log.i(
+                "NextMoviePan",
+                "action-login site=${site.name} len=${raw.length} head=" + raw.take(240).replace('\n', ' ')
             )
         }
         instance
