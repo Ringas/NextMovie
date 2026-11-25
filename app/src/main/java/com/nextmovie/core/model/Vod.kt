@@ -179,11 +179,15 @@ object VodParser {
 }
 
 /** 蜘蛛返回的播放结果。 */
+data class ExternalSubtitle(val url: String, val label: String = "", val mimeType: String = "")
+
 data class PlayResult(
     val url: String,
     val headers: Map<String, String> = emptyMap(),
     /** 0 = 直链，1 = 需要嗅探/解析（v0 只支持直链） */
-    val parse: Int = 0
+    val parse: Int = 0,
+    val subtitles: List<ExternalSubtitle> = emptyList(),
+    val danmaku: String = ""
 ) {
     companion object {
         fun fromJson(root: JSONObject?): PlayResult? {
@@ -209,7 +213,21 @@ data class PlayResult(
                 is String -> p.trim().toIntOrNull() ?: 0
                 else -> 0
             }
-            return PlayResult(url, headers, parse)
+            val subtitles = listOf("subtitles", "subs", "subtitle", "subt").flatMap { key ->
+                val value = root.opt(key)
+                val entries = if (value is JSONArray) List(value.length()) { value.opt(it) }
+                    else listOf(value)
+                entries.mapNotNull { entry ->
+                    when (entry) {
+                        is String -> entry.trim().takeIf { it.isNotEmpty() }?.let { ExternalSubtitle(it) }
+                        is JSONObject -> entry.optString("url").trim().takeIf { it.isNotEmpty() }?.let {
+                            ExternalSubtitle(it, entry.optString("label").ifBlank { entry.optString("name") }, entry.optString("mimeType"))
+                        }
+                        else -> null
+                    }
+                }
+            }.distinctBy { it.url }
+            return PlayResult(url, headers, parse, subtitles, root.optString("danmaku").trim())
         }
     }
 }

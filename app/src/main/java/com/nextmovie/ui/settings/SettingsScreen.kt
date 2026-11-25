@@ -159,7 +159,7 @@ fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -
                             NetworkCard(repo)
                         }
                         Section.Netdisk -> NetdiskCard(repo)
-                        Section.Webdav -> WebdavCard()
+                        Section.Webdav -> WebdavCard(repo)
                         Section.Playback -> PlaybackCard(repo)
                         Section.Backup -> StorageCard(repo)
                         Section.Version -> VersionCard(context, repo)
@@ -241,13 +241,54 @@ private fun SourcesCard(repo: AppRepository, onConfigLoaded: () -> Unit) {
     var message by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf(repo.configStatus()) }
     val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var subscriptions by remember { mutableStateOf(repo.savedSubscriptions()) }
+    var includeLibrary by remember { mutableStateOf(false) }
+    val exportBackup = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) scope.launch {
+            message = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    checkNotNull(context.contentResolver.openOutputStream(uri)).bufferedWriter().use {
+                        it.write(repo.libraryBackup(includeLibrary))
+                    }
+                }.fold({ "备份已保存" }, { "无法保存备份" })
+            }
+        }
+    }
+    val importBackup = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) scope.launch {
+            val count = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    checkNotNull(context.contentResolver.openInputStream(uri)).bufferedReader().use {
+                        val limit = 4 * 1024 * 1024
+                        val data = CharArray(limit + 1)
+                        var size = 0
+                        while (size < data.size) {
+                            val read = it.read(data, size, data.size - size)
+                            if (read < 0) break
+                            size += read
+                        }
+                        require(size <= limit)
+                        repo.restoreBackup(String(data, 0, size))
+                    }
+                }.getOrNull()
+            }
+            subscriptions = repo.savedSubscriptions()
+            message = count?.let { "备份已合并，新增 $it 条订阅" } ?: "无法读取订阅备份"
+        }
+    }
 
-    fun load() {
+    fun load(address: String = url) {
         if (busy) return
         busy = true
         message = "加载中…"
         scope.launch {
-            val count = runCatching { repo.loadConfig(url) }.getOrElse { -1 }
+            val count = runCatching { repo.loadConfig(address) }.getOrElse { -1 }
+            subscriptions = repo.savedSubscriptions()
             status = repo.configStatus()
             message = if (count > 0) "已载入 $count 个片源" else "载入失败，检查地址或网络"
             busy = false
@@ -277,6 +318,32 @@ private fun SourcesCard(repo: AppRepository, onConfigLoaded: () -> Unit) {
             )
             TvPill("扫码快传", glass = true, onClick = { Pairing.show = true })
             TvPill("刷新状态", glass = true, onClick = { status = repo.configStatus() })
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            TvPill("导出备份", glass = true, enabled = subscriptions.isNotEmpty() || includeLibrary, onClick = {
+                exportBackup.launch("nextmovie-backup.json")
+            })
+            TvPill("导入备份", glass = true, onClick = { importBackup.launch(arrayOf("application/json", "text/plain")) })
+            TvPill("包含收藏和历史", selected = includeLibrary, glass = true, onClick = { includeLibrary = !includeLibrary })
+        }
+        if (subscriptions.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            Text("已保存订阅", color = Tokens.TextDim, fontSize = 14.sp)
+            subscriptions.forEach { address ->
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val active = address == repo.configUrl()
+                    val label = if (address.startsWith("{")) "内嵌 JSON" else address.take(64)
+                    TvPill(label, selected = active, enabled = !busy && !active, onClick = {
+                        url = address
+                        load(address)
+                    })
+                    if (!active) TvPill("移除", glass = true, enabled = !busy, onClick = {
+                        repo.forgetSubscription(address)
+                        subscriptions = repo.savedSubscriptions()
+                    })
+                }
+            }
         }
         message?.let {
             Spacer(Modifier.height(12.dp))
@@ -496,20 +563,52 @@ private fun NetdiskCard(repo: AppRepository) {
 /* ---------------- WebDAV 云同步 ---------------- */
 
 @Composable
-private fun WebdavCard() {
+private fun WebdavCard(repo: AppRepository) {
+    var address by remember { mutableStateOf("") }
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var includeSubscriptions by remember { mutableStateOf(false) }
+    var syncing by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
     GlassCard(
         title = "WebDAV 云同步",
-        subtitle = "Marco 用 WebDAV 同步收藏与观看进度；NextMovie 目前只做本机存储"
+        subtitle = "手动合并收藏与历史。请填写自己服务器上备份文件的完整地址。"
     ) {
-        Text(
-            "下一版会支持填写 WebDAV 地址与账号，把收藏、观看记录同步到自己的网盘；" +
-                "现阶段收藏与历史都保存在应用私有目录，卸载前请自行保留备份。",
-            color = Tokens.TextDim,
-            fontSize = 14.sp,
-            lineHeight = 22.sp
-        )
+        SettingsField("备份文件地址", address, "https://example.com/dav/nextmovie.json", { address = it })
+        Spacer(Modifier.height(12.dp))
+        SettingsField("用户名", username, "可留空", { username = it })
+        Spacer(Modifier.height(12.dp))
+        SettingsField("密码", password, "仅用于本次设置会话", { password = it }, secret = true)
         Spacer(Modifier.height(14.dp))
-        Text("说明：不内置任何云端账号，也不上传播放记录。", color = Tokens.TextFaint, fontSize = 13.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            TvPill("包含订阅", selected = includeSubscriptions, glass = true, enabled = !syncing,
+                onClick = { includeSubscriptions = !includeSubscriptions })
+            TvPill(if (syncing) "同步中…" else "合并并同步", prominent = true,
+                enabled = !syncing && address.isNotBlank(), onClick = {
+                    syncing = true
+                    scope.launch {
+                        try {
+                            repo.syncLibraryWebDav(address, username, password, includeSubscriptions)
+                            result = "收藏与历史已同步"
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: IllegalArgumentException) {
+                            result = e.message ?: "云端备份格式不正确"
+                        } catch (e: IllegalStateException) {
+                            result = e.message ?: "同步失败"
+                        } catch (_: Exception) {
+                            result = "无法同步，检查网络或云端文件格式"
+                        } finally {
+                            syncing = false
+                        }
+                    }
+                })
+        }
+        if (result.isNotBlank()) {
+            Spacer(Modifier.height(12.dp))
+            Text(result, color = Tokens.TextDim, fontSize = 14.sp)
+        }
     }
 }
 
@@ -705,6 +804,7 @@ private fun SettingsField(
     placeholder: String,
     onValueChange: (String) -> Unit,
     imeAction: ImeAction = ImeAction.Done,
+    secret: Boolean = false,
     onDone: () -> Unit = {}
 ) {
     Text(label, color = Tokens.TextDim, fontSize = 13.sp, fontWeight = FontWeight.Medium)
@@ -717,7 +817,11 @@ private fun SettingsField(
         placeholder = { Text(placeholder, color = Tokens.TextGhost, fontSize = 14.sp) },
         textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 15.sp),
         shape = RoundedCornerShape(14.dp),
-        keyboardOptions = KeyboardOptions(imeAction = imeAction),
+        visualTransformation = if (secret) androidx.compose.ui.text.input.PasswordVisualTransformation()
+            else androidx.compose.ui.text.input.VisualTransformation.None,
+        keyboardOptions = KeyboardOptions(imeAction = imeAction,
+            keyboardType = if (secret) androidx.compose.ui.text.input.KeyboardType.Password
+            else androidx.compose.ui.text.input.KeyboardType.Text),
         keyboardActions = KeyboardActions(onDone = { onDone() }),
         colors = TextFieldDefaults.colors(
             focusedContainerColor = Color(0x12FFFFFF),

@@ -16,7 +16,10 @@ import androidx.media3.ui.PlayerView
  * 播放页与详情页之间「搬家」，画面不会因重建 surface 而重新起播。
  */
 class PlaybackSession(context: Context) {
-    val player: ExoPlayer = ExoPlayer.Builder(context.applicationContext).build()
+    val player: ExoPlayer = ExoPlayer.Builder(
+        context.applicationContext,
+        androidx.media3.exoplayer.DefaultRenderersFactory(context.applicationContext).setEnableDecoderFallback(true)
+    ).build()
 
     private var playerView: PlayerView? = null
 

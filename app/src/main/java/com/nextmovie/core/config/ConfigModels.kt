@@ -27,6 +27,8 @@ data class Site(
 
     val isJavaScript: Boolean get() = isJavaScriptApi(api)
     val isSpider: Boolean get() = type == 3 || api.startsWith("csp_") || isJavaScript || api.endsWith(".py") || api.startsWith("node:")
+    val isHttpT4: Boolean get() = type == 4 && !isSpider &&
+        (api.startsWith("http://", true) || api.startsWith("https://", true))
     val isCms: Boolean get() = !isSpider && (type == 0 || type == 1 || type == 4)
 
     /**

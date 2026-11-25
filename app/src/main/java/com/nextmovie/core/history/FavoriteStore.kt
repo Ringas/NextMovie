@@ -66,6 +66,13 @@ class FavoriteStore(private val file: File) {
         }
     }
 
+    fun merge(incoming: List<FavoriteEntry>) = synchronized(lock) {
+        if (incoming.isEmpty()) return@synchronized
+        val merged = (load() + incoming).sortedByDescending { it.addedAt }
+            .distinctBy { it.key }.take(MAX_ENTRIES)
+        save(merged)
+    }
+
     fun remove(siteKey: String, vodId: String) {
         synchronized(lock) {
             val items = load().toMutableList()

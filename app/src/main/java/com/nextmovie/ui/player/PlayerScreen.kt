@@ -86,6 +86,9 @@ fun PlayerScreen(
     headers: Map<String, String> = emptyMap(),
     /** 插件返回的 parse 标记：0=直链，非 0=需要网页嗅探 */
     parse: Int = 0,
+    subtitles: List<com.nextmovie.core.model.ExternalSubtitle> = emptyList(),
+    requestedAtNanos: Long = 0L,
+    seriesTitle: String = "",
     /** 续播起点；0 表示从头播放 */
     startPositionMs: Long = 0L,
     /** 每 5 秒以及退出时回报一次进度，交给历史记录落盘 */
@@ -103,16 +106,31 @@ fun PlayerScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    val player = session?.player ?: remember { ExoPlayer.Builder(context).build() }
+    val player = session?.player ?: remember { ExoPlayer.Builder(context, androidx.media3.exoplayer.DefaultRenderersFactory(context).setEnableDecoderFallback(true)).build() }
     val lifecycleOwner = LocalLifecycleOwner.current
     val view = LocalView.current
     var requestStarted by remember { mutableLongStateOf(0L) }
+    val playerPrefs = remember(context) { context.getSharedPreferences("player_preferences", android.content.Context.MODE_PRIVATE) }
+    val seriesKey = remember(seriesTitle) { com.nextmovie.core.match.TitleMatcher.normalize(seriesTitle) }
+    var introMs by remember(seriesKey) { mutableLongStateOf(playerPrefs.getLong("intro:$seriesKey", 0L)) }
+    var creditsMs by remember(seriesKey) { mutableLongStateOf(playerPrefs.getLong("credits:$seriesKey", 0L)) }
+    var introHandled by remember(requestedAtNanos, url) { mutableStateOf(false) }
+    var creditsHandled by remember(requestedAtNanos, url) { mutableStateOf(false) }
+    var sleepDeadline by remember(player) { mutableLongStateOf(0L) }
+    LaunchedEffect(sleepDeadline) {
+        if (sleepDeadline == 0L) return@LaunchedEffect
+        delay((sleepDeadline - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0))
+        player.pause()
+        sleepDeadline = 0L
+    }
     var buffering by remember { mutableStateOf(true) }
     var trackBadges by remember { mutableStateOf(emptyList<String>()) }
     var playbackError by remember { mutableStateOf<String?>(null) }
     var resumedHint by remember { mutableStateOf(false) }
     var keyHint by remember { mutableStateOf<String?>(null) }
-    var speed by remember { mutableFloatStateOf(1f) }
+    var speed by remember {
+        mutableFloatStateOf(playerPrefs.getFloat("speed", 1f).coerceIn(0.75f, 2f))
+    }
     var ended by remember { mutableStateOf(false) }
     var countdown by remember { mutableIntStateOf(0) }
     var hudVisible by remember { mutableStateOf(true) }
@@ -124,7 +142,9 @@ fun PlayerScreen(
     val toolbarFocus = remember { FocusRequester() }
     var controlsVisible by remember { mutableStateOf(false) }
     var playerView by remember { mutableStateOf<androidx.media3.ui.PlayerView?>(null) }
-    var resizeMode by remember { mutableIntStateOf(androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT) }
+    var resizeMode by remember {
+        mutableIntStateOf(playerPrefs.getInt("resize_mode", androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT))
+    }
     // 线路切换面板：不抢 Compose 焦点（播放器根节点独占按键），方向键在这里走自己的游标
     var pickerVisible by remember { mutableStateOf(false) }
     var pickerIndex by remember { androidx.compose.runtime.mutableIntStateOf(currentSlot.coerceIn(0, slots.lastIndex.coerceAtLeast(0))) }
@@ -145,13 +165,15 @@ fun PlayerScreen(
         hudSignal++
     }
 
+    val latestOnProgress by androidx.compose.runtime.rememberUpdatedState(onProgress)
     fun report() {
         val position = runCatching { player.currentPosition }.getOrDefault(0L)
         if (position <= 0L) return
         val duration = runCatching { player.duration }.getOrDefault(0L).let { if (it > 0L) it else 0L }
-        onProgress(position, duration)
+        latestOnProgress(position, duration)
     }
 
+    val latestRequestedAt by androidx.compose.runtime.rememberUpdatedState(requestedAtNanos)
     DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
@@ -180,7 +202,14 @@ fun PlayerScreen(
             }
 
             override fun onRenderedFirstFrame() {
-                if (requestStarted > 0) android.util.Log.i("NextMovieTiming", "first-frame ${(System.nanoTime() - requestStarted) / 1_000_000}ms")
+                if (requestStarted > 0) {
+                    val now = System.nanoTime()
+                    android.util.Log.i("NextMovieTiming", "first-frame ${(now - requestStarted) / 1_000_000}ms")
+                    if (latestRequestedAt > 0) {
+                        android.util.Log.i("NextMovieTiming", "play-to-first-frame ${(now - latestRequestedAt) / 1_000_000}ms")
+                    }
+                    requestStarted = 0
+                }
             }
             override fun onPlayerError(error: PlaybackException) {
                 // 把错误码翻译成用户能行动的一句话，别让电视上只显示英文枚举
@@ -231,14 +260,13 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(url, headers, startPositionMs) {
+    LaunchedEffect(url, headers, startPositionMs, subtitles, requestedAtNanos) {
         requestStarted = System.nanoTime()
         trackBadges = emptyList()
         buffering = true
         playbackError = null
         ended = false
         countdown = 0
-        speed = 1f
         // 插件只要能给你直链就能播；不能给的两种情况先讲清楚，别让用户对着黑屏猜
         if (parse != 0) {
             playbackError = "该站点给的是播放页而不是直链（parse=$parse），需要网页嗅探才能取到真实地址；可先换一条线路或换源"
@@ -246,6 +274,18 @@ fun PlayerScreen(
         }
         // 注意：不少 CDN 对 Referer 做白名单校验，乱补一个同域 Referer 反而 403，
         // 所以只在源站/插件明确给了 Referer 时才带。
+        val captionUrls = hashSetOf<String>()
+        val firstBytes = java.util.concurrent.atomic.AtomicBoolean()
+        val transferListener = object : androidx.media3.datasource.TransferListener {
+            override fun onTransferInitializing(source: androidx.media3.datasource.DataSource, spec: androidx.media3.datasource.DataSpec, isNetwork: Boolean) = Unit
+            override fun onTransferStart(source: androidx.media3.datasource.DataSource, spec: androidx.media3.datasource.DataSpec, isNetwork: Boolean) = Unit
+            override fun onTransferEnd(source: androidx.media3.datasource.DataSource, spec: androidx.media3.datasource.DataSpec, isNetwork: Boolean) = Unit
+            override fun onBytesTransferred(source: androidx.media3.datasource.DataSource, spec: androidx.media3.datasource.DataSpec, isNetwork: Boolean, bytesTransferred: Int) {
+                if (isNetwork && bytesTransferred > 0 && spec.uri.toString() !in captionUrls && firstBytes.compareAndSet(false, true)) {
+                    android.util.Log.i("NextMovieTiming", "play-first-media-response ${(System.nanoTime() - requestedAtNanos) / 1_000_000}ms")
+                }
+            }
+        }
         val dataSourceFactory = PlayerDataSources.factory(headers)
         // 关键：不能只靠 url 后缀判断。CMS 常把 m3u8 藏在没有扩展名的地址后面，
         // 一旦误判成渐进式就会报 PARSING_CONTAINER_UNSUPPORTED。这里先看后缀，
@@ -254,20 +294,54 @@ fun PlayerScreen(
         val knownFile = listOf(".mp4", ".mkv", ".webm", ".flv", ".ts", ".mp3", ".m4v").any { path.endsWith(it) }
         val isHls = url.contains(".m3u8", ignoreCase = true) || (!knownFile && sniffHls(url, headers))
         android.util.Log.d("NextMoviePlay", "prepare hls=$isHls")
-        val item = MediaItem.fromUri(url)
-        val mediaSource = if (isHls) {
-            HlsMediaSource.Factory(dataSourceFactory)
+        val captionConfigs = subtitles.mapNotNull { subtitle ->
+            val uri = runCatching { java.net.URI(url).resolve(subtitle.url) }.getOrNull()
+                ?: return@mapNotNull null
+            if (uri.scheme !in listOf("http", "https") || uri.host.isNullOrBlank() || uri.userInfo != null) return@mapNotNull null
+            val mimeType = subtitle.mimeType.takeIf {
+                it in listOf("application/x-subrip", "text/vtt", "text/x-ssa", "application/ttml+xml")
+            } ?: when (uri.path.orEmpty().substringAfterLast('.').lowercase()) {
+                "srt" -> "application/x-subrip"
+                "vtt" -> "text/vtt"
+                "ass", "ssa" -> "text/x-ssa"
+                "ttml", "dfxp" -> "application/ttml+xml"
+                else -> return@mapNotNull null
+            }
+            MediaItem.SubtitleConfiguration.Builder(android.net.Uri.parse(uri.toString()))
+                .setMimeType(mimeType).setLabel(subtitle.label.ifBlank { null }).build()
+        }
+        val item = MediaItem.Builder().setUri(url)
+            .setMimeType(if (isHls) androidx.media3.common.MimeTypes.APPLICATION_M3U8 else null)
+            .setSubtitleConfigurations(captionConfigs)
+            .build()
+        val captionUris = captionConfigs.mapTo(hashSetOf()) { it.uri }
+        captionUris.mapTo(captionUrls) { it.toString() }
+        val requestFactory = if (captionUris.isEmpty()) dataSourceFactory else {
+            androidx.media3.datasource.ResolvingDataSource.Factory(PlayerDataSources.factory(emptyMap())) { spec ->
+                if (spec.uri in captionUris) spec else spec.withAdditionalHeaders(headers)
+            }
+        }
+        val measuredFactory = androidx.media3.datasource.DataSource.Factory {
+            requestFactory.createDataSource().apply {
+                if (requestedAtNanos > 0) addTransferListener(transferListener)
+            }
+        }
+        val mediaSource = if (isHls && captionConfigs.isEmpty()) {
+            HlsMediaSource.Factory(measuredFactory)
                 .setAllowChunklessPreparation(false)
                 .createMediaSource(item)
         } else {
-            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dataSourceFactory).createMediaSource(item)
+            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(measuredFactory).createMediaSource(item)
         }
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_AUDIO)
+            .clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_TEXT).build()
         player.setMediaSource(mediaSource)
         if (startPositionMs > 0L) {
             player.seekTo(startPositionMs)
             resumedHint = true
         }
-        player.setPlaybackSpeed(1f)
+        player.setPlaybackSpeed(speed)
         player.prepare()
         player.playWhenReady = true
     }
@@ -288,6 +362,27 @@ fun PlayerScreen(
             positionMs = runCatching { player.currentPosition }.getOrDefault(positionMs)
             durationMs = runCatching { player.duration }.getOrDefault(0L).let { if (it > 0L) it else 0L }
             bufferedMs = runCatching { player.bufferedPosition }.getOrDefault(0L)
+        }
+    }
+
+    LaunchedEffect(player, requestedAtNanos, introMs, creditsMs, nextEpisodeName) {
+        while (true) {
+            delay(300)
+            val duration = player.duration
+            if (!player.isPlaying || duration <= 0L) continue
+            val position = player.currentPosition
+            if (!introHandled) {
+                introHandled = true
+                if (startPositionMs == 0L && position < introMs && introMs < duration / 3) {
+                    player.seekTo(introMs)
+                    flash("已跳过片头")
+                }
+            }
+            if (!creditsHandled && creditsMs in 1 until (duration / 3) &&
+                position >= duration - creditsMs && nextEpisodeName != null) {
+                creditsHandled = true
+                player.seekTo(duration)
+            }
         }
     }
 
@@ -364,13 +459,17 @@ fun PlayerScreen(
                 when (event.key) {
                     Key.Spacebar, Key.Enter, Key.DirectionCenter, Key.P -> {
                         if (controlsVisible && event.key != Key.Spacebar && event.key != Key.P) false
-                        else { togglePlay(); true }
+                        else if (playbackError != null && slots.size > 1) {
+                            pickerIndex = (currentSlot + 1) % slots.size
+                            pickerVisible = true
+                            true
+                        } else { togglePlay(); true }
                     }
                     Key.DirectionLeft -> {
-                        if (controlsVisible) false else { seekBy(-10_000L); true }
+                        if (controlsVisible) false else { seekBy(if (event.nativeKeyEvent.repeatCount >= 5) -30_000L else -10_000L); true }
                     }
                     Key.DirectionRight -> {
-                        if (controlsVisible) false else { seekBy(10_000L); true }
+                        if (controlsVisible) false else { seekBy(if (event.nativeKeyEvent.repeatCount >= 5) 30_000L else 10_000L); true }
                     }
                     Key.DirectionUp, Key.DirectionDown -> {
                         if (controlsVisible) false else {
@@ -390,6 +489,7 @@ fun PlayerScreen(
                         val idx = steps.indexOfFirst { it == speed }
                         speed = steps[(idx + 1) % steps.size]
                         runCatching { player.setPlaybackSpeed(speed) }
+                        playerPrefs.edit().putFloat("speed", speed).apply()
                         flash("倍速 ${speed}×")
                         true
                     }
@@ -425,16 +525,34 @@ fun PlayerScreen(
                 speed = speed,
                 onSpeed = { v ->
                     speed = v
+                    playerPrefs.edit().putFloat("speed", v).apply()
                     runCatching { player.setPlaybackSpeed(v) }
                 },
                 resizeMode = resizeMode,
                 onResizeMode = { mode ->
                     resizeMode = mode
+                    playerPrefs.edit().putInt("resize_mode", mode).apply()
                     playerView?.resizeMode = mode
                 },
                 slots = slots,
                 currentSlot = currentSlot,
                 onSwitchSlot = onSwitchSlot,
+                introMs = introMs,
+                creditsMs = creditsMs,
+                onMarkSkip = if (seriesKey.isBlank()) null else { intro ->
+                    val mark = if (intro) player.currentPosition else player.duration - player.currentPosition
+                    val key = if (intro) "intro:$seriesKey" else "credits:$seriesKey"
+                    val previous = if (intro) introMs else creditsMs
+                    if (previous != 0L || mark in 1 until (player.duration / 3)) {
+                        val value = if (previous != 0L) 0L else mark
+                        if (intro) introMs = value else creditsMs = value
+                        playerPrefs.edit().putLong(key, value).apply()
+                    } else flash(if (intro) "请在片头结束的位置设置" else "请在片尾开始的位置设置")
+                },
+                sleepEnabled = sleepDeadline != 0L,
+                onSetSleep = { minutes ->
+                    sleepDeadline = if (minutes == 0) 0 else android.os.SystemClock.elapsedRealtime() + minutes * 60_000L
+                },
                 playing = player.isPlaying,
                 onToggle = { togglePlay() },
                 onSeekBy = { seekBy(it) },
@@ -553,7 +671,8 @@ fun PlayerScreen(
                                 modifier = Modifier.padding(top = 8.dp)
                             )
                             Text(
-                                text = "Esc 返回详情 · 换一条线路或源再试",
+                                text = if (slots.size > 1) "确认键选择其他线路 · 返回键回详情"
+                                    else "返回详情后换一条线路或来源",
                                 color = Tokens.Accent,
                                 style = MaterialTheme.typography.labelSmall,
                                 modifier = Modifier.padding(top = 12.dp)
@@ -816,6 +935,11 @@ private fun PlayerSheet(
     slots: List<com.nextmovie.core.model.PlaySlot>,
     currentSlot: Int,
     onSwitchSlot: (Int) -> Unit,
+    introMs: Long,
+    creditsMs: Long,
+    onMarkSkip: ((Boolean) -> Unit)?,
+    sleepEnabled: Boolean,
+    onSetSleep: (Int) -> Unit,
     playing: Boolean,
     onToggle: () -> Unit,
     onSeekBy: (Long) -> Unit,
@@ -928,6 +1052,32 @@ private fun PlayerSheet(
                 Spacer(Modifier.width(8.dp))
             }
         }
+        Spacer(Modifier.height(12.dp))
+        SheetRow("轨道 / 定时") {
+            TrackPicker(player, androidx.media3.common.C.TRACK_TYPE_AUDIO, "音轨")
+            Spacer(Modifier.width(8.dp))
+            TrackPicker(player, androidx.media3.common.C.TRACK_TYPE_TEXT, "字幕")
+            Spacer(Modifier.width(8.dp))
+            com.nextmovie.ui.common.TvPill(
+                text = if (sleepEnabled) "取消定时" else "30 分钟后暂停",
+                glass = true,
+                onClick = { onSetSleep(if (sleepEnabled) 0 else 30) }
+            )
+        }
+        if (onMarkSkip != null) {
+            Spacer(Modifier.height(12.dp))
+            SheetRow("片头片尾") {
+                com.nextmovie.ui.common.TvPill(
+                    if (introMs > 0) "清除片头 ${fmt(introMs)}" else "标记片头结束",
+                    glass = true, onClick = { onMarkSkip(true) }
+                )
+                Spacer(Modifier.width(8.dp))
+                com.nextmovie.ui.common.TvPill(
+                    if (creditsMs > 0) "清除片尾 ${fmt(creditsMs)}" else "标记片尾开始",
+                    glass = true, onClick = { onMarkSkip(false) }
+                )
+            }
+        }
         if (slots.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
             SheetRow("播放线路") {
@@ -945,6 +1095,36 @@ private fun PlayerSheet(
             }
         }
     }
+}
+
+@Composable
+private fun TrackPicker(player: ExoPlayer, type: Int, title: String) {
+    var tracks by remember(player) { mutableStateOf(player.currentTracks) }
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onTracksChanged(value: androidx.media3.common.Tracks) { tracks = value }
+        }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener) }
+    }
+    val options = tracks.groups.filter { it.type == type }.flatMap { group ->
+        (0 until group.length).filter { group.isTrackSupported(it) }.map { group to it }
+    }
+    if (options.isEmpty()) return
+    val selected = options.indexOfFirst { (group, index) -> group.isTrackSelected(index) }
+    val format = options.getOrNull(selected)?.let { (group, index) -> group.getTrackFormat(index) }
+    val label = format?.label ?: format?.language ?: if (selected >= 0) "${selected + 1}" else "关闭"
+    com.nextmovie.ui.common.TvPill(text = "$title · $label", glass = true, onClick = {
+        val next = selected + 1
+        val disable = type == androidx.media3.common.C.TRACK_TYPE_TEXT && next == options.size
+        val builder = player.trackSelectionParameters.buildUpon().clearOverridesOfType(type)
+            .setTrackTypeDisabled(type, disable)
+        if (!disable) {
+            val (group, index) = options[next % options.size]
+            builder.setOverrideForType(androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, index))
+        }
+        player.trackSelectionParameters = builder.build()
+    })
 }
 
 @Composable

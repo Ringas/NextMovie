@@ -85,6 +85,13 @@ class HistoryStore(private val file: File) {
         }
     }
 
+    fun merge(incoming: List<HistoryEntry>) = synchronized(lock) {
+        if (incoming.isEmpty()) return@synchronized
+        val merged = (load() + incoming).sortedByDescending { it.updatedAt }
+            .distinctBy { it.key }.take(MAX_ENTRIES)
+        save(merged)
+    }
+
     fun remove(siteKey: String, vodId: String) {
         synchronized(lock) {
             val items = load().toMutableList()

@@ -24,12 +24,17 @@ class Http(providedClient: OkHttpClient? = null) {
         headers: Map<String, String> = emptyMap(),
         referer: String? = null,
         ua: String = UA,
-        callTimeoutMs: Int? = null
+        callTimeoutMs: Int? = null,
+        form: Map<String, String>? = null
     ): String = withContext(Dispatchers.IO) {
         val builder = Request.Builder().url(normalize(url))
         builder.header("User-Agent", ua)
         headers.forEach { (k, v) -> if (v.isNotBlank()) builder.header(k, v) }
         if (!referer.isNullOrBlank()) builder.header("Referer", referer)
+        if (form != null) {
+            val body = okhttp3.FormBody.Builder().apply { form.forEach { (key, value) -> add(key, value) } }.build()
+            builder.post(body)
+        }
         val call = clientFor(callTimeoutMs).newCall(builder.build())
         kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
             continuation.invokeOnCancellation { call.cancel() }

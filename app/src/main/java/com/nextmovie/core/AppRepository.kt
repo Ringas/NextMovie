@@ -48,6 +48,11 @@ class AppRepository(private val context: Context) {
 
     private var parses: List<com.nextmovie.core.config.Parse> = emptyList()
 
+    private val t4Extensions = com.nextmovie.core.cache.RequestCache<String, String>(300_000, 32)
+    private fun cms(site: Site): CmsSiteClient = CmsSiteClient(http, site) {
+        t4Extensions.get(site.runtimeKey) { CmsSiteClient(http, site).fetchExtension() }
+    }
+
     private val lists = com.nextmovie.core.cache.RequestCache<String, List<Vod>>(120_000, 48, cacheIf = { it.isNotEmpty() })
     private val details = com.nextmovie.core.cache.RequestCache<String, VodDetail?>(120_000, 128, cacheIf = { it != null && it.lines.isNotEmpty() })
     private val aggregations = com.nextmovie.core.cache.RequestCache<String, AggregatedDetail?>(180_000, 32, cacheIf = { it != null && it.sources.isNotEmpty() })
@@ -157,6 +162,59 @@ class AppRepository(private val context: Context) {
 
     fun configUrl(): String = prefs.getString(KEY_CONFIG_URL, "").orEmpty()
 
+    fun savedSubscriptions(): List<String> {
+        val stored = runCatching { org.json.JSONArray(prefs.getString("saved_subscriptions", "[]")) }.getOrNull()
+        return (listOf(configUrl()) + List(stored?.length() ?: 0) { stored?.optString(it).orEmpty() })
+            .filter { it.isNotBlank() }.distinct().take(20)
+    }
+
+    fun forgetSubscription(url: String) {
+        if (url == configUrl()) return
+        prefs.edit().putString("saved_subscriptions", org.json.JSONArray(savedSubscriptions() - url).toString()).apply()
+    }
+
+    suspend fun syncLibraryWebDav(address: String, username: String, password: String, includeSubscriptions: Boolean) {
+        var remoteSubscriptions: org.json.JSONArray? = null
+        com.nextmovie.core.net.WebDavBackup(http.client).sync(
+            address, username, password,
+            merge = {
+                restoreBackup(it, includeSubscriptions)
+                if (!includeSubscriptions) remoteSubscriptions = org.json.JSONObject(it).getJSONArray("subscriptions")
+            },
+            export = {
+                val local = libraryBackup(includeLibrary = true, includeSubscriptions = includeSubscriptions)
+                val retained = remoteSubscriptions
+                if (retained == null) local else org.json.JSONObject(local).put("subscriptions", retained).toString()
+            }
+        )
+    }
+
+    fun libraryBackup(includeLibrary: Boolean, includeSubscriptions: Boolean = true): String = org.json.JSONObject()
+        .put("format", "nextmovie-backup").put("version", 1)
+        .put("subscriptions", org.json.JSONArray(if (includeSubscriptions) savedSubscriptions() else emptyList()))
+        .apply {
+            if (includeLibrary) {
+                put("favorites", com.nextmovie.core.history.FavoriteStore.toJson(favorites.list()))
+                put("history", HistoryStore.toJson(history.list()))
+            }
+        }.toString()
+
+    fun restoreBackup(backup: String, includeSubscriptions: Boolean = true): Int {
+        val root = org.json.JSONObject(backup)
+        require(root.optString("format") == "nextmovie-backup" && root.optInt("version") == 1)
+        val entries = root.getJSONArray("subscriptions")
+        val restored = List(minOf(entries.length(), 20)) { entries.optString(it).trim() }
+            .filter { it.startsWith("http://", true) || it.startsWith("https://", true) || it.startsWith("{") }
+        val existing = savedSubscriptions()
+        val merged = if (includeSubscriptions) (existing + restored).distinct().take(20) else existing
+        if (merged != existing) {
+            prefs.edit().putString("saved_subscriptions", org.json.JSONArray(merged).toString()).apply()
+        }
+        root.optJSONObject("favorites")?.let { favorites.merge(com.nextmovie.core.history.FavoriteStore.parse(it.toString())) }
+        root.optJSONObject("history")?.let { history.merge(HistoryStore.parse(it.toString())) }
+        return (merged - existing.toSet()).size
+    }
+
     /** 播放器选项（对齐 Marco 播放偏好）：自动连播下一集 */
     var autoNext: Boolean = prefs.getBoolean(KEY_AUTO_NEXT, true)
         private set
@@ -221,7 +279,7 @@ class AppRepository(private val context: Context) {
     }
 
     suspend fun categories(site: Site): List<Pair<String, String>> =
-        (if (site.isCms) CmsSiteClient(http, site).categories() else spiderHost.categories(site)).also { warmSites.add(site.runtimeKey) }
+        (if (site.isCms) cms(site).categories() else spiderHost.categories(site)).also { warmSites.add(site.runtimeKey) }
 
     fun selectSite(key: String) {
         currentSite = sites.firstOrNull { it.key == key } ?: currentSite
@@ -248,7 +306,9 @@ class AppRepository(private val context: Context) {
             android.util.Log.d("NextMovieSites", "types=$byType")
             sites.forEach { android.util.Log.d("NextMovieSites", "${it.type}|${it.key}|${it.name}|${it.api}") }
         }
-        prefs.edit().putString(KEY_CONFIG_URL, url.trim()).apply()
+        val subscriptions = (listOf(url.trim()) + savedSubscriptions()).distinct().take(20)
+        prefs.edit().putString(KEY_CONFIG_URL, url.trim())
+            .putString("saved_subscriptions", org.json.JSONArray(subscriptions).toString()).apply()
         val savedKey = prefs.getString(KEY_SITE_KEY, "").orEmpty()
         val manual = prefs.getBoolean(KEY_SITE_MANUAL, false)
         currentSite = SiteSelector.pick(sites, savedKey, manual)
@@ -336,14 +396,14 @@ class AppRepository(private val context: Context) {
 
     private suspend fun loadHomeNetwork(site: Site): List<Vod> {
         val snapshotGeneration = homeSnapshots.generation
-        return (if (site.isCms) CmsSiteClient(http, site).home() else spiderHost.home(site)).also {
+        return (if (site.isCms) cms(site).home() else spiderHost.home(site)).also {
             withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.write(site.runtimeKey, it, snapshotGeneration) }
         }
     }
 
     suspend fun category(site: Site, tid: String, page: Int): List<Vod> =
         lists.get("category|${site.runtimeKey}|$tid|$page") {
-            if (site.isCms) CmsSiteClient(http, site).category(tid, page) else spiderHost.category(site, tid, page, false, "")
+            if (site.isCms) cms(site).category(tid, page) else spiderHost.category(site, tid, page, false, "")
         }
 
     /** Speculation stays on the focused item of an already initialized source, at most one request. */
@@ -369,7 +429,7 @@ class AppRepository(private val context: Context) {
     suspend fun detail(site: Site, id: String, altId: String? = null): VodDetail? =
         details.get("detail|${site.runtimeKey}|$id") {
             val generation = detailSnapshots.generation
-            val result = if (site.isCms) CmsSiteClient(http, site).detail(id) else spiderHost.detail(site, id, altId)
+            val result = if (site.isCms) cms(site).detail(id) else spiderHost.detail(site, id, altId)
             if (result != null) withContext(kotlinx.coroutines.Dispatchers.IO) {
                 detailSnapshots.write(detailSnapshotKey(site, id), listOf(result.vod.copy(action = "")), generation)
             }
@@ -570,7 +630,7 @@ class AppRepository(private val context: Context) {
 
     suspend fun search(site: Site, keyword: String): List<Vod> {
         if (!site.searchable) return emptyList()
-        return if (site.isCms) CmsSiteClient(http, site).search(keyword) else spiderHost.search(site, keyword)
+        return if (site.isCms) cms(site).search(keyword) else spiderHost.search(site, keyword)
     }
 
     /**
@@ -644,8 +704,12 @@ class AppRepository(private val context: Context) {
     ): PlayResult? {
         onStage("正在读取来源播放地址…")
         // Native plugins may wait for the user to complete a login dialog.
-        val raw = (if (site.isCms) PlayResult(episodeUrl) else spiderHost.play(site, flag, episodeUrl))
-            ?: return null
+        val raw = when {
+            site.isHttpT4 -> detailAttempt { cms(site).play(flag, episodeUrl) }
+                ?: episodeUrl.takeIf { it.startsWith("http://") || it.startsWith("https://") }?.let { PlayResult(it) }
+            site.isCms -> PlayResult(episodeUrl)
+            else -> spiderHost.play(site, flag, episodeUrl)
+        } ?: return null
         // 部分插件把地址包进自己的本地代理（127.0.0.1:端口），但宿主环境里那个端口可能根本没起来
         // （此时端口是 -1 / 0），ExoPlayer 只会报 Malformed URL。这里把内层真实地址取出来直接用。
         fun unwrapLocalProxy(url: String): String {
@@ -661,7 +725,7 @@ class AppRepository(private val context: Context) {
             return if (decoded.startsWith("http")) decoded else url
         }
         val usable = raw.copy(url = unwrapLocalProxy(raw.url))
-        android.util.Log.d("NextMoviePlay", "raw-url=<${raw.url}> usable=<${usable.url}> parse=${raw.parse} flag=$flag")
+        android.util.Log.d("NextMoviePlay", "parse=${raw.parse} proxyRewritten=${raw.url != usable.url}")
         val rawFixed = usable
         if (rawFixed.parse == 0 && (!SharePageResolver.looksLikePage(rawFixed.url) ||
             runCatching { java.net.URI(rawFixed.url).host in listOf("127.0.0.1", "localhost") }.getOrDefault(false))) return rawFixed
@@ -669,12 +733,12 @@ class AppRepository(private val context: Context) {
         return withTimeoutOrNull(18_000) {
             if (site.isCms || rawFixed.parse != 0) {
                 withTimeoutOrNull(4_000) { SharePageResolver.resolve(http, rawFixed.url, rawFixed.headers) }
-                    ?.let { return@withTimeoutOrNull PlayResult(it, rawFixed.headers) }
+                    ?.let { return@withTimeoutOrNull rawFixed.copy(url = it, parse = 0) }
             }
             if (rawFixed.parse == 0) return@withTimeoutOrNull rawFixed
             withTimeoutOrNull(6_000) {
                 com.nextmovie.core.net.WebPlaybackResolver.resolve(context, raw.url, raw.headers)
-            }?.let { return@withTimeoutOrNull it }
+            }?.let { return@withTimeoutOrNull it.withAuxiliaryMedia(rawFixed) }
             for (parser in parses.filter { it.type == 0 || it.type == 1 }.take(3)) {
                 if (!parser.url.startsWith("http")) continue
                 val page = parser.url + raw.url
@@ -684,11 +748,16 @@ class AppRepository(private val context: Context) {
                         else com.nextmovie.core.net.WebPlaybackResolver.resolve(context, page, emptyMap())
                     }
                 }
-                if (result != null && result.parse == 0) return@withTimeoutOrNull result
+                if (result != null && result.parse == 0) return@withTimeoutOrNull result.withAuxiliaryMedia(rawFixed)
             }
             null
         } ?: throw IllegalStateException("网页解析未取得媒体地址，请更换线路")
     }
+
+    private fun PlayResult.withAuxiliaryMedia(original: PlayResult): PlayResult = copy(
+        subtitles = (subtitles + original.subtitles).distinctBy { it.url },
+        danmaku = danmaku.ifBlank { original.danmaku }
+    )
 
     /** 列表首屏：只做 L0 URL 尺寸升级，同步返回，不发请求。 */
     fun prepareForList(vods: List<Vod>): List<Vod> =
@@ -700,6 +769,7 @@ class AppRepository(private val context: Context) {
 
     suspend fun invalidateContent() {
         withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.clear(); detailSnapshots.clear() }
+        t4Extensions.clear()
         lists.clear()
         details.clear()
         spiderHost.clearCache()
@@ -707,6 +777,7 @@ class AppRepository(private val context: Context) {
 
     fun release() {
         prefetchScope.cancel()
+        t4Extensions.close()
         lists.close()
         details.close()
         poster.flush()

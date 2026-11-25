@@ -255,8 +255,8 @@ fun DetailScreen(
         val out = ArrayList<com.nextmovie.core.model.PlaySlot>(sources.size)
         sources.forEach { src ->
             val best = src.detail.lines.getOrNull(src.bestLineIndex) ?: src.detail.lines.firstOrNull() ?: return@forEach
-            val ep = best.episodes.getOrNull(episodeIndex)
-                ?: best.episodes.firstOrNull { it.name == episode.name }
+            val ep = best.episodes.firstOrNull { it.name == episode.name }
+                ?: best.episodes.getOrNull(episodeIndex).takeIf { best.episodes.size == line?.episodes?.size }
                 ?: return@forEach
             out += com.nextmovie.core.model.PlaySlot(
                 siteKey = src.site.key,
@@ -907,6 +907,13 @@ private fun EpisodeSheet(
     onPlay: (Episode) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val perGroup = 30
+    val count = line.episodes.size
+    val resumeIndex = line.episodes.indexOfFirst { it.url == resumeUrl }
+    var group by remember(line, resumeUrl) { mutableIntStateOf(resumeIndex.coerceAtLeast(0) / perGroup) }
+    var reversed by remember(line) { mutableStateOf(false) }
+    val start = group * perGroup
+    val indices = (start until min(count, start + perGroup)).let { if (reversed) it.reversed().toList() else it.toList() }
     Dialog(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
@@ -925,7 +932,22 @@ private fun EpisodeSheet(
                 TvPill(text = "关闭", glass = true, horizontalPadding = 16.dp, verticalPadding = 8.dp, onClick = onDismiss)
             }
             Spacer(Modifier.height(18.dp))
+            val groupCount = (count + perGroup - 1) / perGroup
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                item {
+                    TvPill(if (reversed) "倒序" else "正序", glass = true, onClick = { reversed = !reversed })
+                }
+                if (groupCount > 1) items(groupCount) { index ->
+                    TvPill("${index * perGroup + 1}–${min(count, (index + 1) * perGroup)}",
+                        selected = group == index, glass = true, onClick = { group = index })
+                }
+            }
+            Spacer(Modifier.height(12.dp))
             val state = rememberLazyGridState()
+            LaunchedEffect(group, reversed) {
+                val index = indices.indexOf(resumeIndex).coerceAtLeast(0)
+                if (indices.isNotEmpty()) state.scrollToItem(index)
+            }
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(minSize = 132.dp),
                 state = state,
@@ -933,7 +955,8 @@ private fun EpisodeSheet(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.fillMaxSize().mouseWheel(state)
             ) {
-                itemsIndexed(line.episodes) { index, ep ->
+                itemsIndexed(indices, key = { _, index -> index }) { _, index ->
+                    val ep = line.episodes[index]
                     EpisodeTile(
                         number = index + 1,
                         title = ep.name,

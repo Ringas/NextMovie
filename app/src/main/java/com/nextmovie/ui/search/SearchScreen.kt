@@ -79,6 +79,27 @@ fun SearchScreen(
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
 
     var keyword by remember { mutableStateOf("") }
+    var phoneticTitles by remember(site.runtimeKey) { mutableStateOf<List<Triple<String, String, String>>>(emptyList()) }
+    androidx.compose.runtime.LaunchedEffect(site.runtimeKey) {
+        if (android.os.Build.VERSION.SDK_INT < 29) return@LaunchedEffect
+        phoneticTitles = withContext(Dispatchers.IO) {
+            val transliterator = android.icu.text.Transliterator.getInstance("Han-Latin; Latin-ASCII")
+            val titles = repo.cachedHome(site).orEmpty().map { it.name } +
+                repo.history.list().map { it.name } + repo.favorites.list().map { it.name }
+            titles.distinct().take(350).filter { title ->
+                title.any { Character.UnicodeScript.of(it.code) == Character.UnicodeScript.HAN }
+            }.map { title ->
+                val words = transliterator.transliterate(title).lowercase().split(Regex("[^a-z0-9]+")).filter { it.isNotEmpty() }
+                Triple(title, words.joinToString(""), words.joinToString("") { it.take(1) })
+            }
+        }
+    }
+    val pinyin = keyword.lowercase().filter { it.isLetterOrDigit() }
+    val suggestions = remember(pinyin, phoneticTitles) {
+        if (pinyin.length < 2 || !pinyin.all { it in 'a'..'z' || it.isDigit() }) emptyList()
+        else phoneticTitles.filter { (_, full, initials) -> full.startsWith(pinyin) || initials.startsWith(pinyin) }
+            .take(4).map { it.first }
+    }
     var submitted by remember { mutableStateOf("") }
     var groups by remember { mutableStateOf<List<SearchGroup>>(emptyList()) }
     var doneCount by remember { mutableStateOf(0) }
@@ -102,8 +123,8 @@ fun SearchScreen(
         }
     }
 
-    fun submit() {
-        val query = keyword.trim()
+    fun submit(input: String = keyword) {
+        val query = input.trim()
         if (query.isEmpty() || loading) return
         val targets = repo.searchableSites(MAX_SOURCES)
         if (targets.isEmpty()) {
@@ -268,6 +289,17 @@ fun SearchScreen(
 
             Spacer(Modifier.height(14.dp))
 
+            if (suggestions.isNotEmpty()) {
+                androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    suggestions.forEach { title ->
+                        com.nextmovie.ui.common.TvPill(title.take(22), glass = true, onClick = {
+                            keyword = title
+                            submit(title)
+                        })
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+            }
             Keypad(
                 onChar = { keyword = (keyword + it).take(40) },
                 onBackspace = { keyword = keyword.dropLast(1) },

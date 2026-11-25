@@ -126,7 +126,9 @@ data class PlayRequest(
     /** 聚合出来的可切换线路清单（同一集在不同源的对应地址） */
     val slots: List<com.nextmovie.core.model.PlaySlot> = emptyList(),
     /** 当前正在播的槽位下标 */
-    val slotIndex: Int = 0
+    val slotIndex: Int = 0,
+    val subtitles: List<com.nextmovie.core.model.ExternalSubtitle> = emptyList(),
+    val requestedAtNanos: Long = 0L
 )
 
 @Composable
@@ -246,8 +248,8 @@ private fun AppRoot(repo: AppRepository) {
             return
         }
         playJob?.cancel()
+        val resolveStarted = System.nanoTime()
         playJob = scope.launch {
-            val resolveStarted = System.nanoTime()
             resolveStage = "正在读取来源播放地址…"
             resolving = true
             try {
@@ -279,6 +281,7 @@ private fun AppRoot(repo: AppRepository) {
                     val effectiveSlot = if (slotIndex >= 0) slotIndex else slots.indexOfFirst {
                         it.siteKey == activeSite.key && it.episodeUrl == episode.url
                     }
+                    lastPositionMs = startMs
                     route = Route.Player(
                     PlayRequest(
                         url = result.url,
@@ -297,7 +300,9 @@ private fun AppRoot(repo: AppRepository) {
                         backTo = vod,
                         queue = queue,
                         slots = slots,
-                        slotIndex = effectiveSlot.coerceAtLeast(0)
+                        slotIndex = effectiveSlot.coerceAtLeast(0),
+                        subtitles = result.subtitles,
+                        requestedAtNanos = resolveStarted
                     )
                 )
                 }
@@ -318,7 +323,7 @@ private fun AppRoot(repo: AppRepository) {
             vod = req.backTo,
             line = com.nextmovie.core.model.PlayLine(slot.lineName, listOf(Episode(slot.episodeName, slot.episodeUrl))),
             episode = Episode(slot.episodeName, slot.episodeUrl),
-            startMs = lastPositionMs.coerceAtLeast(req.startMs),
+            startMs = playbackSession.player.currentPosition.takeIf { it > 0L } ?: lastPositionMs.coerceAtLeast(req.startMs),
             source = target,
             queue = req.queue,
             slots = req.slots,
@@ -420,6 +425,9 @@ private fun AppRoot(repo: AppRepository) {
             url = current.req.url,
             headers = current.req.headers,
             parse = current.req.parse,
+            subtitles = current.req.subtitles,
+            requestedAtNanos = current.req.requestedAtNanos,
+            seriesTitle = current.req.vodName,
             startPositionMs = current.req.startMs,
             onProgress = { position, duration ->
                 lastPositionMs = position
