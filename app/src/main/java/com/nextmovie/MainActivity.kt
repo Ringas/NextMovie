@@ -96,6 +96,8 @@ sealed interface Route {
     data class Detail(val vod: Vod, val siteKey: String? = null) : Route
     data class Player(val req: PlayRequest) : Route
     data object Search : Route
+    data object Favorites : Route
+    data object History : Route
     data object Settings : Route
 }
 
@@ -120,7 +122,11 @@ data class PlayRequest(
     val startMs: Long,
     val backTo: Vod,
     /** 同一条线路里「后面还没播的集」，播完自动接上；单集影片为空 */
-    val queue: List<Episode> = emptyList()
+    val queue: List<Episode> = emptyList(),
+    /** 聚合出来的可切换线路清单（同一集在不同源的对应地址） */
+    val slots: List<com.nextmovie.core.model.PlaySlot> = emptyList(),
+    /** 当前正在播的槽位下标 */
+    val slotIndex: Int = 0
 )
 
 @Composable
@@ -135,6 +141,8 @@ private fun AppRoot(repo: AppRepository) {
     var resolveStage by remember { mutableStateOf("正在读取来源播放地址…") }
     var resolving by remember { mutableStateOf(false) }
     var playJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    // 播放器回报的当前位置：换线路时从这里接着播，不丢进度
+    var lastPositionMs by remember { mutableStateOf(0L) }
 
     // 冷启动时把上次保存的配置自动载入，否则每次重启都会停在「还没有导入数据源」
     LaunchedEffect(Unit) {
@@ -213,7 +221,9 @@ private fun AppRoot(repo: AppRepository) {
         episode: Episode,
         startMs: Long = 0L,
         source: Site? = null,
-        queue: List<Episode> = emptyList()
+        queue: List<Episode> = emptyList(),
+        slots: List<com.nextmovie.core.model.PlaySlot> = emptyList(),
+        slotIndex: Int = -1
     ) {
         val activeSite = source ?: site
         if (activeSite == null) {
@@ -232,17 +242,27 @@ private fun AppRoot(repo: AppRepository) {
                 }
                 catch (e: kotlinx.coroutines.CancellationException) { repo.cancelPlayback(activeSite); throw e }
                 catch (e: Exception) {
+                    repo.recordPlayOutcome(activeSite.key, false)
                     Toast.makeText(context, if (e is IllegalStateException && e.message == "网页解析未取得媒体地址，请更换线路") e.message else "来源解析失败，请重试或换一条线路", Toast.LENGTH_LONG).show()
                     return@launch
                 }
             when {
-                result == null ->
+                result == null -> {
+                    repo.recordPlayOutcome(activeSite.key, false)
                     Toast.makeText(context, "解析失败，换个线路试试", Toast.LENGTH_SHORT).show()
+                }
 
-                result.parse != 0 ->
+                result.parse != 0 -> {
+                    repo.recordPlayOutcome(activeSite.key, false)
                     Toast.makeText(context, "该线路未能取得直链，请换一条线路", Toast.LENGTH_LONG).show()
+                }
 
-                else -> route = Route.Player(
+                else -> {
+                    repo.recordPlayOutcome(activeSite.key, true)
+                    val effectiveSlot = if (slotIndex >= 0) slotIndex else slots.indexOfFirst {
+                        it.siteKey == activeSite.key && it.episodeUrl == episode.url
+                    }
+                    route = Route.Player(
                     PlayRequest(
                         url = result.url,
                         headers = result.headers,
@@ -258,12 +278,35 @@ private fun AppRoot(repo: AppRepository) {
                         episodeUrl = episode.url,
                         startMs = startMs,
                         backTo = vod,
-                        queue = queue
+                        queue = queue,
+                        slots = slots,
+                        slotIndex = effectiveSlot.coerceAtLeast(0)
                     )
                 )
+                }
             }
             } finally { resolving = false }
         }
+    }
+
+    /** 播放器里换线路：换源重新解析同一集，并从当前时间点接着播。 */
+    fun switchSlot(req: PlayRequest, index: Int) {
+        val slot = req.slots.getOrNull(index) ?: return
+        val target = repo.siteByKey(slot.siteKey)
+        if (target == null) {
+            Toast.makeText(context, "这个来源已经不在配置里了", Toast.LENGTH_SHORT).show()
+            return
+        }
+        playEpisode(
+            vod = req.backTo,
+            line = com.nextmovie.core.model.PlayLine(slot.lineName, listOf(Episode(slot.episodeName, slot.episodeUrl))),
+            episode = Episode(slot.episodeName, slot.episodeUrl),
+            startMs = lastPositionMs.coerceAtLeast(req.startMs),
+            source = target,
+            queue = req.queue,
+            slots = req.slots,
+            slotIndex = index
+        )
     }
 
     /** 首页「继续观看」：用记录里的地址直接续播，不再走搜索。 */
@@ -325,6 +368,8 @@ private fun AppRoot(repo: AppRepository) {
                     },
                     onOpenSettings = { route = Route.Settings },
                     onSearch = { route = Route.Search },
+                    onFavorites = { route = Route.Favorites },
+                    onHistory = { route = Route.History },
                     onResume = { resume(it) },
                     initialFocusIndex = homeFocusIndex,
                     initialTab = homeTab,
@@ -339,10 +384,10 @@ private fun AppRoot(repo: AppRepository) {
             repo = repo,
             site = repo.siteByKey(current.siteKey.orEmpty()) ?: site ?: return,
             initial = current.vod,
-            onPlay = { source, resolvedVod, line, episode, startMs ->
+            onPlay = { source, resolvedVod, line, episode, startMs, slots ->
                 val idx = line.episodes.indexOf(episode)
                 val rest = if (idx >= 0) line.episodes.drop(idx + 1) else emptyList()
-                playEpisode(resolvedVod, line, episode, startMs, source, rest)
+                playEpisode(resolvedVod, line, episode, startMs, source, rest, slots)
             },
             onBack = { route = Route.Home }
         )
@@ -353,7 +398,13 @@ private fun AppRoot(repo: AppRepository) {
             headers = current.req.headers,
             parse = current.req.parse,
             startPositionMs = current.req.startMs,
-            onProgress = { position, duration -> recordProgress(current.req, position, duration) },
+            onProgress = { position, duration ->
+                lastPositionMs = position
+                recordProgress(current.req, position, duration)
+            },
+            slots = current.req.slots,
+            currentSlot = current.req.slotIndex,
+            onSwitchSlot = { index -> switchSlot(current.req, index) },
             nextEpisodeName = current.req.queue.firstOrNull()?.name,
             onPlayNext = {
                 val next = current.req.queue.firstOrNull() ?: return@PlayerScreen
@@ -372,7 +423,19 @@ private fun AppRoot(repo: AppRepository) {
         Route.Search -> SearchScreen(
             repo = repo,
             site = site ?: return,
-            onOpenDetail = { route = Route.Detail(it) },
+            onOpenDetail = { foundSite, vod -> route = Route.Detail(vod, foundSite.key) },
+            onBack = { route = Route.Home }
+        )
+
+        Route.Favorites -> com.nextmovie.ui.library.FavoritesScreen(
+            repo = repo,
+            onOpenDetail = { foundSite, vod -> route = Route.Detail(vod, foundSite.key) },
+            onBack = { route = Route.Home }
+        )
+
+        Route.History -> com.nextmovie.ui.library.HistoryScreen(
+            repo = repo,
+            onResume = { resume(it) },
             onBack = { route = Route.Home }
         )
 

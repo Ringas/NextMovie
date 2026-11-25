@@ -95,3 +95,34 @@ HUD 显示 `00:29 / 1:53:55 / -1:53:26` 与「下一集：20261022-02」。截�
 
 结论：**64 位下 `port = -1` 的问题在当前最新代码上已不再复现**，真实插件源可正常起播。
 截图：`12-latest64-home.jpg`、`13-latest64-player.jpg`、`14-latest64-hud.jpg`。
+
+## 八、v0.6.13-dev（vc29）：收藏 / 独立历史 / 聚合优选 / 播放器换线
+
+本轮把"聚合"从搜索页前移到**详情页**：进详情页即以片名并发检索多个可搜索源，按
+「线路画质词（4K/蓝光/1080/高清/标清）+ 首集容器（mp4/m3u8）+ 剧集完整度 + 该源历史播放成功率
++ CMS 直连修正」打分排序（`core/match/SourceRanker.kt`），默认自动选中最高分源与最高分线路；
+播放器侧把这一集的各源地址收成可切换清单（`PlaySlot`），菜单键呼出线路面板并按同分排序；
+观看进度改为**按片名归一化去重**（`TitleMatcher.normalize`），换源/换线路后仍是同一条记录。
+
+| 用例 | 结果 | 证据 |
+| --- | --- | --- |
+| 首页新增「收藏 / 历史」导航 | 通过 | `15-home-fav-history.jpg` |
+| 详情页自动聚合 5 个源并默认选最优（`detail-partial 649ms sources=1` → `detail-ready 4642ms sources=5`） | 通过 | `16-detail-aggregate.jpg` |
+| 详情页「☆ 收藏」写入 `files/favorites.json`（`site/vod/name/pic/remark/year/at`） | 通过 | 截图 + 落盘原文 |
+| 收藏页网格、空态、点击回到对应源详情 | 通过 | `19-favorites.jpg` |
+| 独立历史页：进度条、集名、源标签、相对时间、单条移除、清空全部 | 通过 | `20-history.jpg` |
+| 多源聚合搜索：`love` → 106 条 / 12/12 源，按源分组 + 命中数 + 进度条 + 自动聚焦首张海报 | 通过 | `21-search-aggregate.jpg` |
+| 播放器线路面板（`线路 · 5 个来源聚合`，↑↓ 选择 / OK 切换 / 返回关闭） | 通过 | `17-player-lines.jpg` |
+| 线路切换：切到「电影天堂」后 `raw-url=https://play.dyttzyv.com/...m3u8`，从 01:06 续播，HUD 显示 `线路 2/5` | 通过 | `18-player-switched.jpg` |
+| 32 位包（`primaryCpuAbi=armeabi-v7a`）启动 + 首页 | 通过 | `22-v7a-home.jpg` |
+
+环境：Android 11 模拟器（API 30 / 1920×1080 / density 320 / abilist 含 arm64-v8a），
+配置 `https://szyyds.cn/tv/x.json`（62 站，9 个可搜索影视源），当前源 `影视 | 量子[直连]`。
+构建：`./scripts/build-tv.sh` →
+
+- `dist/NextMovie-0.6.13-dev-vc29-arm64-v8a.apk`（sha256 `0026d683…c992ec9`）
+- `dist/NextMovie-0.6.13-dev-vc29-armeabi-v7a.apk`（sha256 `b1a55337…723f03f7`）
+
+已知边界：打分只用电台名/地址容器/集数/成功率等**可观测信号**，不读取视频码率；
+同一部片各源集数不同时按集序号对齐，缺集的源不会出现在线路面板里；
+`cms` 源搜索命中的别名（如「Love Live! 虹咲」）仍按标题相似度阈值 0.80 过滤，避免贴错片。

@@ -93,6 +93,8 @@ fun HomeScreen(
     onOpenDetail: (Vod) -> Unit,
     onOpenSettings: () -> Unit,
     onSearch: () -> Unit = {},
+    onFavorites: () -> Unit = {},
+    onHistory: () -> Unit = {},
     onResume: (HistoryEntry) -> Unit = {},
     initialFocusIndex: Int = 0,
     initialTab: Int = 0,
@@ -288,7 +290,14 @@ fun HomeScreen(
                 .fillMaxSize()
                 .padding(horizontal = 40.dp, vertical = 24.dp)
         ) {
-            TopBar(site = site, status = repo.configStatus(), onSearch = onSearch, onOpenSettings = onOpenSettings)
+            TopBar(
+                site = site,
+                status = repo.configStatus(),
+                onSearch = onSearch,
+                onFavorites = onFavorites,
+                onHistory = onHistory,
+                onOpenSettings = onOpenSettings
+            )
             Spacer(Modifier.height(10.dp))
             if (hero != null) {
                 HeroPanel(hero, onOpen = { onOpenDetail(hero) }, onSearch = onSearch)
@@ -364,6 +373,8 @@ private fun TopBar(
     site: Site,
     status: AppRepository.ConfigStatus?,
     onSearch: () -> Unit,
+    onFavorites: () -> Unit,
+    onHistory: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -391,6 +402,10 @@ private fun TopBar(
         NavPill("推荐", active = true, onClick = {})
         Spacer(Modifier.width(6.dp))
         NavPill("搜索", active = false, onClick = onSearch)
+        Spacer(Modifier.width(6.dp))
+        NavPill("收藏", active = false, onClick = onFavorites)
+        Spacer(Modifier.width(6.dp))
+        NavPill("历史", active = false, onClick = onHistory)
         Spacer(Modifier.width(6.dp))
         NavPill("设置", active = false, onClick = onOpenSettings)
         Spacer(Modifier.weight(1f))

@@ -11,6 +11,7 @@ import com.nextmovie.core.config.Site
 import com.nextmovie.core.config.SiteSelector
 import com.nextmovie.core.history.HistoryStore
 import com.nextmovie.core.match.TitleMatcher
+import com.nextmovie.core.model.PlayLine
 import com.nextmovie.core.model.PlayResult
 import com.nextmovie.core.model.Vod
 import com.nextmovie.core.model.VodDetail
@@ -28,6 +29,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.io.File
 
 /**
@@ -46,6 +49,7 @@ class AppRepository(private val context: Context) {
 
     private val lists = com.nextmovie.core.cache.RequestCache<String, List<Vod>>(120_000, 48, cacheIf = { it.isNotEmpty() })
     private val details = com.nextmovie.core.cache.RequestCache<String, VodDetail?>(120_000, 128, cacheIf = { it != null && it.lines.isNotEmpty() })
+    private val aggregations = com.nextmovie.core.cache.RequestCache<String, AggregatedDetail?>(180_000, 32, cacheIf = { it != null && it.sources.isNotEmpty() })
     private val homeSnapshots = com.nextmovie.core.cache.HomeSnapshotStore(File(context.filesDir, "home-snapshots"))
     private val warmSites = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val prefetchScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
@@ -54,6 +58,7 @@ class AppRepository(private val context: Context) {
     private val snapshot = File(context.filesDir, "config-snapshot.json")
 
     val history = HistoryStore(File(context.filesDir, "history.json"))
+    val favorites = com.nextmovie.core.history.FavoriteStore(File(context.filesDir, "favorites.json"))
 
     private val posterCache = PosterCache(File(context.filesDir, "poster-cache"))
     val poster = PosterResolver(tmdb, BilibiliPoster(http), posterCache)
@@ -352,6 +357,88 @@ class AppRepository(private val context: Context) {
         }
     }
 
+    /**
+     * 详情页聚合：以片名为线索，把所有可搜索源并发打一遍，拿到各自完整线路后按质量排序。
+     * 第一个回来的结果立刻回调（页面不用等全网），全部结束后给出去重排序后的终值。
+     */
+    suspend fun aggregateDetail(
+        site: Site,
+        vod: Vod,
+        crossSiteLimit: Int = 8,
+        onPartial: (AggregatedDetail) -> Unit = {}
+    ): AggregatedDetail? {
+        val keyword = vod.name.trim()
+        val cacheKey = "agg|${site.runtimeKey}|${vod.id}|$keyword"
+        return aggregations.get(cacheKey) { resolveAggregate(site, vod, keyword, crossSiteLimit, onPartial) }
+    }
+
+    private suspend fun resolveAggregate(
+        site: Site,
+        vod: Vod,
+        keyword: String,
+        crossSiteLimit: Int,
+        onPartial: (AggregatedDetail) -> Unit
+    ): AggregatedDetail? = coroutineScope {
+        val candidates = buildList {
+            add(site)
+            addAll(
+                sites.filter { it.isPlayable && it.searchable && it.runtimeKey != site.runtimeKey }
+                    .sortedBy { if (it.isCms) 0 else 1 }
+                    .take(crossSiteLimit)
+            )
+        }
+        val replies = Channel<SourceDetail?>(candidates.size.coerceAtLeast(1))
+        val gate = Semaphore(4)
+        candidates.mapIndexed { index, candidate ->
+            launch(kotlinx.coroutines.Dispatchers.IO) {
+                gate.withPermit {
+                    val hit = withTimeoutOrNull(if (index == 0) 8_000L else 10_000L) {
+                        detailAttempt {
+                            val resolved: VodDetail? =
+                                if (index == 0 && vod.id.isNotBlank()) detail(candidate, vod.id, altId = vod.name)
+                                else keyword.takeIf { it.isNotBlank() }
+                                    ?.let { matchingVideo(candidate, it, vod.displayYear) }
+                                    ?.let { detail(candidate, it.id, it.name) }
+                            resolved?.takeIf { it.lines.isNotEmpty() }?.let { resolvedDetail ->
+                                val quality = com.nextmovie.core.match.SourceRanker.sourceScore(
+                                    candidate,
+                                    resolvedDetail,
+                                    sourceSuccessRate(candidate.key),
+                                    candidate.runtimeKey == site.runtimeKey
+                                )
+                                SourceDetail(
+                                    site = candidate,
+                                    detail = resolvedDetail,
+                                    score = quality.score,
+                                    badge = quality.label,
+                                    bestLineIndex = com.nextmovie.core.match.SourceRanker.bestLineIndex(resolvedDetail)
+                                )
+                            }
+                        }
+                    }
+                    replies.send(hit)
+                }
+            }
+        }
+        val collected = ArrayList<SourceDetail>()
+        var partialSent = false
+        repeat(candidates.size) {
+            val hit = replies.receive()
+            if (hit == null) return@repeat
+            if (collected.any { it.site.runtimeKey == hit.site.runtimeKey }) return@repeat
+            collected += hit
+            if (!partialSent) {
+                partialSent = true
+                runCatching { onPartial(AggregatedDetail(collected.sortedByDescending { it.score })) }
+            }
+        }
+        replies.close()
+        val sorted = collected.sortedWith(
+            compareByDescending<SourceDetail> { it.score }.thenByDescending { it.detail.lines.size }
+        )
+        AggregatedDetail(sorted).takeIf { it.sources.isNotEmpty() }
+    }
+
     private suspend fun matchingVideo(site: Site, keyword: String, year: String): Vod? =
         search(site, keyword).firstOrNull {
             TitleMatcher.score(keyword, year, it.name, it.year) >= TitleMatcher.ACCEPT_THRESHOLD
@@ -368,6 +455,54 @@ class AppRepository(private val context: Context) {
     suspend fun search(site: Site, keyword: String): List<Vod> {
         if (!site.searchable) return emptyList()
         return if (site.isCms) CmsSiteClient(http, site).search(keyword) else spiderHost.search(site, keyword)
+    }
+
+    /**
+     * 聚合搜索的候选源：当前配置里「可播放 + 声明支持搜索」的站点。
+     * 顺序优先当前站点，让用户最可能想看的结果先到。
+     */
+    /**
+     * 一次聚合的产物：某个源给出的完整详情 + 排序分。
+     * `badge` 是给人看的画质标签（4K 蓝光 / 1080P / 全 20 集…）。
+     */
+    data class SourceDetail(
+        val site: Site,
+        val detail: VodDetail,
+        val score: Int,
+        val badge: String,
+        val bestLineIndex: Int
+    )
+
+    /** 聚合结果按分倒序，第一个就是「自动优选」的源。 */
+    data class AggregatedDetail(val sources: List<SourceDetail>) {
+        val best: SourceDetail? get() = sources.firstOrNull()
+        val vod: Vod? get() = best?.detail?.vod
+        val bestLine: PlayLine? get() = best?.let {
+            it.detail.lines.getOrNull(it.bestLineIndex) ?: it.detail.lines.firstOrNull()
+        }
+    }
+
+    /** 本站历史播放成功率（Laplace 平滑，没播过时是 0.5）。 */
+    fun sourceSuccessRate(siteKey: String): Double {
+        if (siteKey.isBlank()) return 0.5
+        val ok = prefs.getInt("stat_ok_$siteKey", 0)
+        val fail = prefs.getInt("stat_fail_$siteKey", 0)
+        return (ok + 1.0) / (ok + fail + 2.0)
+    }
+
+    /** 起播成功/失败都要回写：聚合排序靠这个逐步收敛到"哪个源真的能播"。 */
+    fun recordPlayOutcome(siteKey: String, ok: Boolean) {
+        if (siteKey.isBlank()) return
+        val k = (if (ok) "stat_ok_" else "stat_fail_") + siteKey
+        prefs.edit().putInt(k, prefs.getInt(k, 0) + 1).apply()
+    }
+
+    fun searchableSites(limit: Int = 12): List<Site> {
+        val all = sites.filter { it.searchable && it.isPlayable }
+        val current = currentSite
+        return (all.filter { it.runtimeKey == current?.runtimeKey } + all.filter { it.runtimeKey != current?.runtimeKey })
+            .distinctBy { it.runtimeKey }
+            .take(limit)
     }
 
     /**

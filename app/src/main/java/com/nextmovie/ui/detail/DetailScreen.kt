@@ -74,85 +74,155 @@ fun DetailScreen(
     repo: AppRepository,
     site: Site,
     initial: Vod,
-    onPlay: (source: Site, vod: Vod, line: PlayLine, episode: Episode, startMs: Long) -> Unit,
+    onPlay: (
+        source: Site,
+        vod: Vod,
+        line: PlayLine,
+        episode: Episode,
+        startMs: Long,
+        slots: List<com.nextmovie.core.model.PlaySlot>
+    ) -> Unit,
     onBack: () -> Unit
 ) {
     val screenStartedAt = remember { System.nanoTime() }
     val context = LocalContext.current
-    var hit by remember { mutableStateOf<AppRepository.DetailHit?>(null) }
-    var detail by remember { mutableStateOf<VodDetail?>(null) }
+    var agg by remember { mutableStateOf<AppRepository.AggregatedDetail?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var sourceIndex by remember { mutableIntStateOf(0) }
     var lineIndex by remember { mutableIntStateOf(0) }
     var loading by remember { mutableStateOf(true) }
-    var hint by remember { mutableStateOf("正在读取详情…") }
-    var forced by remember { mutableStateOf<Site?>(null) }
+    var hint by remember { mutableStateOf("正在聚合全网来源…") }
+    var manual by remember { mutableStateOf(false) }
     val playFocus = remember { androidx.compose.ui.focus.FocusRequester() }
     var reload by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(initial.id, site.key, forced?.key, reload) {
+    // 进详情页就自动聚合：第一个回来的源先渲染，全部回来后按画质/成功率重排，默认选最优
+    LaunchedEffect(initial.id, site.key, reload) {
         loading = true
-        hint = "正在读取详情…"
-        hit = null
-        detail = null
+        hint = "正在聚合全网来源…"
+        agg = null
         error = null
+        sourceIndex = 0
         lineIndex = 0
-        fun showResult(found: AppRepository.DetailHit?) {
-            if (loading) {
-                android.util.Log.i("NextMovieTiming", "detail-ready " + (System.nanoTime() - screenStartedAt) / 1_000_000 + "ms")
-                hit = found
-                detail = found?.detail
-                loading = false
-            } else {
-                hit = found
-            }
-        }
-        runCatching {
-            repo.detailPreferring(forced ?: site, initial, preferSearch = forced != null) { found ->
-                showResult(found)
-                hint = "已改用「${found.site.name}」的线路"
-            }
-        }
-            .onSuccess { found ->
-                kotlin.coroutines.coroutineContext.ensureActive()
-                showResult(found)
-                when {
-                    found == null -> error = "所有站点都没有返回这部片的详情"
-                    found.detail.lines.isEmpty() -> error = "「${found.site.name}」没有给出播放线路"
-                    found.borrowed -> hint = "「${site.name}」没有详情，已改用「${found.site.name}」的线路"
-                    else -> hint = ""
+        manual = false
+        val result = runCatching {
+            repo.aggregateDetail(site, initial) { partial ->
+                if (agg == null && partial.sources.isNotEmpty()) {
+                    android.util.Log.i(
+                        "NextMovieTiming",
+                        "detail-partial ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms sources=${partial.sources.size}"
+                    )
+                    agg = partial
+                    lineIndex = partial.best?.bestLineIndex ?: 0
+                    loading = false
+                    hint = "已找到「${partial.best?.site?.name ?: site.name}」，继续比对其它来源…"
                 }
             }
-            .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it; error = com.nextmovie.core.net.FriendlyError.describe(it) }
-        loading = false
+        }
+        result.onFailure {
+            if (it is kotlinx.coroutines.CancellationException) throw it
+            error = com.nextmovie.core.net.FriendlyError.describe(it)
+            loading = false
+        }
+        val full = result.getOrNull()
+        if (full == null || full.sources.isEmpty()) {
+            loading = false
+            if (agg == null) error = "所有站点都没有返回这部片的可用线路"
+        } else {
+            android.util.Log.i(
+                "NextMovieTiming",
+                "detail-ready ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms sources=${full.sources.size}"
+            )
+            val previousBest = agg?.best?.site?.key
+            agg = full
+            val best = full.best
+            if (!manual) {
+                sourceIndex = 0
+                lineIndex = best?.bestLineIndex ?: 0
+            }
+            loading = false
+            hint = buildString {
+                append("已聚合 ${full.sources.size} 个来源 · 自动选中「${best?.site?.name ?: site.name}」")
+                best?.badge?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
+                if (previousBest != null && previousBest != best?.site?.key) append("（已自动切到更优源）")
+            }
+        }
     }
 
-    // Artwork must never delay the episode list or the play action.
-    LaunchedEffect(detail?.vod?.id) {
-        val current = detail ?: return@LaunchedEffect
-        val enriched = repo.enrichPoster(current.vod, detail = true)
-        if (detail?.vod?.id == current.vod.id) detail = current.copy(vod = enriched)
+    // 海报增强只作用在最优源，避免为了一部片打十几次 TMDB/B站
+    LaunchedEffect(agg?.best?.site?.key, agg?.best?.detail?.vod?.id) {
+        val currentAgg = agg ?: return@LaunchedEffect
+        val best = currentAgg.best ?: return@LaunchedEffect
+        val enriched = repo.enrichPoster(best.detail.vod, detail = true)
+        if (enriched !== best.detail.vod) {
+            agg = currentAgg.copy(
+                sources = currentAgg.sources.map {
+                    if (it.site.key == best.site.key) it.copy(detail = it.detail.copy(vod = enriched)) else it
+                }
+            )
+        }
     }
 
-    val active: Site = hit?.site ?: site
-    val vod = detail?.vod ?: initial
-    val lines: List<PlayLine> = detail?.lines.orEmpty()
-    val line = lines.getOrElse(lineIndex) { lines.firstOrNull() }
+    val sources = agg?.sources.orEmpty()
+    val safeSourceIndex = sourceIndex.coerceIn(0, sources.lastIndex.coerceAtLeast(0))
+    val activeSource = sources.getOrNull(safeSourceIndex)
+    val active: Site = activeSource?.site ?: site
+    val vod = activeSource?.detail?.vod ?: initial
+    val lines: List<PlayLine> = activeSource?.detail?.lines.orEmpty()
+    val line: PlayLine? = lines.getOrNull(lineIndex)
+        ?: activeSource?.let { src -> lines.getOrNull(src.bestLineIndex) }
+        ?: lines.firstOrNull()
+
 
     // 本机看过这部片且没看完时，给一个一键续播入口
     LaunchedEffect(lines.isNotEmpty()) {
         if (lines.isNotEmpty()) { kotlinx.coroutines.delay(100); runCatching { playFocus.requestFocus() } }
     }
 
-    val resumeEntry = remember(vod.id, detail) {
-        repo.history.find(active.key, vod.id)?.takeIf { it.resumable && it.episodeUrl.isNotBlank() }
+    // 收藏状态跟着「当前生效源 + 影片 id」走：换源后按钮会自动反映该源是否已收藏
+    var isFavorite by remember { mutableStateOf(repo.favorites.contains(active.key, vod.id)) }
+    LaunchedEffect(active.key, vod.id, agg) {
+        isFavorite = repo.favorites.contains(active.key, vod.id)
+    }
+
+    // 进度按「片名」取，所以换了源/线路仍然是同一部片的进度
+    val resumeEntry = remember(vod.name, agg) {
+        (repo.history.findByName(vod.name) ?: repo.history.find(active.key, vod.id))
+            ?.takeIf { it.resumable && it.episodeUrl.isNotBlank() }
+    }
+
+    /** 把「当前这一集」在所有已聚合源里的对应集收成可切换清单，顺序与自动优选一致。 */
+    fun slotsOf(episodeIndex: Int, episode: Episode): List<com.nextmovie.core.model.PlaySlot> {
+        val out = ArrayList<com.nextmovie.core.model.PlaySlot>(sources.size)
+        sources.forEach { src ->
+            val best = src.detail.lines.getOrNull(src.bestLineIndex) ?: src.detail.lines.firstOrNull() ?: return@forEach
+            val ep = best.episodes.getOrNull(episodeIndex)
+                ?: best.episodes.firstOrNull { it.name == episode.name }
+                ?: return@forEach
+            out += com.nextmovie.core.model.PlaySlot(
+                siteKey = src.site.key,
+                siteName = src.site.name,
+                lineName = best.name,
+                badge = src.badge,
+                score = src.score,
+                episodeName = ep.name,
+                episodeUrl = ep.url
+            )
+        }
+        return out
     }
 
     fun resume() {
         val entry = resumeEntry ?: return
-        val target = lines.firstOrNull { it.name == entry.playFrom } ?: line ?: return
-        val ep = target.episodes.firstOrNull { it.url == entry.episodeUrl }
+        val src = sources.firstOrNull { it.site.key == entry.siteKey }
+        val srcLines = src?.detail?.lines ?: lines
+        val srcVod = src?.detail?.vod ?: vod
+        val srcSite = src?.site ?: active
+        val target = srcLines.firstOrNull { it.name == entry.playFrom } ?: srcLines.firstOrNull() ?: return
+        val idx = target.episodes.indexOfFirst { it.url == entry.episodeUrl }
+        val ep = target.episodes.getOrNull(idx)
             ?: Episode(entry.episodeName.ifBlank { "继续观看" }, entry.episodeUrl)
-        onPlay(active, vod, target, ep, entry.positionMs)
+        onPlay(srcSite, srcVod, target, ep, entry.positionMs, slotsOf(idx.coerceAtLeast(0), ep))
     }
 
     Box(modifier = Modifier.fillMaxSize().background(Tokens.Bg)) {
@@ -227,9 +297,25 @@ fun DetailScreen(
                         .tvClickable(onClick = onBack, corner = Tokens.Corner.pill)
                         .padding(horizontal = 16.dp, vertical = 8.dp)
                 )
+                Spacer(Modifier.width(10.dp))
+                FavoritePill(
+                    active = isFavorite,
+                    onClick = {
+                        isFavorite = repo.favorites.toggle(
+                            com.nextmovie.core.history.FavoriteEntry(
+                                siteKey = active.key,
+                                vodId = vod.id,
+                                name = vod.name,
+                                pic = vod.displayPic,
+                                remark = vod.remark,
+                                year = vod.displayYear
+                            )
+                        )
+                    }
+                )
                 Spacer(Modifier.weight(1f))
                 Text(
-                    text = if (hit == null) site.name else "${active.name}  ·  ${lines.size} 条线路",
+                    text = if (sources.isEmpty()) site.name else "${active.name} · ${sources.size} 源 / ${lines.size} 线路",
                     color = Tokens.TextFaint,
                     style = MaterialTheme.typography.labelSmall
                 )
@@ -261,7 +347,9 @@ fun DetailScreen(
                         modifier = Modifier.focusRequester(playFocus),
                         enabled = line != null && line.episodes.isNotEmpty(),
                         onClick = {
-                            line?.episodes?.firstOrNull()?.let { onPlay(active, vod, line, it, 0L) }
+                            line?.episodes?.firstOrNull()?.let { first ->
+                                onPlay(active, vod, line, first, 0L, slotsOf(0, first))
+                            }
                         }
                     )
                     if (resumeEntry != null) {
@@ -271,8 +359,7 @@ fun DetailScreen(
                             label = "继续观看 · ${resumeEntry.episodeName.ifBlank { "上次位置" }}${if (pct > 0) "  $pct%" else ""}",
                             onClick = { resume() }
                         )
-                    }
-                }
+                    }                }
 
                 Spacer(Modifier.width(36.dp))
 
@@ -336,15 +423,16 @@ fun DetailScreen(
                                     modifier = Modifier.padding(bottom = 10.dp)
                                 )
                             }
-                            // 换源：其它站点也有这部片，点一下直接换线路（比返回重搜快得多）
-                            val alts = buildList {
-                                if (hit?.site != null) add(hit!!.site to true)
-                                hit?.alternatives?.forEach { add(it to false) }
-                            }
-                            if (alts.size > 1) {
-                                SourceRow(
-                                    sources = alts,
-                                    onPick = { s -> if (s.key != active.key) forced = s }
+                            // 已聚合的源：按「画质 + 历史成功率」排序，第一个就是自动优选的
+                            if (sources.size > 1) {
+                                SourceChips(
+                                    sources = sources,
+                                    selected = safeSourceIndex,
+                                    onPick = { picked ->
+                                        manual = true
+                                        sourceIndex = picked
+                                        lineIndex = sources[picked].bestLineIndex
+                                    }
                                 )
                                 Spacer(Modifier.height(12.dp))
                             }
@@ -354,7 +442,10 @@ fun DetailScreen(
                             }
                             EpisodeGrid(
                                 line = line!!,
-                                onPlay = { ep -> onPlay(active, vod, line, ep, 0L) }
+                                onPlay = { ep ->
+                                    val idx = line.episodes.indexOf(ep).coerceAtLeast(0)
+                                    onPlay(active, vod, line, ep, 0L, slotsOf(idx, ep))
+                                }
                             )
                         }
                     }
@@ -401,6 +492,26 @@ private fun PrimaryButton(label: String, enabled: Boolean, modifier: Modifier = 
 }
 
 @Composable
+private fun FavoritePill(active: Boolean, onClick: () -> Unit) {
+    Text(
+        text = if (active) "★ 已收藏" else "☆ 收藏",
+        color = if (active) Tokens.Accent else Tokens.TextDim,
+        style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier
+            .clip(RoundedCornerShape(Tokens.Corner.pill))
+            .background(if (active) Tokens.AccentDim else Tokens.Surface)
+            .border(
+                width = if (active) 2.dp else 1.dp,
+                color = if (active) Tokens.Accent else Tokens.Stroke,
+                shape = RoundedCornerShape(Tokens.Corner.pill)
+            )
+            .mouseFocusable()
+            .tvClickable(onClick = onClick, corner = Tokens.Corner.pill)
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+    )
+}
+
+@Composable
 private fun GhostButton(label: String, onClick: () -> Unit) {
     Text(
         text = label,
@@ -443,11 +554,15 @@ private fun ErrorCard(message: String, onRetry: () -> Unit) {
 }
 
 @Composable
-private fun SourceRow(sources: List<Pair<Site, Boolean>>, onPick: (Site) -> Unit) {
+private fun SourceChips(
+    sources: List<AppRepository.SourceDetail>,
+    selected: Int,
+    onPick: (Int) -> Unit
+) {
     val state = rememberLazyListState()
     Column {
         Text(
-            text = "换源",
+            text = "来源 · 已按画质与历史成功率排序",
             color = Tokens.Accent,
             style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.06.sp),
             modifier = Modifier.padding(bottom = 8.dp)
@@ -457,24 +572,46 @@ private fun SourceRow(sources: List<Pair<Site, Boolean>>, onPick: (Site) -> Unit
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.mouseWheel(state, horizontal = true)
         ) {
-            itemsIndexed(sources) { _, item ->
-                val (s, current) = item
-                Text(
-                    text = if (current) "● ${s.name}" else s.name,
-                    color = if (current) Tokens.Accent else Tokens.TextDim,
-                    style = MaterialTheme.typography.labelSmall,
+            itemsIndexed(sources) { index, src ->
+                val isActive = index == selected
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .clip(RoundedCornerShape(Tokens.Corner.pill))
-                        .background(if (current) Tokens.AccentDim else Tokens.Surface)
+                        .background(if (isActive) Tokens.AccentDim else Tokens.Surface)
                         .border(
-                            width = 1.dp,
-                            color = if (current) Tokens.Accent.copy(alpha = 0.55f) else Tokens.Stroke,
+                            width = if (isActive) 2.dp else 1.dp,
+                            color = if (isActive) Tokens.Accent else Tokens.Stroke,
                             shape = RoundedCornerShape(Tokens.Corner.pill)
                         )
                         .mouseFocusable()
-                        .tvClickable(onClick = { onPick(s) }, corner = Tokens.Corner.pill)
+                        .tvClickable(onClick = { onPick(index) }, corner = Tokens.Corner.pill)
                         .padding(horizontal = 14.dp, vertical = 7.dp)
-                )
+                ) {
+                    if (index == 0) {
+                        Text(
+                            text = "最优",
+                            color = Tokens.OnAccent,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(Tokens.Accent)
+                                .padding(horizontal = 7.dp, vertical = 2.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text(
+                        text = "${if (isActive) "● " else ""}${src.site.name}",
+                        color = if (isActive) Tokens.Accent else Tokens.TextDim,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = src.badge,
+                        color = Tokens.TextFaint,
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro)
+                    )
+                }
             }
         }
     }

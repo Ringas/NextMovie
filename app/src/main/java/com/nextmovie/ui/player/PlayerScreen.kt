@@ -46,6 +46,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -93,6 +94,10 @@ fun PlayerScreen(
     nextEpisodeName: String? = null,
     /** 播完自动接上下一集；调用方负责把新一集重新解析成播放地址 */
     onPlayNext: () -> Unit = {},
+    /** 聚合出来的可切换线路（同一集在不同源的对应地址），按优选顺序 */
+    slots: List<com.nextmovie.core.model.PlaySlot> = emptyList(),
+    currentSlot: Int = 0,
+    onSwitchSlot: (Int) -> Unit = {},
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
@@ -115,6 +120,9 @@ fun PlayerScreen(
     val rootFocus = remember { FocusRequester() }
     val toolbarFocus = remember { FocusRequester() }
     var controlsVisible by remember { mutableStateOf(false) }
+    // 线路切换面板：不抢 Compose 焦点（播放器根节点独占按键），方向键在这里走自己的游标
+    var pickerVisible by remember { mutableStateOf(false) }
+    var pickerIndex by remember { androidx.compose.runtime.mutableIntStateOf(currentSlot.coerceIn(0, slots.lastIndex.coerceAtLeast(0))) }
     // 控制条是按需组合的，慢设备上 50ms 内还没进组合树，直接 requestFocus 会抛
     // 「FocusRequester is not initialized」把播放器进程带崩；这里等组合完成再抢焦点。
     LaunchedEffect(controlsVisible) {
@@ -302,6 +310,23 @@ fun PlayerScreen(
             // 键盘调试：空格/回车暂停，←→ 快退快进；Esc 由 Activity 统一处理
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                if (pickerVisible) {
+                    when (event.key) {
+                        Key.DirectionUp -> {
+                            pickerIndex = (pickerIndex - 1).coerceAtLeast(0); true
+                        }
+                        Key.DirectionDown -> {
+                            pickerIndex = (pickerIndex + 1).coerceAtMost(slots.lastIndex.coerceAtLeast(0)); true
+                        }
+                        Key.Enter, Key.DirectionCenter -> {
+                            pickerVisible = false
+                            if (pickerIndex != currentSlot) onSwitchSlot(pickerIndex)
+                            true
+                        }
+                        Key.Back -> { pickerVisible = false; true }
+                        else -> true
+                    }
+                }
                 hudVisible = true
                 hudSignal++
                 when (event.key) {
@@ -320,6 +345,13 @@ fun PlayerScreen(
                             controlsVisible = true
                             true
                         }
+                    }
+                    Key.Menu, Key.L -> {
+                        if (slots.size > 1) {
+                            pickerIndex = currentSlot.coerceIn(0, slots.lastIndex)
+                            pickerVisible = true
+                            true
+                        } else false
                     }
                     Key.S -> {
                         val steps = listOf(1f, 1.25f, 1.5f, 2f)
@@ -342,6 +374,17 @@ fun PlayerScreen(
             },
             modifier = Modifier.fillMaxSize()
         )
+
+        if (pickerVisible) {
+            LinePicker(
+                slots = slots,
+                current = currentSlot,
+                cursor = pickerIndex,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 40.dp)
+            )
+        }
 
         if (controlsVisible) {
             Row(
@@ -446,6 +489,7 @@ fun PlayerScreen(
                         }
                         Spacer(Modifier.weight(1f))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (slots.size > 1) StatusPill("线路 ${currentSlot + 1}/${slots.size} · 菜单键切换", Tokens.Text)
                             if (speed > 1f) StatusPill("${speed}×", Tokens.Accent)
                             if (resumedHint) StatusPill("已续播", Tokens.Text)
                         }
@@ -582,6 +626,74 @@ fun PlayerScreen(
                             )
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 线路面板：按聚合排序展示，标出当前线路与画质标签，方向键游标 + OK 切换。
+ * 用纯文本行而不是可聚焦按钮，避免与播放器根节点的按键处理抢焦点。
+ */
+@Composable
+private fun LinePicker(
+    slots: List<com.nextmovie.core.model.PlaySlot>,
+    current: Int,
+    cursor: Int,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .width(360.dp)
+            .clip(RoundedCornerShape(Tokens.Corner.panel))
+            .background(Color(0xF20B0C10))
+            .border(1.dp, Tokens.Accent.copy(alpha = 0.45f), RoundedCornerShape(Tokens.Corner.panel))
+            .padding(horizontal = 20.dp, vertical = 16.dp)
+    ) {
+        Text(
+            text = "线路 · ${slots.size} 个来源聚合",
+            color = Tokens.Accent,
+            style = MaterialTheme.typography.labelMedium
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = "↑↓ 选择 · OK 切换 · 返回关闭",
+            color = Color(0x8FFFFFFF),
+            style = MaterialTheme.typography.labelSmall
+        )
+        Spacer(Modifier.height(12.dp))
+        slots.forEachIndexed { index, slot ->
+            val focused = index == cursor
+            val active = index == current
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 3.dp)
+                    .clip(RoundedCornerShape(Tokens.Radius))
+                    .background(if (focused) Tokens.AccentDim else Color.Transparent)
+                    .padding(horizontal = 10.dp, vertical = 7.dp)
+            ) {
+                Text(
+                    text = if (active) "●" else "○",
+                    color = if (active) Tokens.Accent else Color(0x66F3F0E9),
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "${slot.siteName} · ${slot.lineName}",
+                        color = if (focused || active) Tokens.Text else Tokens.TextDim,
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "${slot.badge} · 分 ${slot.score}" + if (index == 0) " · 最优" else "",
+                        color = Tokens.TextFaint,
+                        style = MaterialTheme.typography.labelSmall
+                    )
                 }
             }
         }

@@ -22,7 +22,10 @@ data class HistoryEntry(
     val updatedAt: Long = System.currentTimeMillis()
 ) {
 
-    val key: String get() = siteKey + "|" + vodId
+    /** 片名归一化后的键：换源/换线路后仍然是同一条记录。 */
+    val nameKey: String get() = com.nextmovie.core.match.TitleMatcher.normalize(name)
+
+    val key: String get() = nameKey.ifBlank { siteKey + "|" + vodId }
 
     /** 0..1；时长未知（HLS 常见）时返回 0，UI 不画进度条。 */
     val progress: Float
@@ -60,11 +63,22 @@ class HistoryStore(private val file: File) {
     fun find(siteKey: String, vodId: String): HistoryEntry? =
         list().firstOrNull { it.siteKey == siteKey && it.vodId == vodId }
 
-    /** 同键覆盖并把该条移到最前；超过上限时淘汰最旧的。 */
+    /** 按片名找进度：用户换了一条源/线路，看到的仍然是「上次看到哪儿」。 */
+    fun findByName(name: String): HistoryEntry? {
+        val key = com.nextmovie.core.match.TitleMatcher.normalize(name)
+        if (key.isBlank()) return null
+        return list().firstOrNull { it.nameKey == key }
+    }
+
+    /** 同片名覆盖（换源、换线路都合并成一条）并移到最前；超过上限时淘汰最旧的。 */
     fun upsert(entry: HistoryEntry) {
         synchronized(lock) {
             val items = load().toMutableList()
-            items.removeAll { it.siteKey == entry.siteKey && it.vodId == entry.vodId }
+            val title = entry.nameKey
+            items.removeAll {
+                if (title.isNotBlank()) it.nameKey == title
+                else it.siteKey == entry.siteKey && it.vodId == entry.vodId
+            }
             items.add(0, entry)
             while (items.size > MAX_ENTRIES) items.removeAt(items.lastIndex)
             save(items)
