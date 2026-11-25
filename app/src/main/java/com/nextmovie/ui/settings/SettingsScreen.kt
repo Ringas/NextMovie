@@ -52,6 +52,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nextmovie.core.AppRepository
+import com.nextmovie.ui.player.engine.DecodeMode
+import com.nextmovie.ui.player.engine.NmRenderersFactory
+import com.nextmovie.ui.player.engine.PlayerEngineType
+import com.nextmovie.ui.player.engine.PlayerPrefs
+import com.nextmovie.ui.player.PlaybackSession
 import com.nextmovie.core.config.Site
 import com.nextmovie.ui.common.BrandLogo
 import com.nextmovie.ui.common.GlassCard
@@ -616,8 +621,13 @@ private fun WebdavCard(repo: AppRepository) {
 
 @Composable
 private fun PlaybackCard(repo: AppRepository) {
+    val context = LocalContext.current
     var autoNext by remember { mutableStateOf(repo.autoNext) }
     var warmed by remember { mutableStateOf(false) }
+    var decodeMode by remember { mutableStateOf(PlayerPrefs.decodeMode(context)) }
+    var autoSoft by remember { mutableStateOf(PlayerPrefs.autoSoftOnDecodeError(context)) }
+    var autoLine by remember { mutableStateOf(PlayerPrefs.autoLineOnError(context)) }
+    var danmaku by remember { mutableStateOf(PlayerPrefs.danmakuEnabled(context)) }
     GlassCard(
         title = "播放与体验",
         subtitle = "对齐 Marco：从播放器退回详情页，影片仍在详情页底层继续播放"
@@ -625,6 +635,45 @@ private fun PlaybackCard(repo: AppRepository) {
         ToggleRow("自动连播下一集", "播完弹出 5 秒倒计时并自动进入下一集", autoNext) {
             autoNext = it
             repo.setAutoNext(it)
+        }
+        Spacer(Modifier.height(18.dp))
+        HLine()
+        Spacer(Modifier.height(16.dp))
+        Text("解码模式", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            PlaybackSession.ffmpegNote(),
+            color = Tokens.TextFaint,
+            fontSize = 12.sp
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            DecodeMode.entries.forEach { mode ->
+                val selected = decodeMode == mode
+                TvPill(
+                    text = mode.label,
+                    glass = !selected,
+                    onClick = {
+                        decodeMode = mode
+                        PlayerPrefs.setDecodeMode(context, mode)
+                    }
+                )
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        ToggleRow("解码失败自动切软解", "硬解失败时重建播放器并优先软解重试", autoSoft) {
+            autoSoft = it
+            PlayerPrefs.setAutoSoftOnDecodeError(context, it)
+        }
+        Spacer(Modifier.height(12.dp))
+        ToggleRow("失败自动换线路", "IO/解码仍失败时自动切到下一条聚合线路", autoLine) {
+            autoLine = it
+            PlayerPrefs.setAutoLineOnError(context, it)
+        }
+        Spacer(Modifier.height(12.dp))
+        ToggleRow("弹幕层（实验）", "需引入 DanmakuFlameMaster 后生效", danmaku) {
+            danmaku = it
+            PlayerPrefs.setDanmakuEnabled(context, it)
         }
         Spacer(Modifier.height(18.dp))
         HLine()
@@ -651,7 +700,7 @@ private fun PlaybackCard(repo: AppRepository) {
         }
         Spacer(Modifier.height(18.dp))
         Text(
-            "线路聚合：详情页会按连通性、分辨率把同一影片的多条线路排序，播放器内可随时换源。",
+            "线路聚合：详情页会按连通性、分辨率把同一影片的多条线路排序，播放器内可随时换源。支持 HLS / DASH / 直链；DRM 与第二引擎按依赖可选启用。",
             color = Tokens.TextFaint,
             fontSize = 13.sp
         )

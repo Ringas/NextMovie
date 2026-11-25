@@ -56,6 +56,13 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import com.nextmovie.core.net.PlayerDataSources
 import androidx.media3.exoplayer.ExoPlayer
+
+import com.nextmovie.ui.player.engine.DecodeMode
+import com.nextmovie.ui.player.engine.MediaSourceBuilder
+import com.nextmovie.ui.player.engine.NmRenderersFactory
+import com.nextmovie.ui.player.engine.PlaybackRecovery
+import com.nextmovie.ui.player.engine.PlayerPrefs
+import com.nextmovie.ui.player.drm.DrmSupport
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.lifecycle.Lifecycle
@@ -106,7 +113,11 @@ fun PlayerScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    val player = session?.player ?: remember { ExoPlayer.Builder(context, androidx.media3.exoplayer.DefaultRenderersFactory(context).setEnableDecoderFallback(true)).build() }
+    var decodeMode by remember { mutableStateOf(session?.currentDecodeMode() ?: PlayerPrefs.decodeMode(context)) }
+    var triedSoft by remember { mutableStateOf(session?.triedSoftFallback ?: false) }
+    val player = session?.player ?: remember(decodeMode) {
+        ExoPlayer.Builder(context, NmRenderersFactory.create(context, decodeMode)).build()
+    }
     val lifecycleOwner = LocalLifecycleOwner.current
     val view = LocalView.current
     var requestStarted by remember { mutableLongStateOf(0L) }
@@ -212,20 +223,46 @@ fun PlayerScreen(
                 }
             }
             override fun onPlayerError(error: PlaybackException) {
-                // 把错误码翻译成用户能行动的一句话，别让电视上只显示英文枚举
-                playbackError = when (error.errorCode) {
-                    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
-                        "源站拒绝了这次请求（403/404，多为区域限制或防盗链），换条线路试试"
-                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ->
-                        "网络连不上源站，检查网络或换个线路"
-                    PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED ->
-                        "这个地址不是可播放的视频流（可能需要网页解析），换条线路"
-                    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
-                    PlaybackException.ERROR_CODE_DECODING_FAILED ->
-                        "解码器初始化失败，可能是片源的编码格式不兼容"
-                    else -> error.errorCodeName
+                val decision = PlaybackRecovery.decide(
+                    error = error,
+                    currentMode = decodeMode,
+                    alreadyTriedSoft = triedSoft || (session?.triedSoftFallback == true),
+                    hasMoreLines = slots.size > 1,
+                    autoSoft = PlayerPrefs.autoSoftOnDecodeError(context),
+                    autoLine = PlayerPrefs.autoLineOnError(context),
+                )
+                when (decision.action) {
+                    PlaybackRecovery.Action.RETRY_SOFT -> {
+                        flash(decision.message)
+                        triedSoft = true
+                        session?.triedSoftFallback = true
+                        val mode = decision.nextDecodeMode ?: DecodeMode.SOFT
+                        decodeMode = mode
+                        val rebuilt = session?.rebuildWithDecodeMode(mode)
+                        if (rebuilt == null) {
+                            // 无会话时在本页无法无缝重建，提示用户并展示错误
+                            playbackError = decision.message + "（请退出重进播放页）"
+                        } else {
+                            playbackError = null
+                            // 触发重新 setMedia：靠 url 状态由外层 LaunchedEffect 感知较难，这里直接标记
+                            flash("已切软解，请按确认重试或自动续播")
+                        }
+                        hudVisible = true
+                    }
+                    PlaybackRecovery.Action.SWITCH_LINE -> {
+                        flash(decision.message)
+                        if (slots.size > 1) {
+                            val next = (currentSlot + 1) % slots.size
+                            pickerIndex = next
+                        }
+                        playbackError = decision.message
+                        hudVisible = true
+                    }
+                    PlaybackRecovery.Action.SHOW_ERROR -> {
+                        playbackError = decision.message
+                        hudVisible = true
+                    }
                 }
-                hudVisible = true
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -326,13 +363,16 @@ fun PlayerScreen(
                 if (requestedAtNanos > 0) addTransferListener(transferListener)
             }
         }
-        val mediaSource = if (isHls && captionConfigs.isEmpty()) {
-            HlsMediaSource.Factory(measuredFactory)
-                .setAllowChunklessPreparation(false)
-                .createMediaSource(item)
-        } else {
-            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(measuredFactory).createMediaSource(item)
-        }
+        val drmSpec = DrmSupport.parseFromPlayMeta(headers)
+        val drmConfig = DrmSupport.mediaItemDrm(drmSpec)
+        val mediaSource = MediaSourceBuilder.build(
+            url = url,
+            dataSourceFactory = measuredFactory,
+            headers = headers,
+            mimeHint = if (isHls) androidx.media3.common.MimeTypes.APPLICATION_M3U8 else null,
+            subtitleConfigs = captionConfigs,
+            drmConfig = drmConfig,
+        )
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_AUDIO)
             .clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_TEXT).build()
