@@ -242,3 +242,39 @@ Marco 不下载、不加载、不执行这个 jar。`shared/catpaw/drpy-wex-*-ad
 + 直连源站 API 完成同样的事（`csp_bridge.dart` 的 `guardAdapterFor` 把 `csp_WexAppV7Guard`
 等映射到 `wexappv7-v1`）。所以它拿任何 `csp_wex*` 站点都是"直接 HTTP"，没有 24s 冷启动。
 本项目走的是 CatVod 原生 `DexClassLoader + Init`，冷启动成本无法靠预算/缓存消除。
+
+## 十二、vc35 冷启动根因定位（WexProgress / Go 代理）
+
+加了 `plugin-step` 分段计时 + 32MB logcat 缓冲后，23s 的去向终于看清：
+
+```
+plugin-artifact        1381ms    jar 本地已有（预取生效）
+plugin-step jar-ready  1382ms
+plugin-step native-extracted 1420ms
+plugin-step dexloader  1430ms
+plugin-step pre-init   1431ms
+plugin-step init-entry 1507ms    ← Init.init 开始
+WexProgress attach skip activity=null retry=0  msg=正在初始化本地代理
+java.net.ConnectException: Failed to connect to /127.0.0.1:8964
+WexProgress ... msg=正在读取扩展网盘配置
+WexProgress ... msg=正在等待 Go 服务响应
+plugin-step init-done  24958ms   ← Init.init 结束
+```
+
+结论：**24s 里 23s 是插件在 `Init.init` 内部启动自带 Go 代理（8964）+ 读取扩展网盘配置 + 等 Go 健康**。
+下载只占 1.4s，dex 加载 0.03s。插件把进程内代理当作必需基础设施，所以每个 `:spider` 进程首启都要付一次。
+
+插件在 `files/AiWex/` 落了三样东西（本次实测）：
+`new_go_proxy_wex`（4.8MB 代理二进制）、`libdecjni.so`（2.1MB）、`siteconfig`（1.2KB 明文 JSON，含 40+ 站点主域名）。
+所以第二次启动（AiWex 已存在）只需 10s（省掉二进制释放），仍然不是 1s。
+
+`WexProgress attach skip activity=null` 只是插件想弹"初始化中"对话框：`:spider` 进程此刻没有前台 Activity，
+弹不出来就每 500ms 记一条，不影响流程本身。
+
+### vc35 的 UX 改动
+
+- 首页加载 ≥6s 直接显示「正在准备这个源 · 约 10–30 秒 · 已 Ns」，不再裸骨架屏干等
+- 超时不再甩「来源加载失败」卡片：进入 `warming` 态，每 5s 自动重试（最多 10 次），准备好后自动出内容
+- 冷启动实测：`home-ready 38970ms`（无快照首启），暖启动 `home-ready 995ms`
+
+截图：`34-vc35-warming.jpg`（8s 时）、`35-vc35-warming-done.jpg`（40s 后内容就绪）

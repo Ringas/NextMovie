@@ -66,11 +66,16 @@ class JarSpiderLoader(
             throw SpiderLoadException("站点「${site.name}」没有可下载的插件地址（api=$api）")
         }
         val artifactStart = System.nanoTime()
+        fun step(name: String) = android.util.Log.i(
+            "NextMovieTiming",
+            "plugin-step $name ${(System.nanoTime() - artifactStart) / 1_000_000}ms"
+        )
         val jarFile = ensureJar(jarUrl, site.name, site.jarHash)
         android.util.Log.i("NextMovieTiming", "plugin-artifact ${(System.nanoTime() - artifactStart) / 1_000_000}ms")
 
         // 先做 ABI 预检：Guard 插件通常只带 ARM 的 .so，x86 模拟器上 dlopen 必失败，
         // MuMu 这类带 ARM 翻译的 x86 环境还会直接 SIGSEGV。提前拦下可以给出准确文案并避免原生崩溃。
+        step("jar-ready")
         abiMismatch(jarFile)?.let { throw SpiderLoadException(it) }
 
         // Guard 系插件把 native 库和加密的 secondary dex 放在 jar 的 assets 里：
@@ -80,6 +85,7 @@ class JarSpiderLoader(
         // 只会在宿主 classpath 里找，找不到就直接 abort（MuMu 上表现为插件进程闪退）。
         val libDir = File(context.filesDir, "spider-libs/" + jarFile.nameWithoutExtension).apply { mkdirs() }
         val nativeFile = extractNativeLib(jarFile, libDir)
+        step("native-extracted")
         val bridgeDex = ensureBridgeDex()
 
         val loader = classLoaders.getOrPut(jarFile.absolutePath) {
@@ -91,6 +97,7 @@ class JarSpiderLoader(
             DexClassLoader(dexPath, dexDir.absolutePath, libDir.absolutePath, context.classLoader)
         }
 
+        step("dexloader")
         val hasDexNative = runCatching {
             Class.forName("com.github.catvod.spider.DexNative", false, loader)
         }.isSuccess
@@ -107,6 +114,7 @@ class JarSpiderLoader(
 
         // CatVod 插件自带的 Init.init(Context) 负责把 secondary dex / 动态库准备好，
         // 不调用它，Guard 系插件（csp_*Guard）基本都会构造失败，所以每个 jar 只调一次。
+        step("pre-init")
         var initError: Throwable? = null
         PluginHostState.publishConfig(context, site.origin)
         val needsInit = !initialized.contains(jarFile.absolutePath)
@@ -121,6 +129,7 @@ class JarSpiderLoader(
                         it.parameterTypes.size == 1 &&
                         it.parameterTypes[0] == Context::class.java
                 }
+                step("init-entry")
                 if (method == null) {
                     // 少数包签名是 init(Context, String)（String 通常是插件 jar 的绝对路径）
                     val strInit = initClass.declaredMethods.firstOrNull {
@@ -161,6 +170,7 @@ class JarSpiderLoader(
             }.onFailure {
                 android.util.Log.w("NextMovie", "spider Init failed: ${rootCause(it)}", it)
             }.exceptionOrNull()
+            step("init-done")
         }
 
         // Initialization belongs to the JAR class loader, once only. Re-running arbitrary

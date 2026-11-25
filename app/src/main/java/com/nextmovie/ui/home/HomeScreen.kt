@@ -114,6 +114,14 @@ fun HomeScreen(
     val context = LocalContext.current
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
+    // 插件源第一次要起 Go 代理 + 拉远程配置（实测 10–25s）。这段时间不该甩一个"失败"给用户，
+    // 而是就地显示"正在准备源"，并在后台自动重试，准备好后自动刷新。
+    var warming by remember { mutableStateOf(false) }
+    var warmTries by remember { mutableIntStateOf(0) }
+    var warmSince by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
+    // 加载超过 6 秒就直接把"正在准备源"说出来，别让用户对着骨架屏干等 30 秒
+    var loadSecs by remember { mutableIntStateOf(0) }
+    var loadStartedAt by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
     var reloadTick by remember { mutableIntStateOf(0) }
     /** 分类导航：0 = 最近更新，其余对应 cats[i-1] */
     var cats by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
@@ -146,6 +154,16 @@ fun HomeScreen(
         if (tab > cats.size) tab = 0
     }
 
+    LaunchedEffect(loading) {
+        if (!loading) return@LaunchedEffect
+        loadStartedAt = System.currentTimeMillis()
+        loadSecs = 0
+        while (loading) {
+            kotlinx.coroutines.delay(1_000)
+            loadSecs += 1
+        }
+    }
+
     LaunchedEffect(site.runtimeKey, tab, reloadTick, reloadSignal) {
         loading = true
         error = null
@@ -167,6 +185,9 @@ fun HomeScreen(
         }
             .onSuccess { list ->
                 kotlin.coroutines.coroutineContext.ensureActive()
+                warming = false
+                warmTries = 0
+                warmSince = 0L
                 android.util.Log.d("NextMovieHome", "home count=${list.size} " + list.take(5).joinToString(" | ") { "${it.name}=>${it.pic.take(60)}" })
                 // L0：先把 URL 尺寸升级掉，首屏立刻能出图，不额外发请求
                 vods = repo.prepareForList(list)
@@ -176,9 +197,28 @@ fun HomeScreen(
             }
             .onFailure { e ->
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                if (vods.isEmpty()) error = com.nextmovie.core.net.FriendlyError.describe(e)
+                val msg = com.nextmovie.core.net.FriendlyError.describe(e)
+                if (vods.isEmpty()) {
+                    if (msg.contains("首次读取超时") || msg.contains("首次初始化")) {
+                        if (!warming) warmSince = System.currentTimeMillis()
+                        warming = true
+                        error = null
+                    } else {
+                        error = msg
+                    }
+                }
             }
         loading = false
+    }
+
+    // 准备源期间每 5 秒自动重试一次（后台的 prewarm 正在跑，通常会先准备好）
+    LaunchedEffect(warming, warmTries) {
+        if (!warming || warmTries >= 10) return@LaunchedEffect
+        kotlinx.coroutines.delay(5_000)
+        if (vods.isEmpty()) {
+            warmTries += 1
+            reloadTick += 1
+        }
     }
 
     // 回到首页时恢复上次停留的位置（索引由 AppRoot 持有，跨页面存活）
@@ -319,7 +359,10 @@ fun HomeScreen(
                 if (loading || error != null || site.unavailableReason != null || display.isEmpty()) {
                     item(key = "state", span = { GridItemSpan(maxLineSpan) }) {
                         when {
-                            loading -> HomeSkeleton()
+                            warming && error == null ->
+                                WarmingBlock(if (warmSince > 0) warmSince else loadStartedAt)
+                            loading ->
+                                if (loadSecs >= 6) WarmingBlock(loadStartedAt) else HomeSkeleton()
                             site.unavailableReason != null -> ErrorBlock("站点不可用", site.unavailableReason!!, { reloadTick++ }, onOpenSettings)
                             error != null -> ErrorBlock("来源加载失败", error!!, { reloadTick++ }, onOpenSettings)
                             else -> ErrorBlock("此分类暂无内容", "可选择其他分类或更换来源", { reloadTick++ }, onOpenSettings)
@@ -677,6 +720,43 @@ private fun LoadingBlock() {
             color = Tokens.TextDim,
             style = MaterialTheme.typography.labelSmall
         )
+    }
+}
+
+@Composable
+private fun WarmingBlock(sinceMs: Long) {
+    var elapsed by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            elapsed = ((System.currentTimeMillis() - sinceMs) / 1000).toInt()
+            kotlinx.coroutines.delay(1_000)
+        }
+    }
+    Row(
+        modifier = Modifier
+            .widthIn(max = 860.dp)
+            .clip(RoundedCornerShape(Tokens.Corner.panel))
+            .background(Tokens.Surface)
+            .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.panel))
+            .padding(horizontal = 24.dp, vertical = 20.dp),
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+    ) {
+        androidx.compose.material3.CircularProgressIndicator(
+            modifier = Modifier.size(22.dp),
+            color = Tokens.Accent,
+            strokeWidth = 2.dp
+        )
+        Spacer(Modifier.width(16.dp))
+        Column {
+            Text("正在准备这个源", color = Tokens.Text, style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "该源首次要启动本地代理并读取远程配置，约 10–30 秒；准备完成后重进都是秒开。" +
+                    if (elapsed > 0) "（已 ${elapsed}s）" else "",
+                color = Tokens.TextDim,
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
     }
 }
 
