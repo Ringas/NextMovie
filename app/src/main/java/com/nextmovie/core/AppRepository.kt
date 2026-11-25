@@ -406,12 +406,34 @@ class AppRepository(private val context: Context) {
                                     sourceSuccessRate(candidate.key),
                                     candidate.runtimeKey == site.runtimeKey
                                 )
+                                val bestIndex = com.nextmovie.core.match.SourceRanker.bestLineIndex(resolvedDetail)
+                                // 真实清晰度：探一次首集地址，拿到 HLS 主清单的 RESOLUTION / BANDWIDTH
+                                val probeUrl = resolvedDetail.lines.getOrNull(bestIndex)
+                                    ?.episodes?.firstOrNull()?.url.orEmpty()
+                                val probe = if (probeUrl.isNotBlank()) {
+                                    runCatching { com.nextmovie.core.match.StreamProbe.probe(probeUrl) }.getOrNull()
+                                } else null
+                                val probeBonus = when {
+                                    probe == null -> 0
+                                    probe.height >= 2160 -> 10
+                                    probe.height >= 1440 -> 7
+                                    probe.height >= 1080 -> 5
+                                    probe.height >= 720 -> 2
+                                    else -> 0
+                                } + ((probe?.bandwidthKbps ?: 0) / 2500)
+                                val badge = listOfNotNull(
+                                    probe?.label?.takeIf { it.isNotBlank() },
+                                    quality.label.takeIf { it.isNotBlank() }
+                                ).joinToString(" · ")
                                 SourceDetail(
                                     site = candidate,
                                     detail = resolvedDetail,
-                                    score = quality.score,
-                                    badge = quality.label,
-                                    bestLineIndex = com.nextmovie.core.match.SourceRanker.bestLineIndex(resolvedDetail)
+                                    score = quality.score + probeBonus,
+                                    badge = badge,
+                                    bestLineIndex = bestIndex,
+                                    height = probe?.height ?: 0,
+                                    bandwidthKbps = probe?.bandwidthKbps ?: 0,
+                                    sizeBytes = probe?.bytes ?: 0L
                                 )
                             }
                         }
@@ -470,7 +492,11 @@ class AppRepository(private val context: Context) {
         val detail: VodDetail,
         val score: Int,
         val badge: String,
-        val bestLineIndex: Int
+        val bestLineIndex: Int,
+        /** 首集实测分辨率高度（0 = 没探到） */
+        val height: Int = 0,
+        val bandwidthKbps: Int = 0,
+        val sizeBytes: Long = 0L
     )
 
     /** 聚合结果按分倒序，第一个就是「自动优选」的源。 */

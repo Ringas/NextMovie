@@ -126,3 +126,31 @@ HUD 显示 `00:29 / 1:53:55 / -1:53:26` 与「下一集：20261022-02」。截�
 已知边界：打分只用电台名/地址容器/集数/成功率等**可观测信号**，不读取视频码率；
 同一部片各源集数不同时按集序号对齐，缺集的源不会出现在线路面板里；
 `cms` 源搜索命中的别名（如「Love Live! 虹咲」）仍按标题相似度阈值 0.80 过滤，避免贴错片。
+
+---
+
+## 九、v0.6.14-dev（vc30）：真实码率探测 + 聚合二次筛选
+
+两条主线同时落地：① 打分不再只靠线路名猜画质，改为**实测首集地址**（`StreamProbe`：Range 4KB 读 HLS 主清单
+的 `#EXT-X-STREAM-INF` / `RESOLUTION` / `BANDWIDTH`，mp4 读 `Content-Range` 总大小；5s 超时、64 条 LRU 缓存、
+不下载整片），命中 2160→+10 / 1440→+7 / 1080→+5 / 720→+2，再叠加 `BANDWIDTH/2500` 的码率加分；
+② 详情页在聚合结果上加一排筛选：`全部 / 4K/2K / 1080P+ / 集数最全`，每项带命中计数，切筛选时若当前源被过滤掉会自动跳到首个可见源。
+
+| 用例 | 结果 | 证据 |
+| --- | --- | --- |
+| 详情页聚合 badge 变成 `实测分辨率 · 集数`（如 `1080P · 全 42 集`） | 通过 | `23-detail-filter-all.jpg` |
+| 筛选「1080P+ 2」：5 个源收敛到 2 个（电影天堂 / 非凡），当前源保持 | 通过 | `24-detail-filter-1080p.jpg` |
+| 筛选「集数最全 3」：只留 42 集的 3 个源，量子实测仅 `608P` 被正确拉开差距 | 通过 | `25-detail-filter-most-episodes.jpg` |
+| 播放器线路面板按分数显示实测分辨率与总分（`1080P 分26 最优` / `1080P 分25` / `608P 分22` / `全41集 分20`） | 通过 | `26-player-lines-probe.jpg` |
+| 切到第 3 路（量子 `lzm3u8`）：`raw-url=https://v.lfthirtytwo.com/...index.m3u8`，从 00:08 续到 00:26，HUD `线路 3/5` | 通过 | `27-player-switched-probe.jpg` |
+| 32 位包安装启动：`versionName=0.6.14-dev` / `primaryCpuAbi=armeabi-v7a` | 通过 | `28-v7a-home-vc30.jpg` |
+
+环境：Android 11 模拟器 `emulator-5556`（API 30 / 1920×1080 / 320dpi / abilist 含 arm64-v8a 与 armeabi-v7a），
+配置 `https://szyyds.cn/tv/x.json`（62 站）。日志：`detail-partial 1650ms sources=1` → `detail-ready 7783ms sources=5`。
+构建：`./scripts/build-tv.sh` →
+
+- `dist/NextMovie-0.6.14-dev-vc30-arm64-v8a.apk`（sha256 `54b2118d…bd30c13c`）
+- `dist/NextMovie-0.6.14-dev-vc30-armeabi-v7a.apk`（sha256 `c5c59963…b73757ff`）
+
+已知边界：CDN 拒绝 Range 或返回整片 `200` 时探测拿不到分辨率，按「拿不到不加分」退化为旧打分；
+部分源只给媒体清单（无 `STREAM-INF`），面板上只显示集数不显示分辨率；探测对每源只打一次首集，切片中途换清晰度不会重测。

@@ -93,6 +93,8 @@ fun DetailScreen(
     var loading by remember { mutableStateOf(true) }
     var hint by remember { mutableStateOf("正在聚合全网来源…") }
     var manual by remember { mutableStateOf(false) }
+    // 聚合结果二次筛选：0 全部 / 1 4K+ / 2 1080P+ / 3 集数最全
+    var filter by remember { mutableIntStateOf(0) }
     val playFocus = remember { androidx.compose.ui.focus.FocusRequester() }
     var reload by remember { mutableIntStateOf(0) }
 
@@ -164,6 +166,19 @@ fun DetailScreen(
     }
 
     val sources = agg?.sources.orEmpty()
+    val allSources = sources
+    val maxEpisodes = remember(allSources) {
+        allSources.maxOfOrNull { src -> src.detail.lines.maxOfOrNull { it.episodes.size } ?: 0 } ?: 0
+    }
+    val visibleSources = remember(allSources, filter) {
+        val picked = when (filter) {
+            1 -> allSources.filter { it.height >= 1440 }
+            2 -> allSources.filter { it.height >= 1080 }
+            3 -> allSources.filter { (it.detail.lines.maxOfOrNull { line -> line.episodes.size } ?: 0) >= maxEpisodes }
+            else -> allSources
+        }
+        picked.ifEmpty { allSources }
+    }
     val safeSourceIndex = sourceIndex.coerceIn(0, sources.lastIndex.coerceAtLeast(0))
     val activeSource = sources.getOrNull(safeSourceIndex)
     val active: Site = activeSource?.site ?: site
@@ -423,15 +438,45 @@ fun DetailScreen(
                                     modifier = Modifier.padding(bottom = 10.dp)
                                 )
                             }
-                            // 已聚合的源：按「画质 + 历史成功率」排序，第一个就是自动优选的
+                            // 已聚合的源：按「实测分辨率 + 画质 + 历史成功率」排序，第一个就是自动优选的
                             if (sources.size > 1) {
+                                SourceFilters(
+                                    total = sources.size,
+                                    uhd = sources.count { it.height >= 1440 },
+                                    fhd = sources.count { it.height >= 1080 },
+                                    mostEpisodes = sources.count {
+                                        (it.detail.lines.maxOfOrNull { line -> line.episodes.size } ?: 0) >= maxEpisodes
+                                    },
+                                    selected = filter,
+                                    onSelect = { picked ->
+                                        filter = picked
+                                        manual = true
+                                        val next = when (picked) {
+                                            1 -> sources.firstOrNull { it.height >= 1440 }
+                                            2 -> sources.firstOrNull { it.height >= 1080 }
+                                            3 -> sources.firstOrNull {
+                                                (it.detail.lines.maxOfOrNull { line -> line.episodes.size } ?: 0) >= maxEpisodes
+                                            }
+                                            else -> sources.firstOrNull()
+                                        }
+                                        if (next != null) {
+                                            sourceIndex = sources.indexOfFirst { it.site.key == next.site.key }
+                                            lineIndex = next.bestLineIndex
+                                        }
+                                    }
+                                )
+                                Spacer(Modifier.height(10.dp))
                                 SourceChips(
-                                    sources = sources,
-                                    selected = safeSourceIndex,
+                                    sources = visibleSources,
+                                    selectedKey = active.key,
+                                    bestKey = sources.firstOrNull()?.site?.key,
                                     onPick = { picked ->
                                         manual = true
-                                        sourceIndex = picked
-                                        lineIndex = sources[picked].bestLineIndex
+                                        val idx = sources.indexOfFirst { it.site.key == picked.site.key }
+                                        if (idx >= 0) {
+                                            sourceIndex = idx
+                                            lineIndex = picked.bestLineIndex
+                                        }
                                     }
                                 )
                                 Spacer(Modifier.height(12.dp))
@@ -554,15 +599,64 @@ private fun ErrorCard(message: String, onRetry: () -> Unit) {
 }
 
 @Composable
+private fun SourceFilters(
+    total: Int,
+    uhd: Int,
+    fhd: Int,
+    mostEpisodes: Int,
+    selected: Int,
+    onSelect: (Int) -> Unit
+) {
+    val items = listOf(
+        0 to "全部 $total",
+        1 to "4K/2K $uhd",
+        2 to "1080P+ $fhd",
+        3 to "集数最全 $mostEpisodes"
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = "筛选",
+            color = Tokens.TextFaint,
+            style = MaterialTheme.typography.labelSmall
+        )
+        items.forEach { (value, label) ->
+            val isActive = value == selected
+            val disabled = (value == 1 && uhd == 0) || (value == 2 && fhd == 0)
+            Text(
+                text = label,
+                color = when {
+                    isActive -> Tokens.Accent
+                    disabled -> Tokens.TextFaint
+                    else -> Tokens.TextDim
+                },
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(Tokens.Corner.pill))
+                    .background(if (isActive) Tokens.AccentDim else Tokens.Surface)
+                    .border(
+                        width = if (isActive) 2.dp else 1.dp,
+                        color = if (isActive) Tokens.Accent else Tokens.Stroke,
+                        shape = RoundedCornerShape(Tokens.Corner.pill)
+                    )
+                    .mouseFocusable()
+                    .tvClickable(enabled = !disabled, onClick = { onSelect(value) }, corner = Tokens.Corner.pill)
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+        }
+    }
+}
+
+@Composable
 private fun SourceChips(
     sources: List<AppRepository.SourceDetail>,
-    selected: Int,
-    onPick: (Int) -> Unit
+    selectedKey: String,
+    bestKey: String?,
+    onPick: (AppRepository.SourceDetail) -> Unit
 ) {
     val state = rememberLazyListState()
     Column {
         Text(
-            text = "来源 · 已按画质与历史成功率排序",
+            text = "来源 · 已按实测分辨率与历史成功率排序",
             color = Tokens.Accent,
             style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.06.sp),
             modifier = Modifier.padding(bottom = 8.dp)
@@ -572,8 +666,8 @@ private fun SourceChips(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.mouseWheel(state, horizontal = true)
         ) {
-            itemsIndexed(sources) { index, src ->
-                val isActive = index == selected
+            itemsIndexed(sources) { _, src ->
+                val isActive = src.site.key == selectedKey
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
@@ -585,10 +679,10 @@ private fun SourceChips(
                             shape = RoundedCornerShape(Tokens.Corner.pill)
                         )
                         .mouseFocusable()
-                        .tvClickable(onClick = { onPick(index) }, corner = Tokens.Corner.pill)
+                        .tvClickable(onClick = { onPick(src) }, corner = Tokens.Corner.pill)
                         .padding(horizontal = 14.dp, vertical = 7.dp)
                 ) {
-                    if (index == 0) {
+                    if (src.site.key == bestKey) {
                         Text(
                             text = "最优",
                             color = Tokens.OnAccent,
