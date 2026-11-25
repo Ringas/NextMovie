@@ -498,7 +498,7 @@ class AppRepository(private val context: Context) {
     suspend fun detailForSite(site: Site, vod: Vod, budgetMs: Long = 9_000L): AggregatedDetail? {
         val started = System.nanoTime()
         val resolved = try {
-            withTimeoutOrNull(budgetMs) { detail(site, vod.id, altId = vod.name.takeIf { vod.id.isBlank() }) }
+            withTimeoutOrNull(budgetMs) { detail(site, vod.id, altId = vod.name.takeIf { it.isNotBlank() }) }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -548,7 +548,7 @@ class AppRepository(private val context: Context) {
             } catch (t: Throwable) {
                 detailFails[key] = System.currentTimeMillis()
                 if (t is kotlinx.coroutines.CancellationException) throw t
-                android.util.Log.w("NextMovieTiming", "detail-source fail ${"${site.name}"} ${t.javaClass.simpleName}")
+                android.util.Log.w("NextMovieTiming", "detail-source fail ${site.name} id=$id ${t.javaClass.simpleName}: ${t.message}")
                 throw t
             }
             if (result == null) detailFails[key] = System.currentTimeMillis() else detailFails.remove(key)
@@ -666,35 +666,41 @@ class AppRepository(private val context: Context) {
         crossSiteLimit: Int,
         onPartial: (AggregatedDetail) -> Unit
     ): AggregatedDetail? = coroutineScope {
+        // 「msearch:<id>」卡片本身没有可用的 detailContent（插件只会返回空），
+        // 它的线路必须来自同一配置里的其它源 —— 这正是 Marco 的行为：
+        // 详情页一边出简介，一边在后台拿片名做全站搜索，谁先返回可播线路谁上屏。
+        val searchRedirect = vod.id.startsWith("msearch:", true)
         val candidates = buildList {
-            add(site)
+            if (!searchRedirect) add(site)
             addAll(
                 sites.filter { it.isPlayable && it.searchable && it.runtimeKey != site.runtimeKey }
-                    .sortedBy { if (it.isCms) 0 else 1 }
+                    .sortedWith(
+                        compareByDescending<Site> { sourceSuccessRate(it.key).let { r -> if (r == null) 0 else 1 } }
+                            .thenBy { if (it.isCms) 0 else 1 }
+                    )
                     .take(crossSiteLimit.coerceAtLeast(6))
             )
         }
         val replies = Channel<SourceDetail?>(candidates.size.coerceAtLeast(1))
-        val gate = Semaphore(4)
-        val primaryReturned = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val gate = Semaphore(6)
         candidates.mapIndexed { index, candidate ->
             launch(kotlinx.coroutines.Dispatchers.IO) {
                 // Give the selected source a head start. Background cross-source searches
                 // must not occupy the plugin/network queue before its detail request.
-                if (index != 0) withTimeoutOrNull(1_500) { primaryReturned.await() }
+                // 不再让当前源抢占：全站搜索的每一个候选都同时起跑。
                 gate.withPermit {
+                    val startedAt = System.nanoTime()
                     val hit = withTimeoutOrNull(
                         when {
-                            // 首次冷启动要下载 jar + 解压 native + Init，给足 15s；之后一律短超时
                             index == 0 && candidate.isSpider && candidate.runtimeKey !in warmSites -> 15_000L
                             index == 0 -> 8_000L
-                            else -> 6_000L
+                            else -> 4_500L
                         }
                     ) {
 
                         detailAttempt {
                             val resolved: VodDetail? =
-                                if (index == 0 && vod.id.isNotBlank()) detail(candidate, vod.id, altId = vod.name)
+                                if (index == 0 && vod.id.isNotBlank() && !vod.id.startsWith("msearch:", true)) detail(candidate, vod.id, altId = vod.name)
                                 else keyword.takeIf { it.isNotBlank() }
                                     ?.let { matchingVideo(candidate, it, vod.displayYear) }
                                     ?.let { detail(candidate, it.id, it.name) }
@@ -748,7 +754,11 @@ class AppRepository(private val context: Context) {
                             }
                         }
                     }
-                    if (index == 0) primaryReturned.complete(Unit)
+                    android.util.Log.i(
+                        "NextMovieTiming",
+                        "agg-site ${candidate.name} ${if (hit == null) "fail" else "ok lines=${hit.detail.lines.size}"} " +
+                            "${(System.nanoTime() - startedAt) / 1_000_000}ms"
+                    )
                     replies.send(hit)
                 }
             }

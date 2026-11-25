@@ -153,7 +153,10 @@ class SpiderHost(
     suspend fun detail(site: Site, id: String, altId: String? = null): VodDetail? = withContext(Dispatchers.IO) {
         tryNative(site, "detail") { it.detail(site, id) }?.let { return@withContext it }
         ensureSpider(site, "detail")
-        var raw = client.request(ACTION_DETAIL, site) { putString(KEY_ARG1, id) }
+        var raw = client.request(ACTION_DETAIL, site) {
+            putString(KEY_ARG1, id)
+            altId?.let { putString(KEY_ARG2, it) }
+        }
         // 有些插件 homeVod 根本不带 vod_id，只给片名；拿名字当 id 再试一次，
         // 比重猜一个 id 格式靠谱。
         if ((raw.isBlank() || raw == "{}") && !altId.isNullOrBlank() && altId != id) {

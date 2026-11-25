@@ -181,8 +181,12 @@ fun DetailScreen(
                 hint = "当前来源 ·「${quick.best?.site?.name ?: site.name}」"
                 loading = false
             } else {
-                loading = false
-                error = "当前来源没有返回可用线路"
+                // 与 Marco 一致：这一张卡只是「按片名去找」的入口，当前源的 detailContent
+                // 拿不到线路时不要在页面上报错，直接转入后台全站搜索。
+                loading = true
+                error = null
+                hint = "正在按片名在全部来源里找可播线路…"
+                moreSources += 1
             }
         }
     }
@@ -190,9 +194,9 @@ fun DetailScreen(
     LaunchedEffect(moreSources) {
         if (moreSources == 0) return@LaunchedEffect
         loading = agg == null
-        hint = "正在比对其它来源（最多 4 个）…"
+        hint = "正在按片名在全部来源里找可播线路…"
         val result = runCatching {
-            repo.aggregateDetail(site, initial, crossSiteLimit = 4) { partial ->
+            repo.aggregateDetail(site, initial, crossSiteLimit = 6) { partial ->
                 if (partial.sources.size > (agg?.sources?.size ?: 0)) {
                     android.util.Log.i("NextMovieTiming", "detail-partial ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms sources=${partial.sources.size}")
                     agg = partial
@@ -213,7 +217,7 @@ fun DetailScreen(
         val full = result.getOrNull()
         if (full == null || full.sources.isEmpty()) {
             loading = false
-            if (agg == null) error = "其它来源也没有返回这部片的可用线路"
+            if (agg == null) error = "全部来源都没有返回这部片的可用线路"
         } else {
             android.util.Log.i("NextMovieTiming", "detail-ready ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms sources=${full.sources.size}")
             val previousBest = agg?.best?.site?.key

@@ -192,6 +192,7 @@ class SpiderService : Service() {
                 val map = HashMap<String, String>()
                 if (extend.isNotBlank()) map["extend"] = extend
                 val raw = runCatching { spider.categoryContent(tid, page, filter, map) }.getOrNull().orEmpty()
+                android.util.Log.i("NextMovieDiag", "category tid=$tid raw0=" + raw.take(600))
                 if (raw.isBlank()) {
                     (spider as? JsSpider)?.asyncNote()?.let { return errorBundle(id, it) }
                 }
@@ -199,11 +200,42 @@ class SpiderService : Service() {
             }
 
             ACTION_DETAIL -> {
-                val vodId = args.getString(KEY_ARG1).orEmpty()
-                val raw = runCatching { spider.detailContent(listOf(vodId)) }
-                    .onFailure { android.util.Log.w("NextMovieSpider", "detailContent 失败: " + rootCause(it), it) }
-                    .getOrNull().orEmpty()
+                val requestedId = args.getString(KEY_ARG1).orEmpty()
+                // 「msearch:<keyword>」是插件 homeVod 给的检索式 id（Marco/CatVod 语义）：
+                // 它不能直接喂给 detailContent（会立刻返回空），必须先 search 拿到真实 vod_id 再取详情。
+                var vodId = requestedId
+                var raw = ""
+                if (requestedId.startsWith("msearch:", true)) {
+                    val hint = args.getString(KEY_ARG2).orEmpty().trim()
+                    val keyword = hint.ifBlank { requestedId.substringAfter(':').trim() }
+                    val searchRaw = runCatching { spider.searchContent(keyword, false, "1") }
+                        .onFailure { android.util.Log.w("NextMovieDiag", "msearch search 失败: " + rootCause(it), it) }
+                        .getOrNull().orEmpty()
+                    android.util.Log.i("NextMovieDiag", "msearch search kw=$keyword len=${searchRaw.length} head=" + searchRaw.take(200))
+                    val realId = runCatching {
+                        org.json.JSONObject(searchRaw).optJSONArray("list")
+                            ?.optJSONObject(0)?.optString("vod_id").orEmpty()
+                    }.getOrDefault("")
+                    android.util.Log.i("NextMovieSpider", "msearch id=$requestedId kw=$keyword -> vod_id=$realId")
+                    if (realId.isNotBlank() && realId != requestedId) {
+                        vodId = realId
+                        raw = runCatching { spider.detailContent(listOf(vodId)) }.getOrNull().orEmpty()
+                        if (raw.isBlank() || raw == "{}") vodId = requestedId
+                    }
+                }
+                if (raw.isBlank() || raw == "{}") {
+                    android.util.Log.i("NextMovieSpider", "detailContent id=$vodId class=${spider.javaClass.name}")
+                    raw = runCatching { spider.detailContent(listOf(vodId)) }
+                        .onFailure { android.util.Log.w("NextMovieSpider", "detailContent 失败: " + rootCause(it), it) }
+                        .getOrNull().orEmpty()
+                }
                 if (raw.isBlank()) {
+                    val bare = requestedId.substringAfter(':')
+                    if (bare != requestedId) {
+                        val alt = runCatching { spider.detailContent(listOf(bare)) }.getOrNull().orEmpty()
+                        android.util.Log.i("NextMovieDiag", "detail bare id=$bare len=${alt.length}")
+                    }
+                    android.util.Log.w("NextMovieSpider", "detailContent blank for id=$requestedId")
                     (spider as? JsSpider)?.asyncNote()?.let { return errorBundle(id, it) }
                 }
                 raw
@@ -213,9 +245,14 @@ class SpiderService : Service() {
                 val keyword = args.getString(KEY_ARG1).orEmpty()
                 val page = args.getString(KEY_ARG2) ?: "1"
                 val quick = args.getBoolean(KEY_FILTER, false)
-                runCatching { spider.searchContent(keyword, quick, page) }.getOrNull()
-                    ?.takeIf { it.isNotBlank() && it != "{}" }
-                    ?: runCatching { spider.searchContent(keyword, quick) }.getOrNull().orEmpty()
+                val first = runCatching { spider.searchContent(keyword, quick, page) }
+                    .onFailure { android.util.Log.w("NextMovieDiag", "searchContent(k,quick,page) 失败: " + rootCause(it), it) }
+                    .getOrNull()
+                android.util.Log.i("NextMovieDiag", "search kw=$keyword quick=$quick page=$page len=${first?.length ?: -1}")
+                (first?.takeIf { it.isNotBlank() && it != "{}" }
+                    ?: runCatching { spider.searchContent(keyword, quick) }
+                        .onFailure { android.util.Log.w("NextMovieDiag", "searchContent(k,quick) 失败: " + rootCause(it), it) }
+                        .getOrNull().orEmpty())
             }
 
             ACTION_PLAY -> {
