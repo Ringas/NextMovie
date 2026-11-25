@@ -51,6 +51,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nextmovie.core.AppRepository
+import com.nextmovie.ui.common.StageBackdrop
 import com.nextmovie.ui.common.tvClickable
 import com.nextmovie.ui.theme.LocalTvDisplay
 import com.nextmovie.ui.theme.Tokens
@@ -145,7 +146,8 @@ fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -
         }.getOrNull() ?: 0
     }
 
-    Column(modifier = Modifier.fillMaxSize().background(Tokens.Bg).padding(horizontal = 28.dp)) {
+    StageBackdrop {
+    Column(modifier = Modifier.fillMaxSize().padding(start = 40.dp, end = 40.dp, top = 6.dp, bottom = 4.dp)) {
         SettingsTopBar(onBack = onBack)
         Spacer(Modifier.height(14.dp))
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
@@ -252,37 +254,24 @@ fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -
             )
         }
     }
+    }
 }
 
 @Composable
 private fun SettingsTopBar(onBack: () -> Unit) {
     Row(modifier = Modifier.fillMaxWidth().padding(top = 22.dp), verticalAlignment = Alignment.CenterVertically) {
-        Row(verticalAlignment = Alignment.Bottom) {
-            Text(
-                text = "NEXT MOVIE",
-                color = Tokens.Text,
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold, letterSpacing = 3.sp)
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = "HOST",
-                color = Tokens.Accent,
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro, letterSpacing = Tokens.Type.MICRO_TRACK.sp),
-                modifier = Modifier.padding(bottom = 2.dp)
-            )
-        }
-        Spacer(Modifier.width(22.dp))
         Text(
-            text = "‹ 返回首页",
+            text = "‹ 首页",
             color = Tokens.TextDim,
             style = MaterialTheme.typography.labelLarge,
             modifier = Modifier
                 .clip(RoundedCornerShape(Tokens.Corner.pill))
-                .background(Tokens.Surface)
+                .background(Color(0x12FFFFFF))
                 .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
                 .tvClickable(onClick = onBack, corner = Tokens.Corner.pill)
-                .padding(horizontal = 14.dp, vertical = 7.dp)
+                .padding(horizontal = 18.dp, vertical = 9.dp)
         )
+
         Spacer(Modifier.weight(1f))
         Text(
             text = "更改即时生效 · 无需确认",
@@ -300,7 +289,7 @@ private fun GroupNavItem(
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
-    val bg by animateColorAsState(if (active) Tokens.Surface else Color.Transparent, label = "navBg")
+    val bg by animateColorAsState(if (active) Tokens.AccentDim.copy(alpha = 0.18f) else Color.Transparent, label = "navBg")
     Row(
         modifier = modifier
             .fillMaxWidth()

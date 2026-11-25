@@ -38,6 +38,7 @@ import com.nextmovie.core.model.Vod
 import com.nextmovie.ui.common.PosterCard
 import com.nextmovie.ui.common.TvGridNavigation
 import com.nextmovie.ui.common.mouseWheel
+import com.nextmovie.ui.common.ScreenTopBar
 import com.nextmovie.ui.common.tvClickable
 import com.nextmovie.ui.theme.Tokens
 
@@ -62,38 +63,8 @@ fun FavoritesScreen(
             .background(Tokens.Bg)
             .padding(Tokens.ScreenPadding)
     ) {
-        Row(verticalAlignment = Alignment.Bottom) {
-            Text(
-                text = "NEXT MOVIE",
-                color = Tokens.Text,
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold, letterSpacing = 3.sp)
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = "FAVORITES",
-                color = Tokens.Accent,
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro, letterSpacing = Tokens.Type.MICRO_TRACK.sp),
-                modifier = Modifier.padding(bottom = 2.dp)
-            )
-            Spacer(Modifier.width(22.dp))
-            Text(
-                text = "‹ 返回",
-                color = Tokens.TextDim,
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(Tokens.Corner.pill))
-                    .background(Tokens.Surface)
-                    .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
-                    .tvClickable(onClick = onBack, corner = Tokens.Corner.pill)
-                    .padding(horizontal = 14.dp, vertical = 7.dp)
-            )
-            Spacer(Modifier.weight(1f))
-            Text(
-                text = "${entries.size} 部已收藏",
-                color = Tokens.TextFaint,
-                style = MaterialTheme.typography.labelSmall
-            )
-        }
+        ScreenTopBar(title = "", onBack = onBack, trailing = "${entries.size} 部已收藏")
+        Spacer(Modifier.height(6.dp))
 
         Spacer(Modifier.height(14.dp))
         Row(verticalAlignment = Alignment.Bottom) {

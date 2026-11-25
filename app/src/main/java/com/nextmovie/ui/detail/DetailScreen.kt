@@ -256,7 +256,7 @@ fun DetailScreen(
             model = remember(vod.displayBackdrop) { posterModel(context, vod.displayBackdrop, detail = true) },
             contentDescription = null,
             contentScale = ContentScale.Crop,
-            alpha = 0.30f,
+            alpha = 0.18f,
             modifier = Modifier.fillMaxSize()
         )
         // 左重右轻的横向压暗 + 上下渐隐，让文字区永远有足够对比度
@@ -290,38 +290,17 @@ fun DetailScreen(
                 .padding(horizontal = 44.dp, vertical = 26.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Row(verticalAlignment = Alignment.Bottom) {
-                    Text(
-                        text = "NEXT MOVIE",
-                        color = Tokens.Text,
-                        style = MaterialTheme.typography.titleSmall.copy(
-                            fontWeight = FontWeight.SemiBold,
-                            letterSpacing = 3.sp
-                        )
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = "DETAIL",
-                        color = Tokens.Accent,
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontSize = Tokens.Type.micro,
-                            letterSpacing = Tokens.Type.MICRO_TRACK.sp
-                        ),
-                        modifier = Modifier.padding(bottom = 2.dp)
-                    )
-                }
-                Spacer(Modifier.width(24.dp))
                 Text(
-                    text = "‹ 返回",
+                    text = "‹ 首页",
                     color = Tokens.TextDim,
                     style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier
                         .clip(RoundedCornerShape(Tokens.Corner.pill))
-                        .background(Tokens.Surface)
+                        .background(Color(0x12FFFFFF))
                         .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
                         .mouseFocusable()
                         .tvClickable(onClick = onBack, corner = Tokens.Corner.pill)
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .padding(horizontal = 18.dp, vertical = 9.dp)
                 )
                 Spacer(Modifier.width(10.dp))
                 FavoritePill(
@@ -351,14 +330,14 @@ fun DetailScreen(
 
             Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 // —— 左栏 ——
-                Column(modifier = Modifier.width(192.dp).fillMaxHeight().verticalScroll(rememberScrollState())) {
+                Column(modifier = Modifier.width(208.dp).fillMaxHeight().verticalScroll(rememberScrollState())) {
                     Box(
                         modifier = Modifier
-                            .width(192.dp)
-                            .height(264.dp)
-                            .clip(RoundedCornerShape(Tokens.Radius))
+                            .width(208.dp)
+                            .height(312.dp)
+                            .clip(RoundedCornerShape(Tokens.Corner.card))
                             .background(Tokens.SurfaceHigh)
-                            .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Radius))
+                            .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.card))
                     ) {
                         AsyncImage(
                             model = remember(vod.displayPic) { posterModel(context, vod.displayPic, detail = true) },
@@ -429,11 +408,25 @@ fun DetailScreen(
                     Spacer(Modifier.height(18.dp))
 
                     when {
-                        loading -> Text(
-                            "正在读取详情…",
-                            color = Tokens.TextDim,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
+                        loading -> Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(Tokens.Accent)
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    "正在读取剧集",
+                                    color = Tokens.Text,
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
+                                )
+                            }
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                hint.ifBlank { "正在读取剧集…" },
+                                color = Tokens.TextDim,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
                         error != null -> ErrorCard(message = error!!, onRetry = { reload++ })
                         lines.isEmpty() -> Text(
                             "暂无可用播放线路",

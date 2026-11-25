@@ -1,90 +1,90 @@
 package com.nextmovie.ui.home
 
-import com.nextmovie.ui.common.mouseWheel
-import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import kotlinx.coroutines.ensureActive
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import com.nextmovie.ui.common.tvClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.draw.clip
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.itemsIndexed
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.key.type
-import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalDensity
-import com.nextmovie.ui.common.TvGridNavigation
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.launch
-import coil.compose.AsyncImage
 import com.nextmovie.core.AppRepository
 import com.nextmovie.core.config.Site
 import com.nextmovie.core.history.HistoryEntry
 import com.nextmovie.core.model.Vod
+import com.nextmovie.ui.common.Billboard
+import com.nextmovie.ui.common.BillboardButton
+import com.nextmovie.ui.common.ChipRow
 import com.nextmovie.ui.common.ContinueCard
+import com.nextmovie.ui.common.GlassTopBar
 import com.nextmovie.ui.common.PosterCard
-import com.nextmovie.ui.common.posterModel
+import com.nextmovie.ui.common.Rail
+import com.nextmovie.ui.common.StageBackdrop
+import com.nextmovie.ui.common.TabSpec
+import com.nextmovie.ui.common.tvClickable
+import com.nextmovie.ui.theme.DynamicAccent
 import com.nextmovie.ui.theme.Tokens
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
 /**
- * 首页：全屏沉浸背景 + 焦点驱动的影片信息 + 继续观看 + 横向海报墙。
- * 背景图取当前焦点影片（TMDB backdrop / B站剧照 / 源站图）。
+ * 首页（tvOS 原型版）
+ *
+ * 自上而下：居中玻璃 tab + 时钟 → 圆角巨幕（带翻页指示点）→ 分类胶囊 → 横排轨道。
+ * 整屏背景是石墨夜色 + 一团随焦点作品漂移的主色氛围光，不再铺满剧照，
+ * 于是首屏不再依赖一张大图下载完成才能"看起来对"。
  */
 @Composable
 fun HomeScreen(
@@ -104,44 +104,31 @@ fun HomeScreen(
 ) {
     val screenStartedAt = remember { System.nanoTime() }
     var vods by remember { mutableStateOf<List<Vod>>(emptyList()) }
-    /** 异步补图结果，按 id 归并；渲染时再和 vods 合并，避免并发写丢更新 */
     var enrichedById by remember { mutableStateOf<Map<String, Vod>>(emptyMap()) }
-    var heroId by remember { mutableStateOf<String?>(null) }
-    // Hero 需要年份/地区/简介才立得住：列表接口常常只有片名和评分，这里补一次详情元信息
     var heroMeta by remember { mutableStateOf<Vod?>(null) }
     var continueList by remember { mutableStateOf<List<HistoryEntry>>(emptyList()) }
     val requested = remember { mutableSetOf<String>() }
     val context = LocalContext.current
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
-    // 插件源第一次要起 Go 代理 + 拉远程配置（实测 10–25s）。这段时间不该甩一个"失败"给用户，
-    // 而是就地显示"正在准备源"，并在后台自动重试，准备好后自动刷新。
     var warming by remember { mutableStateOf(false) }
     var warmTries by remember { mutableIntStateOf(0) }
-    var warmSince by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
-    // 加载超过 6 秒就直接把"正在准备源"说出来，别让用户对着骨架屏干等 30 秒
+    var warmSince by remember { mutableLongStateOf(0L) }
     var loadSecs by remember { mutableIntStateOf(0) }
-    var loadStartedAt by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
+    var loadStartedAt by remember { mutableLongStateOf(0L) }
     var reloadTick by remember { mutableIntStateOf(0) }
-    /** 分类导航：0 = 最近更新，其余对应 cats[i-1] */
     var cats by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var tab by remember { mutableIntStateOf(initialTab) }
+    var page by remember { mutableIntStateOf(0) }
     val posterFocus = remember(vods.map { it.id }) { List(vods.size) { FocusRequester() } }
-    var gridColumns by remember { mutableIntStateOf(5) }
-    val density = LocalDensity.current.density
-    val rowState = rememberLazyGridState()
+    val railState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
     val initialReloadSignal = remember(site.runtimeKey) { reloadSignal }
-    val initialSnapshot = remember(site.runtimeKey) {
-        kotlinx.coroutines.CompletableDeferred<List<Vod>?>()
-    }
-    LaunchedEffect(site.runtimeKey) {
-        initialSnapshot.complete(repo.cachedHome(site))
-    }
+    val initialSnapshot = remember(site.runtimeKey) { kotlinx.coroutines.CompletableDeferred<List<Vod>?>() }
+    LaunchedEffect(site.runtimeKey) { initialSnapshot.complete(repo.cachedHome(site)) }
     val backgroundReady = remember(site.runtimeKey) { kotlinx.coroutines.CompletableDeferred<Unit>() }
     LaunchedEffect(site.runtimeKey) {
-        // Bind in parallel with reading the snapshot. Binding doesn't initialize a source.
         repo.connectPluginHost(site)
         if (initialSnapshot.await() != null) delay(2_500)
         backgroundReady.complete(Unit)
@@ -153,17 +140,15 @@ fun HomeScreen(
         catch (_: Exception) { emptyList() }
         if (tab > cats.size) tab = 0
     }
-
     LaunchedEffect(loading) {
         if (!loading) return@LaunchedEffect
         loadStartedAt = System.currentTimeMillis()
         loadSecs = 0
         while (loading) {
-            kotlinx.coroutines.delay(1_000)
+            delay(1_000)
             loadSecs += 1
         }
     }
-
     LaunchedEffect(site.runtimeKey, tab, reloadTick, reloadSignal) {
         loading = true
         error = null
@@ -177,7 +162,6 @@ fun HomeScreen(
         }
         continueList = repo.history.continueWatching(10).filter { it.siteKey == site.key }
         runCatching {
-            // 源头请求失败先自动重连一次（只针对超时/5xx 这类临时故障）
             com.nextmovie.core.net.Retry.once {
                 if (tab == 0) repo.home(site, refresh = reloadTick > 0)
                 else repo.category(site, cats.getOrNull(tab - 1)?.first.orEmpty(), 1)
@@ -188,12 +172,11 @@ fun HomeScreen(
                 warming = false
                 warmTries = 0
                 warmSince = 0L
-                android.util.Log.d("NextMovieHome", "home count=${list.size} " + list.take(5).joinToString(" | ") { "${it.name}=>${it.pic.take(60)}" })
-                // L0：先把 URL 尺寸升级掉，首屏立刻能出图，不额外发请求
                 vods = repo.prepareForList(list)
                 enrichedById = emptyMap()
                 requested.clear()
-                heroId = null
+                heroMeta = null
+                page = 0
             }
             .onFailure { e ->
                 if (e is kotlinx.coroutines.CancellationException) throw e
@@ -210,29 +193,23 @@ fun HomeScreen(
             }
         loading = false
     }
-
-    // 准备源期间每 5 秒自动重试一次（后台的 prewarm 正在跑，通常会先准备好）
     LaunchedEffect(warming, warmTries) {
         if (!warming || warmTries >= 10) return@LaunchedEffect
-        kotlinx.coroutines.delay(5_000)
+        delay(5_000)
         if (vods.isEmpty()) {
             warmTries += 1
             reloadTick += 1
         }
     }
-
-    // 回到首页时恢复上次停留的位置（索引由 AppRoot 持有，跨页面存活）
     LaunchedEffect(site.runtimeKey, tab, vods.map { it.id }) {
-        // 只在「用户确实离开过第 0 张」时恢复焦点：首次进入不去抢焦点，
-        // 否则会把刚固定住的 Hero 顶出去、滚动区自己滑到底。
         if (vods.isEmpty()) return@LaunchedEffect
         val target = initialFocusIndex.coerceIn(0, vods.lastIndex)
-        if (target > 0) runCatching { rowState.scrollToItem(target + 1 + if (tab == 0 && continueList.isNotEmpty()) 1 else 0) }
-        delay(100)
-        runCatching { posterFocus.getOrNull(target)?.requestFocus() }
+        if (target > 0) {
+            runCatching { railState.scrollToItem(target) }
+            delay(80)
+            runCatching { posterFocus.getOrNull(target)?.requestFocus() }
+        }
     }
-
-    // L1：首屏前 4 张并发补图（TMDB 有 Token 时走 TMDB，否则走 B站）
     LaunchedEffect(site.key, vods.size) {
         if (vods.isEmpty()) return@LaunchedEffect
         val targets = vods.filter { it.id !in requested }.take(4)
@@ -240,32 +217,15 @@ fun HomeScreen(
         requested += targets.map { it.id }
         val sem = Semaphore(2)
         val resolved = coroutineScope {
-            targets.map { vod -> async { sem.withPermit { repo.enrichPoster(vod, detail = false) } } }
-                .awaitAll()
-        }
-        android.util.Log.d("NextMovieHome", "enriched " + resolved.joinToString(" | ") { "${it.name}=>${it.displayPic.take(60)}" })
-        enrichedById = enrichedById + resolved.associateBy { it.id }
-    }
-
-    // 滚动到新区域时补上后面的卡片
-    LaunchedEffect(rowState.firstVisibleItemIndex) {
-        val start = rowState.firstVisibleItemIndex
-        if (vods.isEmpty()) return@LaunchedEffect
-        val targets = vods.drop(start).take(3).filter { it.id !in requested }
-        if (targets.isEmpty()) return@LaunchedEffect
-        requested += targets.map { it.id }
-        val sem = Semaphore(2)
-        val resolved = coroutineScope {
-            targets.map { vod -> async { sem.withPermit { repo.enrichPoster(vod, detail = false) } } }
-                .awaitAll()
+            targets.map { vod -> async { sem.withPermit { repo.enrichPoster(vod, detail = false) } } }.awaitAll()
         }
         enrichedById = enrichedById + resolved.associateBy { it.id }
     }
 
     val display = remember(vods, enrichedById) { vods.map { enrichedById[it.id] ?: it } }
-    val heroBase = display.firstOrNull { it.id == heroId } ?: display.firstOrNull()
+    val billboardItems = remember(display) { display.take(5) }
+    val heroBase = billboardItems.getOrNull(page.coerceIn(0, (billboardItems.size - 1).coerceAtLeast(0)))
     val hero = heroMeta?.takeIf { it.id == heroBase?.id } ?: heroBase
-    // Debounce navigation; never prefetch an entire wall or resolve playback/login speculatively.
     LaunchedEffect(site.runtimeKey, heroBase?.id, cats) {
         val focused = heroBase ?: return@LaunchedEffect
         delay(700)
@@ -276,535 +236,234 @@ fun HomeScreen(
             if (vod != null && vod.id == focused.id) heroMeta = vod
         }
     }
-    val backdrop = hero?.displayBackdrop.orEmpty()
     LaunchedEffect(display.isNotEmpty()) {
         if (display.isNotEmpty()) android.util.Log.i("NextMovieTiming", "home-ready " + (System.nanoTime() - screenStartedAt) / 1_000_000 + "ms")
+        billboardItems.firstOrNull()?.let { DynamicAccent.fromSeed(it.id) }
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(Tokens.Bg).onPreviewKeyEvent { event ->
-        if (event.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_MENU && event.type == androidx.compose.ui.input.key.KeyEventType.KeyDown) { onOpenSettings(); true } else false
+    StageBackdrop(modifier = Modifier.onPreviewKeyEvent { event ->
+        // 遥控器「菜单」键直达设置：老版本一直有这个快捷键，改版时不能丢
+        if (event.type == KeyEventType.KeyDown &&
+            (event.key == androidx.compose.ui.input.key.Key.Menu || event.key == androidx.compose.ui.input.key.Key.F1)
+        ) { onOpenSettings(); true } else false
     }) {
-        // 焦点切换时背景 300ms 交叉淡入，避免硬切闪一下
-        Crossfade(
-            targetState = backdrop,
-            animationSpec = tween(300),
-            label = "heroBackdrop",
-            modifier = Modifier.fillMaxSize()
-        ) { url ->
-            AsyncImage(
-                model = remember(url) { posterModel(context, url, detail = true) },
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                alpha = 0.55f,
-                modifier = Modifier.fillMaxSize()
-            )
-        }
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        0f to Tokens.ScrimTop,
-                        0.42f to Color.Transparent,
-                        0.68f to Color(0xCC0B0C10),
-                        1f to Tokens.Bg
-                    )
-                )
-        )
-
-        // 左侧压暗：横向渐变与纵向渐变叠加，避免文字区出现生硬的矩形边界
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.horizontalGradient(
-                        0f to Color(0xF20B0C10),
-                        0.42f to Color(0xB30B0C10),
-                        0.76f to Color.Transparent
-                    )
-                )
-        )
-
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 40.dp, vertical = 24.dp)
-        ) {
-            TopBar(
-                site = site,
-                status = repo.configStatus(),
-                onSearch = onSearch,
-                onFavorites = onFavorites,
-                onHistory = onHistory,
-                onOpenSettings = onOpenSettings
-            )
-            Spacer(Modifier.height(10.dp))
-            if (hero != null) {
-                HeroPanel(hero, onOpen = { onOpenDetail(hero) }, onSearch = onSearch)
-                Spacer(Modifier.height(10.dp))
-            }
-            if (cats.isNotEmpty()) {
-                CategoryTabs(cats, tab) { selected ->
-                    tab = selected; onTabChanged(selected)
-                }
-                Spacer(Modifier.height(10.dp))
-            }
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(gridColumns), state = rowState,
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-                modifier = Modifier.fillMaxWidth().weight(1f).onSizeChanged { gridColumns = TvGridNavigation.columns(it.width / density) }.mouseWheel(rowState)
-            ) {
-                if (loading || error != null || site.unavailableReason != null || display.isEmpty()) {
-                    item(key = "state", span = { GridItemSpan(maxLineSpan) }) {
-                        when {
-                            warming && error == null ->
-                                WarmingBlock(if (warmSince > 0) warmSince else loadStartedAt)
-                            loading ->
-                                if (loadSecs >= 6) WarmingBlock(loadStartedAt) else HomeSkeleton()
-                            site.unavailableReason != null -> ErrorBlock("站点不可用", site.unavailableReason!!, { reloadTick++ }, onOpenSettings)
-                            error != null -> ErrorBlock("来源加载失败", error!!, { reloadTick++ }, onOpenSettings)
-                            else -> ErrorBlock("此分类暂无内容", "可选择其他分类或更换来源", { reloadTick++ }, onOpenSettings)
-                        }
-                    }
-                } else {
-                    if (tab == 0 && continueList.isNotEmpty()) {
-                        item(key = "continue", span = { GridItemSpan(maxLineSpan) }) {
-                            Column {
-                                SectionTitle("继续观看")
-                                Spacer(Modifier.height(8.dp))
-                                LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                                    items(continueList, key = { it.key }) { entry -> ContinueCard(entry, { onResume(entry) }) }
-                                }
-                            }
-                        }
-                    }
-                    item(key = "heading", span = { GridItemSpan(maxLineSpan) }) {
-                        SectionTitle(if (tab == 0) "最近更新" else cats.getOrNull(tab - 1)?.second.orEmpty())
-                    }
-                    itemsIndexed(display, key = { index, vod -> "poster|" + vod.id + "|" + index }) { index, vod ->
-                        PosterCard(vod, { onOpenDetail(vod) }, {
-                            heroId = vod.id; onFocusIndexChanged(index)
-                        }, modifier = Modifier.focusRequester(posterFocus[index]).onPreviewKeyEvent { event ->
-                            val key = event.nativeKeyEvent.keyCode
-                            if (event.type != androidx.compose.ui.input.key.KeyEventType.KeyDown || key !in 19..22) false
-                            else {
-                                val target = TvGridNavigation.target(index, gridColumns, display.size, key)
-                                if (target == null) false else {
-                                    if (target != index) scope.launch {
-                                        val gridIndex = target + 1 + if (tab == 0 && continueList.isNotEmpty()) 1 else 0
-                                        if (rowState.layoutInfo.visibleItemsInfo.none { it.index == gridIndex }) {
-                                            rowState.scrollToItem(gridIndex)
-                                            delay(60)
-                                        }
-                                        runCatching { posterFocus[target].requestFocus() }
-                                    }
-                                    true
-                                }
-                            }
-                        })
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TopBar(
-    site: Site,
-    status: AppRepository.ConfigStatus?,
-    onSearch: () -> Unit,
-    onFavorites: () -> Unit,
-    onHistory: () -> Unit,
-    onOpenSettings: () -> Unit
-) {
-    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Row(verticalAlignment = Alignment.Bottom) {
-            Text(
-                text = "NEXT MOVIE",
-                color = Tokens.Text,
-                style = MaterialTheme.typography.titleLarge.copy(
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 3.sp
-                )
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = "HOST",
-                color = Tokens.Accent,
-                style = MaterialTheme.typography.labelSmall.copy(
-                    fontSize = Tokens.Type.micro,
-                    letterSpacing = Tokens.Type.MICRO_TRACK.sp
+        Column(modifier = Modifier.fillMaxSize().padding(top = 10.dp)) {
+            GlassTopBar(
+                tabs = listOf(
+                    TabSpec("首页", true) {},
+                    TabSpec("收藏", false) { onFavorites() },
+                    TabSpec("历史", false) { onHistory() },
+                    TabSpec("搜索", false) { onSearch() },
+                    TabSpec("设置", false) { onOpenSettings() }
                 ),
-                modifier = Modifier.padding(bottom = 3.dp)
+                status = repo.configStatus()?.text,
+                statusOk = repo.configStatus()?.ok ?: true,
+                onStatusClick = onOpenSettings,
+                modifier = Modifier.padding(horizontal = 28.dp)
             )
-        }
-        Spacer(Modifier.width(32.dp))
-        NavPill("推荐", active = true, onClick = {})
-        Spacer(Modifier.width(6.dp))
-        NavPill("搜索", active = false, onClick = onSearch)
-        Spacer(Modifier.width(6.dp))
-        NavPill("收藏", active = false, onClick = onFavorites)
-        Spacer(Modifier.width(6.dp))
-        NavPill("历史", active = false, onClick = onHistory)
-        Spacer(Modifier.width(6.dp))
-        NavPill("设置", active = false, onClick = onOpenSettings)
-        Spacer(Modifier.weight(1f))
-        status?.let {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(Tokens.Corner.pill))
-                    .background(Tokens.Surface)
-                    .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
-            ) {
-                Box(
-                    Modifier
-                        .size(6.dp)
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(if (it.ok) Tokens.Accent else Tokens.Danger)
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = it.text,
-                    color = if (it.ok) Tokens.TextDim else Tokens.Danger,
-                    style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 300.dp)
-                )
-            }
-            Spacer(Modifier.width(16.dp))
-        }
-    }
-}
-
-@Composable
-private fun NavPill(text: String, active: Boolean, onClick: () -> Unit) {
-    Text(
-        text = text,
-        color = if (active) Tokens.Text else Tokens.TextDim,
-        style = MaterialTheme.typography.labelLarge,
-        modifier = Modifier
-            .clip(RoundedCornerShape(Tokens.Corner.pill))
-            .background(if (active) Tokens.SurfaceHigh else Color.Transparent)
-            .tvClickable(onClick = onClick, corner = Tokens.Corner.pill)
-            .padding(horizontal = 18.dp, vertical = 9.dp)
-    )
-}
-
-/**
- * Hero 信息区：片名 + 元信息 + 两行简介 + 主次操作。
- * 背景是当前焦点影片的剧照，这里只负责把「这是哪部片、能不能看」讲清楚。
- */
-@Composable
-private fun HeroPanel(vod: Vod, onOpen: () -> Unit, onSearch: () -> Unit) {
-    Column(modifier = Modifier.fillMaxWidth(0.56f)) {
-        Text(
-            text = vod.name,
-            color = Tokens.Text,
-            style = MaterialTheme.typography.displaySmall.copy(fontSize = 30.sp),
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            lineHeight = 40.sp
-        )
-        val meta = listOf(vod.displayYear, vod.area, vod.typeName, vod.remark)
-            .filter { it.isNotBlank() }
-            .distinct()
-            .joinToString("  ·  ")
-        if (meta.isNotBlank()) {
-            Text(
-                text = meta,
-                color = Tokens.Accent,
-                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.4.sp),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 10.dp)
-            )
-        }
-        val overview = vod.displayOverview
-        if (overview.isNotBlank()) {
-            Text(
-                text = overview,
-                color = Tokens.TextDim,
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 8.dp)
-            )
-        }
-        Spacer(Modifier.height(Tokens.Gap.m))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            HeroButton("查看详情", primary = true, onClick = onOpen)
-            Spacer(Modifier.width(Tokens.Gap.m))
-            HeroButton("搜索", primary = false, onClick = onSearch)
-        }
-    }
-}
-
-/**
- * Hero 主按钮：主按钮用强调色实心（和遥控器「确定」键语义一致），次按钮描边。
- * 只做视觉/语义，焦点态交给 Compose 默认的 focus 指示，避免自定义指示器与 tab 焦点冲突。
- */
-@Composable
-private fun HeroButton(text: String, primary: Boolean = false, onClick: () -> Unit) {
-    val bg = if (primary) Tokens.Accent else Color.Transparent
-    val fg = if (primary) Tokens.OnAccent else Tokens.Text
-    val shape = RoundedCornerShape(Tokens.Corner.pill)
-    Box(
-        modifier = Modifier
-            .clip(shape)
-            .background(bg)
-            .then(if (primary) Modifier else Modifier.border(1.dp, Tokens.StrokeStrong, shape))
-            .tvClickable(onClick = onClick, corner = Tokens.Corner.pill, scaleOnFocus = 1.03f)
-            .padding(horizontal = 22.dp, vertical = 10.dp)
-    ) {
-        Text(text, color = fg, style = MaterialTheme.typography.labelLarge)
-    }
-}
-
-@Composable
-private fun SectionTitle(text: String, trailing: String? = null, onPage: ((Int) -> Unit)? = null) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.Bottom
-    ) {
-        Box(
-            Modifier
-                .size(width = 2.dp, height = 14.dp)
-                .background(Tokens.Accent)
-        )
-        Spacer(Modifier.width(9.dp))
-        Text(
-            text = text,
-            color = Tokens.Text,
-            style = MaterialTheme.typography.titleLarge.copy(
-                fontSize = Tokens.Type.section,
-                letterSpacing = 0.4.sp
-            )
-        )
-        if (trailing != null) {
-            Spacer(Modifier.width(Tokens.Gap.s))
-            Text(
-                text = trailing,
-                color = Tokens.TextDim,
-                style = MaterialTheme.typography.labelSmall
-            )
-        }
-        if (onPage != null) {
-            Spacer(Modifier.weight(1f))
-            PageArrow("‹") { onPage(-1) }
-            Spacer(Modifier.width(8.dp))
-            PageArrow("›") { onPage(1) }
-        }
-    }
-}
-
-/** 海报行的左右翻页按钮：电视上比鼠标滚轮更快，也方便纯遥控器用户。 */
-@Composable
-private fun PageArrow(text: String, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .background(Tokens.SurfaceHigh)
-            .tvClickable { onClick() }
-            .padding(horizontal = 10.dp, vertical = 2.dp)
-    ) {
-        Text(text, color = Tokens.TextDim, style = MaterialTheme.typography.titleSmall)
-    }
-}
-
-/** 分类导航条：横向可滚，选中态用强调色底。 */
-@Composable
-private fun CategoryTabs(
-    cats: List<Pair<String, String>>,
-    selected: Int,
-    onSelect: (Int) -> Unit
-) {
-    val state = rememberLazyListState()
-    LazyRow(
-        state = state,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        modifier = Modifier.mouseWheel(state, horizontal = true)
-    ) {
-        item {
-            TabChip("最近更新", selected == 0) { onSelect(0) }
-        }
-        itemsIndexed(cats) { index, item ->
-            TabChip(item.second, selected == index + 1) { onSelect(index + 1) }
-        }
-    }
-}
-
-@Composable
-private fun TabChip(text: String, active: Boolean, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(Tokens.Corner.pill)
-    Box(
-        modifier = Modifier
-            .clip(shape)
-            .background(if (active) Tokens.Accent else Tokens.Surface)
-            .then(if (active) Modifier else Modifier.border(1.dp, Tokens.Stroke, shape))
-            .tvClickable(onClick = onClick, corner = Tokens.Corner.pill)
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-    ) {
-        Text(
-            text = text,
-            color = if (active) Tokens.OnAccent else Tokens.TextDim,
-            style = MaterialTheme.typography.labelMedium,
-            maxLines = 1
-        )
-    }
-}
-
-
-/**
- * 首屏骨架：真实数据回来前先给出布局轮廓，避免"黑屏 + 一行字"的廉价感。
- */
-@Composable
-private fun HomeSkeleton() {
-    val transition = rememberInfiniteTransition(label = "skeleton")
-    val alpha by transition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 0.75f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(900),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "skeletonAlpha"
-    )
-
-    Column(modifier = Modifier.fillMaxWidth()) {
-        SkeletonBar(width = 420.dp, height = 44.dp, alpha = alpha)
-        Spacer(Modifier.height(Tokens.Gap.m))
-        SkeletonBar(width = 280.dp, height = 18.dp, alpha = alpha)
-        Spacer(Modifier.height(Tokens.Gap.m))
-        SkeletonBar(width = 620.dp, height = 16.dp, alpha = alpha)
-        SkeletonBar(width = 560.dp, height = 16.dp, alpha = alpha, top = 8.dp)
-        Spacer(Modifier.height(Tokens.Gap.xxl))
-        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            repeat(6) {
-                Box(
-                    modifier = Modifier
-                        .width(Tokens.CardWidth)
-                        .height(Tokens.CardHeight)
-                        .clip(RoundedCornerShape(Tokens.Corner.card))
-                        .background(Tokens.SurfaceHigh.copy(alpha = alpha))
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun SkeletonBar(width: Dp, height: Dp, alpha: Float, top: Dp = 0.dp) {
-    Box(
-        modifier = Modifier
-            .padding(top = top)
-            .width(width)
-            .height(height)
-            .clip(RoundedCornerShape(Tokens.Corner.badge))
-            .background(Tokens.SurfaceHigh.copy(alpha = alpha))
-    )
-}
-
-@Composable
-private fun LoadingBlock() {
-    Column {
-        Text("正在加载…", color = Tokens.TextDim, style = MaterialTheme.typography.bodyLarge)
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "首次使用插件源需要下载并初始化插件，可能要等几秒",
-            color = Tokens.TextDim,
-            style = MaterialTheme.typography.labelSmall
-        )
-    }
-}
-
-@Composable
-private fun WarmingBlock(sinceMs: Long) {
-    var elapsed by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            elapsed = ((System.currentTimeMillis() - sinceMs) / 1000).toInt()
-            kotlinx.coroutines.delay(1_000)
-        }
-    }
-    Row(
-        modifier = Modifier
-            .widthIn(max = 860.dp)
-            .clip(RoundedCornerShape(Tokens.Corner.panel))
-            .background(Tokens.Surface)
-            .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.panel))
-            .padding(horizontal = 24.dp, vertical = 20.dp),
-        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-    ) {
-        androidx.compose.material3.CircularProgressIndicator(
-            modifier = Modifier.size(22.dp),
-            color = Tokens.Accent,
-            strokeWidth = 2.dp
-        )
-        Spacer(Modifier.width(16.dp))
-        Column {
-            Text("正在准备这个源", color = Tokens.Text, style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(6.dp))
-            Text(
-                "该源首次要启动本地代理并读取远程配置，约 10–30 秒；准备完成后重进都是秒开。" +
-                    if (elapsed > 0) "（已 ${elapsed}s）" else "",
-                color = Tokens.TextDim,
-                style = MaterialTheme.typography.bodyMedium
-            )
+
+            when {
+                hero != null && !loading -> {
+                    Billboard(
+                        vod = hero,
+                        page = page.coerceIn(0, (billboardItems.size - 1).coerceAtLeast(0)),
+                        pageCount = billboardItems.size,
+                        onOpen = { onOpenDetail(hero) },
+                        onPlay = { onOpenDetail(hero) },
+                        onFocused = { heroMeta = heroMeta },
+                        onPageStep = { step ->
+                            page = (page + step).coerceIn(0, billboardItems.lastIndex.coerceAtLeast(0))
+                        },
+                        modifier = Modifier.padding(horizontal = Tokens.ScreenPadding)
+                    )
+                }
+                else -> BillboxPlaceholder(
+                    loading = loading,
+                    error = error,
+                    warming = warming,
+                    since = if (warmSince > 0) warmSince else loadStartedAt,
+                    tries = warmTries,
+                    siteReason = site.unavailableReason,
+                    onRetry = { reloadTick++ },
+                    onOpenSettings = onOpenSettings
+                )
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            // 分类行固定占位：插件源的分类接口比首页慢，晚到时不至于把下面的海报行顶出屏幕
+            Box(modifier = Modifier.fillMaxWidth().height(if (cats.isEmpty()) 0.dp else 34.dp)) {
+                if (cats.isNotEmpty()) {
+                    ChipRow(
+                        labels = listOf("最近更新") + cats.map { it.second },
+                        selected = tab,
+                        onSelect = { tab = it; onTabChanged(it) }
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+
+            if (hero != null && display.isNotEmpty()) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(0.dp)
+                ) {
+                    if (tab == 0 && continueList.isNotEmpty()) {
+                        item(key = "continue") {
+                            Rail(
+                                title = "继续观看",
+                                subtitle = "接着上次的位置继续 · ${continueList.size} 部",
+                                items = continueList,
+                                key = { it.key },
+                                card = { entry -> ContinueCard(entry, { onResume(entry) }) }
+                            )
+                        }
+                    }
+                    item(key = "rail") {
+                        Rail(
+                            title = if (tab == 0) "最近更新" else cats.getOrNull(tab - 1)?.second.orEmpty(),
+                            subtitle = "共 ${display.size} 部 · ${site.name}",
+                            items = display,
+                            key = { it.id + it.name },
+                            state = railState,
+                            card = { vod ->
+                                val index = display.indexOf(vod)
+                                PosterCard(
+                                    vod = vod,
+                                    onClick = { onOpenDetail(vod) },
+                                    onFocused = { onFocusIndexChanged(index) },
+                                    modifier = Modifier
+                                        .focusRequester(posterFocus.getOrElse(index) { FocusRequester() })
+                                )
+                            }
+                        )
+                    }
+                }
+            }
         }
     }
 }
 
+/** 巨幕位（加载/错误/预热共用）：保持同一块圆角玻璃面板，避免首屏结构在加载前后跳变。 */
 @Composable
-private fun ErrorBlock(
-    title: String,
-    message: String,
+private fun BillboxPlaceholder(
+    loading: Boolean,
+    error: String?,
+    warming: Boolean,
+    since: Long,
+    tries: Int,
+    siteReason: String?,
     onRetry: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
-    Column(
+    val shape = RoundedCornerShape(Tokens.Corner.hero)
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(since) {
+        while (true) {
+            now = System.currentTimeMillis()
+            delay(1_000)
+        }
+    }
+    val secs = if (since > 0) ((now - since) / 1000).coerceAtLeast(0) else 0
+    Box(
         modifier = Modifier
-            .widthIn(max = 860.dp)
-            .clip(RoundedCornerShape(Tokens.Corner.panel))
-            .background(Tokens.Surface)
-            .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.panel))
-            .padding(horizontal = 24.dp, vertical = 20.dp)
+            .fillMaxWidth()
+            .height(186.dp)
+            .padding(horizontal = Tokens.ScreenPadding)
+            .clip(shape)
+            .background(Color(0xFF101116))
+            .border(1.dp, Tokens.Stroke, shape)
     ) {
-        Text(title, color = Tokens.Text, style = MaterialTheme.typography.titleLarge)
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = message,
-            color = Tokens.TextDim,
-            style = MaterialTheme.typography.bodyMedium,
-            maxLines = 6,
-            overflow = TextOverflow.Ellipsis
+        val pulse by rememberInfiniteTransition(label = "pulse").animateFloat(
+            0.35f, 0.75f, infiniteRepeatable(tween(1400), RepeatMode.Reverse), label = "pulseAlpha"
         )
-        Spacer(Modifier.height(16.dp))
-        Row {
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(Tokens.Corner.pill))
-                    .background(Tokens.Accent)
-                    .tvClickable(onClick = onRetry, corner = Tokens.Corner.pill)
-                    .padding(horizontal = 22.dp, vertical = 10.dp)
-            ) {
-                Text("重试", color = Tokens.OnAccent, style = MaterialTheme.typography.labelLarge)
-            }
-            Spacer(Modifier.width(12.dp))
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(Tokens.Corner.pill))
-                    .border(1.dp, Tokens.StrokeStrong, RoundedCornerShape(Tokens.Corner.pill))
-                    .tvClickable(onClick = onOpenSettings, corner = Tokens.Corner.pill)
-                    .padding(horizontal = 22.dp, vertical = 10.dp)
-            ) {
-                Text("换站点 / 改配置", color = Tokens.Text, style = MaterialTheme.typography.labelLarge)
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.radialGradient(
+                    0f to Tokens.AccentDim.copy(alpha = 0.5f),
+                    1f to Color.Transparent,
+                    center = androidx.compose.ui.geometry.Offset(240f, 60f),
+                    radius = 900f
+                )
+            )
+        )
+        Column(
+            modifier = Modifier.align(Alignment.CenterStart).padding(start = 48.dp, end = 300.dp),
+            horizontalAlignment = Alignment.Start
+        ) {
+            when {
+                siteReason != null -> {
+                    Text("站点不可用", color = Tokens.Text, style = MaterialTheme.typography.titleLarge.copy(fontSize = 26.sp))
+                    Spacer(Modifier.height(8.dp))
+                    Text(siteReason, color = Tokens.TextDim, style = MaterialTheme.typography.bodyMedium, maxLines = 3)
+                    Spacer(Modifier.height(20.dp))
+                    Row {
+                        BillboardButton("打开设置", primary = true, onClick = onOpenSettings)
+                        Spacer(Modifier.width(12.dp))
+                        BillboardButton("重试", primary = false, onClick = onRetry)
+                    }
+                }
+                error != null -> {
+                    Text("来源加载失败", color = Tokens.Text, style = MaterialTheme.typography.titleLarge.copy(fontSize = 26.sp))
+                    Spacer(Modifier.height(8.dp))
+                    Text(error, color = Tokens.TextDim, style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(20.dp))
+                    Row {
+                        BillboardButton("重试", primary = true, onClick = onRetry)
+                        Spacer(Modifier.width(12.dp))
+                        BillboardButton("打开设置", primary = false, onClick = onOpenSettings)
+                    }
+                }
+                warming || (loading && secs >= 6) -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(Tokens.Accent.copy(alpha = pulse))
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            "正在准备这个源",
+                            color = Tokens.Text,
+                            style = MaterialTheme.typography.titleLarge.copy(fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "插件源首次读取要起本地代理并拉取配置，约 10–30 秒；准备好后会自动刷新" +
+                            if (tries > 0) "（已重试 $tries 次）" else "",
+                        color = Tokens.TextDim,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 3
+                    )
+                    Spacer(Modifier.height(18.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "已等待 ${secs}s",
+                            color = Tokens.Accent,
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                        Spacer(Modifier.width(16.dp))
+                        if (secs >= 20) BillboardButton("立即重试", primary = false, onClick = onRetry)
+                    }
+                }
+                else -> {
+                    SkeletonTitle(pulse)
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun SkeletonTitle(alpha: Float) {
+    Column {
+        Box(Modifier.width(120.dp).height(12.dp).clip(RoundedCornerShape(6.dp)).background(Color(0x33FFFFFF).copy(alpha = alpha * 0.5f)))
+        Spacer(Modifier.height(16.dp))
+        Box(Modifier.width(420.dp).height(40.dp).clip(RoundedCornerShape(10.dp)).background(Color(0x33FFFFFF).copy(alpha = alpha * 0.6f)))
+        Spacer(Modifier.height(12.dp))
+        Box(Modifier.width(260.dp).height(14.dp).clip(RoundedCornerShape(7.dp)).background(Color(0x26FFFFFF).copy(alpha = alpha * 0.5f)))
     }
 }

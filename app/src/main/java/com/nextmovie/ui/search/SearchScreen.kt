@@ -46,6 +46,7 @@ import com.nextmovie.core.config.Site
 import com.nextmovie.core.model.Vod
 import com.nextmovie.ui.common.PosterCard
 import com.nextmovie.ui.common.mouseWheel
+import com.nextmovie.ui.common.ScreenTopBar
 import com.nextmovie.ui.common.tvClickable
 import com.nextmovie.ui.theme.Tokens
 import kotlinx.coroutines.Dispatchers
@@ -172,39 +173,9 @@ fun SearchScreen(
                 }
             }
     ) {
+        ScreenTopBar(title = "", onBack = onBack, trailing = "全网聚合 · 最多 $MAX_SOURCES 个可搜索源")
+        Spacer(Modifier.height(6.dp))
         // ——— 顶栏 ———
-        Row(verticalAlignment = Alignment.Bottom) {
-            Text(
-                text = "NEXT MOVIE",
-                color = Tokens.Text,
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold, letterSpacing = 3.sp)
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = "SEARCH",
-                color = Tokens.Accent,
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro, letterSpacing = Tokens.Type.MICRO_TRACK.sp),
-                modifier = Modifier.padding(bottom = 2.dp)
-            )
-            Spacer(Modifier.width(22.dp))
-            Text(
-                text = "‹ 返回",
-                color = Tokens.TextDim,
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(Tokens.Corner.pill))
-                    .background(Tokens.Surface)
-                    .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
-                    .tvClickable(onClick = onBack, corner = Tokens.Corner.pill)
-                    .padding(horizontal = 14.dp, vertical = 7.dp)
-            )
-            Spacer(Modifier.weight(1f))
-            Text(
-                text = "全网聚合 · 最多 $MAX_SOURCES 个可搜索源",
-                color = Tokens.TextFaint,
-                style = MaterialTheme.typography.labelSmall
-            )
-        }
 
         Spacer(Modifier.height(12.dp))
 
@@ -238,7 +209,7 @@ fun SearchScreen(
                             editing = true
                             scope.launch { runCatching { fieldFocus.requestFocus() } }
                         }
-                        .padding(horizontal = 14.dp, vertical = 7.dp)
+                        .padding(horizontal = 18.dp, vertical = 9.dp)
                 )
             }
         }

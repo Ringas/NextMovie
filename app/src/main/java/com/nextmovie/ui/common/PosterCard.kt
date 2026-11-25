@@ -7,7 +7,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -36,11 +35,13 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.nextmovie.core.model.Vod
+import com.nextmovie.ui.theme.DynamicAccent
 import com.nextmovie.ui.theme.Tokens
 
 /**
- * 海报卡：6dp 图片圆角 + 聚焦琥珀描边 + 外发光 + 1.035 轻推。
- * 只有卡片本身会发光，片名是静态文字，不参与焦点。
+ * 海报卡（tvOS 原型版）：14dp 大圆角 + 聚焦 1.075 轻推 + 3dp 主色描边与外发光。
+ * 片名压在封面底部（电视墙只给一行的高度），角标贴在左上角。
+ * 聚焦时把整屏主色切到这部作品的海报色相（见 [DynamicAccent]）。
  */
 @Composable
 fun PosterCard(
@@ -49,10 +50,12 @@ fun PosterCard(
     onFocused: () -> Unit,
     modifier: Modifier = Modifier,
     width: Dp = Tokens.CardWidth,
-    height: Dp = Tokens.CardHeight
+    height: Dp = Tokens.CardHeight,
+    progress: Float? = null
 ) {
     val context = LocalContext.current
-    val model = remember(vod.displayPic) { posterModel(context, vod.displayPic, detail = false) }
+    val url = remember(vod.displayPic, vod.pic) { vod.displayPic.ifBlank { vod.pic } }
+    val model = remember(url) { posterModel(context, url, detail = false) }
     var focused by remember { mutableStateOf(false) }
     var imageFailed by remember(vod.displayPic) { mutableStateOf(false) }
     val scale by animateFloatAsState(
@@ -60,7 +63,7 @@ fun PosterCard(
         animationSpec = tween(Tokens.MotionMs, easing = FastOutSlowInEasing),
         label = "posterScale"
     )
-    val shape = RoundedCornerShape(Tokens.Radius)
+    val shape = RoundedCornerShape(Tokens.Corner.card)
 
     Column(
         modifier = modifier
@@ -68,13 +71,17 @@ fun PosterCard(
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
+                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 1f)
             }
             .mouseFocusable()
             .onFocusChanged {
                 focused = it.isFocused
-                if (it.isFocused) onFocused()
+                if (it.isFocused) {
+                    DynamicAccent.fromSeed(vod.id)
+                    onFocused()
+                }
             }
-            .tvClickable(onClick = onClick, corner = Tokens.Radius, showRing = false)
+            .tvClickable(onClick = onClick, corner = Tokens.Corner.card, showRing = false)
     ) {
         Box(
             modifier = Modifier
@@ -82,14 +89,13 @@ fun PosterCard(
                 .height(height)
                 .clip(shape)
                 .background(Tokens.SurfaceHigh)
-                .border(
-                    width = if (focused) 2.dp else 1.dp,
-                    color = if (focused) Tokens.Accent else Tokens.Stroke,
-                    shape = shape
+                .then(
+                    if (focused) Modifier.border(3.dp, Tokens.Accent, shape)
+                    else Modifier.border(1.dp, Tokens.Stroke, shape)
                 )
-                .tvFocusRing(corner = Tokens.Radius, visible = focused)
+                .then(if (focused) Modifier.tvFocusRing(corner = Tokens.Corner.card, visible = true) else Modifier)
         ) {
-            if (vod.displayPic.isBlank() || imageFailed) {
+            if (url.isBlank() || imageFailed) {
                 PosterPlaceholder(name = vod.name, modifier = Modifier.fillMaxSize())
             } else {
                 AsyncImage(
@@ -100,39 +106,81 @@ fun PosterCard(
                     modifier = Modifier.fillMaxSize()
                 )
             }
-            // 底部压暗，保证角标与片名在亮海报上也读得清
+
             Box(
-                modifier = Modifier
+                Modifier
                     .fillMaxSize()
-                    .background(Brush.verticalGradient(0.55f to Color.Transparent, 1f to Color(0xE60B0C10)))
+                    .background(
+                        if (focused) {
+                            Brush.verticalGradient(0.42f to Color.Transparent, 1f to Tokens.AccentDim.copy(alpha = 0.28f))
+                        } else {
+                            Brush.verticalGradient(0.55f to Color.Transparent, 1f to Color(0xE60B0C10))
+                        }
+                    )
             )
+
             if (vod.remark.isNotBlank()) {
                 Text(
-                    text = vod.remark,
+                    text = vod.remark.take(8),
                     color = if (focused) Tokens.OnAccent else Tokens.Text,
-                    style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro),
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro, fontWeight = FontWeight.SemiBold),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(6.dp)
+                        .align(Alignment.TopStart)
+                        .padding(10.dp)
                         .clip(RoundedCornerShape(Tokens.Corner.badge))
                         .background(if (focused) Tokens.Accent else Color(0xCC0B0C10))
-                        .padding(horizontal = 5.dp, vertical = 2.dp)
+                        .padding(horizontal = 7.dp, vertical = 3.dp)
                 )
             }
-            // 片名压在图上：电视墙只给一行的高度，与其把名字挤到画面外，不如贴在封面底部
-            Text(
-                text = vod.name,
-                color = Tokens.Text,
-                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+
+            Column(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .fillMaxWidth()
-                    .padding(start = 8.dp, end = 8.dp, bottom = 7.dp)
-            )
+                    .padding(start = 14.dp, end = 14.dp, bottom = if (progress != null) 18.dp else 12.dp)
+            ) {
+                Text(
+                    text = vod.name,
+                    color = Tokens.Text,
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                val meta = listOfNotNull(
+                    vod.displayYear.takeIf { it.isNotBlank() },
+                    vod.typeName.substringBefore(',').takeIf { it.isNotBlank() }
+                ).joinToString(" · ")
+                if (meta.isNotBlank()) {
+                    Text(
+                        text = meta,
+                        color = Tokens.TextDim,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            if (progress != null) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(Color(0x1FFFFFFF))
+                ) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth(progress.coerceIn(0f, 1f))
+                            .height(3.dp)
+                            .background(Tokens.Accent)
+                    )
+                }
+            }
         }
     }
 }
