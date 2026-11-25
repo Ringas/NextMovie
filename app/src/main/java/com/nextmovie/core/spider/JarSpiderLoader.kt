@@ -26,7 +26,13 @@ class JarSpiderLoader(
 
     class SpiderLoadException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
-    private val loadLock = Mutex()
+    /**
+     * 按 jar 分锁：同一份 jar 内的站点串行初始化（避免 Guard 原生代理抢同一个端口），
+     * 不同 jar 可以并行装载。原来的全局单锁会让详情页 12 个站点的首次初始化互相排队。
+     */
+    private val loadLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
+    private fun lockFor(site: Site): Mutex =
+        loadLocks.getOrPut(site.jar.ifBlank { site.api }) { Mutex() }
     private val jarDir = File(context.filesDir, "spiders").apply { mkdirs() }
     private val dexDir = File(context.codeCacheDir, "spider-dex").apply { mkdirs() }
     private val instances = java.util.concurrent.ConcurrentHashMap<String, Spider>()
@@ -46,7 +52,7 @@ class JarSpiderLoader(
 
     suspend fun obtain(site: Site): Spider = withContext(Dispatchers.IO) {
         try {
-            loadLock.withLock { obtainInner(site) }
+            lockFor(site).withLock { obtainInner(site) }
         } catch (t: Throwable) {
             PluginDiag.record(context, site.name, site.api, false, t.message)
             throw t

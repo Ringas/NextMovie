@@ -148,6 +148,7 @@ fun DetailScreen(
     var manual by remember { mutableStateOf(false) }
     var filter by remember { mutableIntStateOf(0) }
     var reload by remember { mutableIntStateOf(0) }
+    var moreSources by remember { mutableIntStateOf(0) }
     var descending by remember { mutableStateOf(false) }
     var groupIndex by remember { mutableIntStateOf(0) }
     var synopsisExpanded by remember { mutableStateOf(false) }
@@ -159,36 +160,60 @@ fun DetailScreen(
     val lineFocus = remember { FocusRequester() }
     val epFocus = remember { FocusRequester() }
 
+    // 进详情只查「当前来源」一次：这是拿到线路的最短路径（Marco 同模型）。
+    // 全网比对改成显式动作（「更多来源」），不再让 12 个站点的首次初始化挡在选集前面。
     LaunchedEffect(initial.id, site.key, reload) {
         val ready = repo.readyDetail(site, initial.id)
-        loading = ready == null
-        hint = "正在聚合全网来源…"
         agg = ready
         error = null
         sourceIndex = 0
         lineIndex = ready?.best?.bestLineIndex ?: 0
         manual = false
         groupIndex = 0
+        loading = ready == null
+        hint = if (ready != null) "当前来源已就绪" else "正在读取当前来源…"
+        if (ready == null) {
+            val quick = runCatching { repo.detailForSite(site, initial) }.getOrNull()
+            if (quick != null && quick.sources.isNotEmpty()) {
+                android.util.Log.i("NextMovieTiming", "detail-quick ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms")
+                agg = quick
+                lineIndex = quick.best?.bestLineIndex ?: 0
+                hint = "当前来源 ·「${quick.best?.site?.name ?: site.name}」"
+                loading = false
+            } else {
+                loading = false
+                error = "当前来源没有返回可用线路"
+            }
+        }
+    }
+
+    LaunchedEffect(moreSources) {
+        if (moreSources == 0) return@LaunchedEffect
+        loading = agg == null
+        hint = "正在比对其它来源（最多 4 个）…"
         val result = runCatching {
-            repo.aggregateDetail(site, initial) { partial ->
-                if (agg == null && partial.sources.isNotEmpty()) {
+            repo.aggregateDetail(site, initial, crossSiteLimit = 4) { partial ->
+                if (partial.sources.size > (agg?.sources?.size ?: 0)) {
                     android.util.Log.i("NextMovieTiming", "detail-partial ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms sources=${partial.sources.size}")
                     agg = partial
-                    lineIndex = partial.best?.bestLineIndex ?: 0
+                    if (!manual) {
+                        sourceIndex = 0
+                        lineIndex = partial.best?.bestLineIndex ?: 0
+                    }
                     loading = false
-                    hint = "已找到「${partial.best?.site?.name ?: site.name}」，继续比对其它来源…"
+                    hint = "已比到「${partial.best?.site?.name ?: site.name}」等 ${partial.sources.size} 个来源…"
                 }
             }
         }
         result.onFailure {
             if (it is kotlinx.coroutines.CancellationException) throw it
-            error = com.nextmovie.core.net.FriendlyError.describe(it)
+            if (agg == null) error = com.nextmovie.core.net.FriendlyError.describe(it)
             loading = false
         }
         val full = result.getOrNull()
         if (full == null || full.sources.isEmpty()) {
             loading = false
-            if (agg == null) error = "所有站点都没有返回这部片的可用线路"
+            if (agg == null) error = "其它来源也没有返回这部片的可用线路"
         } else {
             android.util.Log.i("NextMovieTiming", "detail-ready ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms sources=${full.sources.size}")
             val previousBest = agg?.best?.site?.key
@@ -199,9 +224,9 @@ fun DetailScreen(
             }
             loading = false
             hint = buildString {
-                append("已聚合 ${full.sources.size} 个来源 · 自动选中「${full.best?.site?.name ?: site.name}」")
+                append("已比对 ${full.sources.size} 个来源 · 采用「${full.best?.site?.name ?: site.name}」")
                 full.best?.badge?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
-                if (previousBest != null && previousBest != full.best?.site?.key) append("（已自动切到更优源）")
+                if (previousBest != null && previousBest != full.best?.site?.key) append("（已切到更优源）")
             }
         }
     }
@@ -568,6 +593,14 @@ fun DetailScreen(
                             verticalPadding = 14.dp,
                             onClick = { filter = 0; sourceIndex = 0; manual = true }
                         )
+                    } else if (sources.isNotEmpty()) {
+                        TvPill(
+                            text = "查找更多来源",
+                            glass = true,
+                            horizontalPadding = 20.dp,
+                            verticalPadding = 14.dp,
+                            onClick = { moreSources++ }
+                        )
                     }
                 }
             }
@@ -602,6 +635,8 @@ fun DetailScreen(
                             fontSize = 15.sp,
                             modifier = Modifier.weight(1f)
                         )
+                        TvPill(text = "更多来源", glass = true, onClick = { moreSources++ })
+                        Spacer(Modifier.width(10.dp))
                         TvPill(text = "重试加载", glass = true, onClick = { reload++ })
                     }
                     lines.isEmpty() -> Text(

@@ -63,6 +63,9 @@ class AppRepository(private val context: Context) {
     private val warmSites = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val detailSnapshots = com.nextmovie.core.cache.HomeSnapshotStore(File(context.filesDir, "detail-metadata"))
     private val playableDetails = com.nextmovie.core.cache.DetailSnapshotStore(File(context.cacheDir, "playable-details"))
+    /** 站点级失败冷却：同一个 id 失败后 60s 内不再重复打插件，避免重试风暴。 */
+    private val detailFails = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val detailFailTtlMs = 60_000L
     private val prefetchScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
     private val prefetchSlot = java.util.concurrent.Semaphore(1)
     private val configGeneration = java.util.concurrent.atomic.AtomicLong()
@@ -488,10 +491,45 @@ class AppRepository(private val context: Context) {
             com.nextmovie.core.match.SourceRanker.bestLineIndex(ready))))
     }
 
+    /**
+     * 详情页的默认路径：只解析当前这一个来源，超时短、失败立刻返回。
+     * 这是 Marco 的模型（DetailScreen 只用当前源的 lines），也是拿到选集的最短链路。
+     */
+    suspend fun detailForSite(site: Site, vod: Vod, budgetMs: Long = 9_000L): AggregatedDetail? {
+        val started = System.nanoTime()
+        val resolved = try {
+            withTimeoutOrNull(budgetMs) { detail(site, vod.id, altId = vod.name.takeIf { vod.id.isBlank() }) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }?.takeIf { it.lines.any { line -> line.episodes.isNotEmpty() } } ?: return null
+        android.util.Log.i("NextMovieTiming", "detail-site-ready ${(System.nanoTime() - started) / 1_000_000}ms site=${site.name} lines=${resolved.lines.size}")
+        val rank = com.nextmovie.core.match.SourceRanker.sourceScore(site, resolved, sourceSuccessRate(site.key), true)
+        return AggregatedDetail(
+            listOf(
+                SourceDetail(
+                    site,
+                    resolved,
+                    rank.score,
+                    rank.label,
+                    com.nextmovie.core.match.SourceRanker.bestLineIndex(resolved)
+                )
+            )
+        )
+    }
+
     suspend fun detail(site: Site, id: String, altId: String? = null): VodDetail? =
         details.get("detail|${site.runtimeKey}|$id") {
+            val key = "detail|${site.runtimeKey}|$id"
             val started = System.nanoTime()
             val diskKey = detailSnapshotKey(site, id)
+            detailFails[key]?.let { at ->
+                if (System.currentTimeMillis() - at < detailFailTtlMs) {
+                    android.util.Log.i("NextMovieTiming", "detail-source cache=fail-cooldown")
+                    return@get null
+                }
+            }
             // Interactive/netdisk IDs can be login or folder actions. They must stay live.
             val canPersist = !listOf("wogg", "网盘", "玩偶", "夸克", "alist", "netdisk", "config")
                 .any { "${site.api} ${site.name}".contains(it, true) } &&
@@ -505,7 +543,15 @@ class AppRepository(private val context: Context) {
             }
             val generation = detailSnapshots.generation
             val playableGeneration = playableDetails.generation
-            val result = if (site.isCms) cms(site).detail(id) else spiderHost.detail(site, id, altId)
+            val result = try {
+                if (site.isCms) cms(site).detail(id) else spiderHost.detail(site, id, altId)
+            } catch (t: Throwable) {
+                detailFails[key] = System.currentTimeMillis()
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                android.util.Log.w("NextMovieTiming", "detail-source fail ${"${site.name}"} ${t.javaClass.simpleName}")
+                throw t
+            }
+            if (result == null) detailFails[key] = System.currentTimeMillis() else detailFails.remove(key)
             android.util.Log.i("NextMovieTiming", "detail-source cache=miss ${(System.nanoTime() - started) / 1_000_000}ms")
             if (result != null) withContext(kotlinx.coroutines.Dispatchers.IO) {
                 detailSnapshots.write(diskKey, listOf(result.vod.copy(action = "")), generation)
@@ -598,7 +644,7 @@ class AppRepository(private val context: Context) {
     suspend fun aggregateDetail(
         site: Site,
         vod: Vod,
-        crossSiteLimit: Int = 12,
+        crossSiteLimit: Int = 4,
         onPartial: (AggregatedDetail) -> Unit = {}
     ): AggregatedDetail? {
         val keyword = vod.name.trim()
@@ -637,7 +683,15 @@ class AppRepository(private val context: Context) {
                 // must not occupy the plugin/network queue before its detail request.
                 if (index != 0) withTimeoutOrNull(1_500) { primaryReturned.await() }
                 gate.withPermit {
-                    val hit = withTimeoutOrNull(if (index == 0 && candidate.isSpider && candidate.runtimeKey !in warmSites) 30_000L else if (index == 0) 8_000L else 10_000L) {
+                    val hit = withTimeoutOrNull(
+                        when {
+                            // 首次冷启动要下载 jar + 解压 native + Init，给足 15s；之后一律短超时
+                            index == 0 && candidate.isSpider && candidate.runtimeKey !in warmSites -> 15_000L
+                            index == 0 -> 8_000L
+                            else -> 6_000L
+                        }
+                    ) {
+
                         detailAttempt {
                             val resolved: VodDetail? =
                                 if (index == 0 && vod.id.isNotBlank()) detail(candidate, vod.id, altId = vod.name)
