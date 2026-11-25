@@ -177,13 +177,13 @@ object Tokens {
     val DarkInk = Color(0xFF0A0F1A)
 
     val PosterRatio = 0.56f
-    val FocusScale = 1.045f
+    val FocusScale = 1.08f
     const val MotionMs = 160
 
     val ScreenPadding = 56.dp
     val RowGap = 24.dp
-    val CardWidth = 156.dp
-    val CardHeight = 234.dp
+    val CardWidth = 160.dp
+    val CardHeight = 240.dp
     val WideWidth = 268.dp
     val WideHeight = 150.dp
     val Radius = 14.dp

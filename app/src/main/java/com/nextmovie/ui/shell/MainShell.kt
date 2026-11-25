@@ -1,14 +1,8 @@
 package com.nextmovie.ui.shell
 
-import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.List
-import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -17,28 +11,24 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.dp
 import com.nextmovie.core.AppRepository
 import com.nextmovie.core.config.Site
 import com.nextmovie.core.history.HistoryEntry
 import com.nextmovie.core.model.Vod
 import com.nextmovie.ui.common.AmbientBackdrop
-import com.nextmovie.ui.common.FloatingTopBar
-import com.nextmovie.ui.common.NavTab
 import com.nextmovie.ui.home.HomeScreen
 import com.nextmovie.ui.library.LibraryScreen
 import com.nextmovie.ui.netdisk.NetdiskScreen
 import com.nextmovie.ui.search.SearchScreen
-import com.nextmovie.ui.settings.Pairing
 import com.nextmovie.ui.settings.PairingDialog
 import com.nextmovie.ui.settings.SettingsScreen
 
 /**
- * 主外壳（对齐 Marco `TvLivingRoomShell`）
- *
- * 全局只有一份柔光背景 + 一枚居中玻璃胶囊顶栏，五个标签页（发现 / 搜索 / 片库 / 网盘 / 设置）
- * 都是外壳里的内容区，切页不重建背景、不重建顶栏，和 Marco 完全同构。
- * 详情页与播放器是压在外壳之上的独立层级，由 MainActivity 负责路由。
+ * 主壳：左侧固定导航轨 + 右侧内容。
+ * 交互原则：
+ * - 顶层只有 5 个入口，不再用顶部胶囊叠多层导航
+ * - 内容区自己管理焦点；返回键由各页 / Activity 处理
+ * - 背景柔光统一由壳层绘制，页面不再各铺一层
  */
 @Composable
 fun MainShell(
@@ -46,79 +36,74 @@ fun MainShell(
     site: Site,
     onOpenDetail: (Site, Vod) -> Unit,
     onResume: (HistoryEntry) -> Unit,
-    onOpenAccounts: () -> Unit,
-    onTab: (Int) -> Unit = {},
-    initialTab: Int = 0,
+    onOpenAccounts: () -> Unit = {},
     homeInitialFocusIndex: Int = 0,
     homeInitialCategory: Int = 0,
     homeReloadSignal: Int = 0,
     onHomeTabChanged: (Int) -> Unit = {},
-    onHomeFocusIndexChanged: (Int) -> Unit = {}
+    onHomeFocusIndexChanged: (Int) -> Unit = {},
+    initialTab: Int = 0,
 ) {
-    var tab by remember { mutableIntStateOf(initialTab) }
+    var tab by remember { mutableIntStateOf(initialTab.coerceIn(0, ShellTab.entries.lastIndex)) }
     var tint by remember { mutableStateOf<Color?>(null) }
     var pairing by remember { mutableStateOf(false) }
+    val selected = ShellTab.entries.getOrElse(tab) { ShellTab.Home }
 
-    androidx.compose.foundation.layout.Box(Modifier.fillMaxSize()) {
-        AmbientBackdrop(posterTint = tint)
-        Column(Modifier.fillMaxSize()) {
-            FloatingTopBar(
-                tabs = listOf(
-                    NavTab(Icons.Filled.Home, "发现", tab == 0) { tab = 0; onTab(0) },
-                    NavTab(Icons.Filled.Search, "搜索", tab == 1) { tab = 1; onTab(1) },
-                    NavTab(Icons.Filled.List, "片库", tab == 2) { tab = 2; onTab(2) },
-                    NavTab(Icons.Filled.Star, "网盘", tab == 3) { tab = 3; onTab(3) },
-                    NavTab(Icons.Filled.Settings, "设置", tab == 4) { tab = 4; onTab(4) }
-                ),
+    Box(Modifier.fillMaxSize()) {
+        AmbientBackdrop(tint = tint)
+        Row(Modifier.fillMaxSize()) {
+            NavRail(
+                selected = selected,
                 status = repo.configStatus()?.text ?: site.name,
-                modifier = Modifier.padding(start = 56.dp, end = 56.dp, top = 28.dp, bottom = 18.dp)
+                onSelect = { t ->
+                    tab = t.ordinal
+                    if (t == ShellTab.Home) onHomeTabChanged(0)
+                },
             )
-            androidx.compose.foundation.layout.Box(
-                Modifier
-                    .fillMaxSize()
-            ) {
-                when (tab) {
-                    1 -> SearchScreen(
-                        repo = repo,
-                        site = site,
-                        onOpenDetail = { foundSite, vod -> onOpenDetail(foundSite, vod) },
-                        onBack = {}
-                    )
-                    2 -> LibraryScreen(
-                        repo = repo,
-                        onOpenDetail = { foundSite, vod -> onOpenDetail(foundSite, vod) },
-                        onResume = onResume
-                    )
-                    3 -> NetdiskScreen(
-                        repo = repo,
-                        onOpenAccounts = onOpenAccounts,
-                        onPair = { pairing = true }
-                    )
-                    4 -> SettingsScreen(
-                        repo = repo,
-                        onBack = { tab = 0; onTab(0) },
-                        onConfigLoaded = { tab = 0; onTab(0) }
-                    )
-                    else -> HomeScreen(
+            Box(Modifier.weight(1f).fillMaxSize()) {
+                when (selected) {
+                    ShellTab.Home -> HomeScreen(
                         repo = repo,
                         site = site,
                         onOpenDetail = { vod -> onOpenDetail(site, vod) },
-                        onOpenSettings = { tab = 4; onTab(4) },
-                        onSearch = { tab = 1; onTab(1) },
-                        onFavorites = { tab = 2; onTab(2) },
-                        onHistory = { tab = 2; onTab(2) },
+                        onOpenSettings = { tab = ShellTab.Settings.ordinal },
+                        onSearch = { tab = ShellTab.Search.ordinal },
+                        onFavorites = { tab = ShellTab.Library.ordinal },
+                        onHistory = { tab = ShellTab.Library.ordinal },
                         onResume = onResume,
                         initialFocusIndex = homeInitialFocusIndex,
                         initialTab = homeInitialCategory,
                         reloadSignal = homeReloadSignal,
                         onTabChanged = onHomeTabChanged,
                         onFocusIndexChanged = onHomeFocusIndexChanged,
-                        onTint = { tint = it }
+                        onTint = { tint = it },
+                    )
+                    ShellTab.Search -> SearchScreen(
+                        repo = repo,
+                        site = site,
+                        onOpenDetail = { foundSite, vod -> onOpenDetail(foundSite, vod) },
+                        onBack = { tab = ShellTab.Home.ordinal },
+                    )
+                    ShellTab.Library -> LibraryScreen(
+                        repo = repo,
+                        onOpenDetail = { foundSite, vod -> onOpenDetail(foundSite, vod) },
+                        onResume = onResume,
+                    )
+                    ShellTab.Netdisk -> NetdiskScreen(
+                        repo = repo,
+                        onOpenAccounts = onOpenAccounts,
+                        onPair = { pairing = true },
+                    )
+                    ShellTab.Settings -> SettingsScreen(
+                        repo = repo,
+                        onBack = { tab = ShellTab.Home.ordinal },
+                        onConfigLoaded = { tab = ShellTab.Home.ordinal },
                     )
                 }
             }
         }
     }
-
-    if (pairing) PairingDialog(onDismiss = { pairing = false }, onReceived = { pairing = false })
+    if (pairing) {
+        PairingDialog(onDismiss = { pairing = false }, onReceived = { pairing = false })
+    }
 }
