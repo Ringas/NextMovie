@@ -31,12 +31,14 @@ object PlaybackRecovery {
         hasMoreLines: Boolean,
         autoSoft: Boolean,
         autoLine: Boolean,
+        /** 本机是否真的存在扩展软解（FFmpeg AAR）；没有时切 SOFT 只是空转 */
+        softAvailable: Boolean = true,
     ): Decision {
         val decodeFail = error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
             error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED ||
             error.errorCode == PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED
 
-        if (decodeFail && autoSoft && !alreadyTriedSoft && currentMode != DecodeMode.SOFT) {
+        if (decodeFail && autoSoft && softAvailable && !alreadyTriedSoft && currentMode != DecodeMode.SOFT) {
             return Decision(
                 action = Action.RETRY_SOFT,
                 message = "硬解失败，正在切换软解重试…",

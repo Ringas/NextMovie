@@ -18,8 +18,8 @@ android {
         // targetSdk 33 时这条路径会被 linker 直接拒掉（"not accessible for the namespace"）。
         // 我们是侧载的 TV 播放器，不依赖 Play 的 targetSdk 要求，28 是这类宿主应用的标准做法。
         targetSdk = 28
-        versionCode = 39
-        versionName = "0.6.23-dev"
+        versionCode = 40
+        versionName = "0.6.24-dev"
     }
 
     // tv   -> armeabi-v7a：交付给电视盒子（多数盒子是 32 位 ARM，v7a 兼容面最广）
@@ -48,6 +48,9 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
+
+    // 单元测试里 Joy/Media3 会触碰 android.os 桩方法，统一返回默认值即可
+    testOptions { unitTests.isReturnDefaultValues = true }
 
     buildFeatures {
         compose = true

@@ -52,7 +52,7 @@ fun MainShell(
     val selected = ShellTab.entries.getOrElse(tab) { ShellTab.Home }
 
     Box(Modifier.fillMaxSize()) {
-        AmbientBackdrop(tint = tint)
+        AmbientBackdrop(posterTint = tint)
         Row(
             Modifier
                 .fillMaxSize()

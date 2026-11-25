@@ -117,6 +117,8 @@ fun PlayerScreen(
     val context = LocalContext.current
     var decodeMode by remember { mutableStateOf(session?.currentDecodeMode() ?: PlayerPrefs.decodeMode(context)) }
     var triedSoft by remember { mutableStateOf(session?.triedSoftFallback ?: false) }
+    // 自动换线计数：换满一轮仍失败就停下报错，不要在几条死线路之间循环
+    var lineAttempts by remember { mutableIntStateOf(session?.triedLines ?: 0) }
     // 软解降级成功后 +1，驱动下方 LaunchedEffect 用新 Renderers 重新 prepare
     var softRetryToken by remember { mutableIntStateOf(0) }
     val player = session?.player ?: remember(decodeMode) {
@@ -231,9 +233,11 @@ fun PlayerScreen(
                     error = error,
                     currentMode = decodeMode,
                     alreadyTriedSoft = triedSoft || (session?.triedSoftFallback == true),
-                    hasMoreLines = slots.size > 1,
+                    hasMoreLines = slots.size > 1 && lineAttempts < slots.size,
                     autoSoft = PlayerPrefs.autoSoftOnDecodeError(context),
                     autoLine = PlayerPrefs.autoLineOnError(context),
+                    // 没装 FFmpeg AAR 时「切软解」只是同一套 MediaCodec 再来一次，直接跳过
+                    softAvailable = NmRenderersFactory.ffmpegAvailable(),
                 )
                 when (decision.action) {
                     PlaybackRecovery.Action.RETRY_SOFT -> {
@@ -255,8 +259,14 @@ fun PlayerScreen(
                         if (slots.size > 1) {
                             val next = (currentSlot + 1) % slots.size
                             pickerIndex = next
+                            lineAttempts += 1
+                            session?.triedLines = lineAttempts
+                            playbackError = null
+                            // 真的切：由上层重新解析这条线路并起播（旧实现只弹了句提示）
+                            onSwitchSlot(next)
+                        } else {
+                            playbackError = decision.message
                         }
-                        playbackError = decision.message
                         hudVisible = true
                     }
                     PlaybackRecovery.Action.SHOW_ERROR -> {

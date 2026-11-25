@@ -40,6 +40,9 @@ class PlaybackSession(context: Context) {
     /** 本会话是否已尝试过软解降级（防止死循环） */
     var triedSoftFallback: Boolean = false
 
+    /** 本会话已经自动换过几条线路（超过线路数就不再换，避免无限循环） */
+    var triedLines: Int = 0
+
     fun currentDecodeMode(): DecodeMode = decodeMode
 
     fun view(context: Context): PlayerView {
@@ -65,6 +68,7 @@ class PlaybackSession(context: Context) {
     fun release() {
         alive = false
         triedSoftFallback = false
+        triedLines = 0
         playerView?.let { (it.parent as? ViewGroup)?.removeView(it) }
         playerView = null
         engine.release()

@@ -260,7 +260,7 @@ class JsSpider(
     }
 
     private fun mergeHeaderObject(builder: Request.Builder, raw: Any?) {
-        val o: JSONObject? = when (raw) {
+        val o: JSONObject = when (raw) {
             null, JSONObject.NULL -> null
             is JSONObject -> raw
             is String -> raw.trim().takeIf { it.startsWith("{") }

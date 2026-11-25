@@ -15,7 +15,9 @@ import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -158,6 +160,16 @@ fun Modifier.tvClickable(
 ): Modifier = composed {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
+    // 同一次确认会被 onPreviewKeyEvent 和 clickable 各触发一次（遥控器上表现为「点两下」），
+    // 这里做 150ms 去重，避免弹窗关掉又自己弹回来。
+    var lastFireAt by remember { mutableLongStateOf(0L) }
+    val fire: () -> Unit = {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastFireAt > 150L) {
+            lastFireAt = now
+            onClick()
+        }
+    }
     val scale by animateFloatAsState(
         targetValue = if (focused) scaleOnFocus else 1f,
         animationSpec = tween(Tokens.MotionMs, easing = FastOutSlowInEasing),
@@ -172,9 +184,9 @@ fun Modifier.tvClickable(
         // 遥控 OK / 键盘 Enter·空格 在部分机型上不会走 clickable，这里再兜一层
         .onPreviewKeyEvent { e ->
             if (enabled && TvKeys.isConfirmUp(e)) {
-                onClick()
+                fire()
                 true
             } else false
         }
-        .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick)
+        .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = fire)
 }

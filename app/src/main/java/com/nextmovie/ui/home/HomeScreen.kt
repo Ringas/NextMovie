@@ -33,7 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier.Modifier
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
@@ -101,6 +101,8 @@ fun HomeScreen(
     var cats by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var tab by remember { mutableIntStateOf(initialTab) }
     var sitePicker by remember { mutableStateOf(false) }
+    // 关掉「切换片源」的同一次按键会继续漏到底层「换源」按钮，加一道时间闸
+    var pickerClosedAt by remember { mutableLongStateOf(0L) }
     var pairing by remember { mutableStateOf(false) }
     val gridState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
@@ -225,7 +227,10 @@ fun HomeScreen(
                 onTabChanged(0)
                 onSiteChanged()
             },
-            onDismiss = { sitePicker = false },
+            onDismiss = {
+                sitePicker = false
+                pickerClosedAt = android.os.SystemClock.elapsedRealtime()
+            },
         )
     }
 
@@ -267,13 +272,23 @@ fun HomeScreen(
                     fontSize = 13.sp,
                 )
             }
-            TvPill(text = "换源", glass = true, horizontalPadding = 16.dp, verticalPadding = 10.dp) {
-                sitePicker = true
-            }
+            TvPill(
+                text = "换源",
+                glass = true,
+                horizontalPadding = 16.dp,
+                verticalPadding = 10.dp,
+                onClick = {
+                    if (android.os.SystemClock.elapsedRealtime() - pickerClosedAt > 250L) sitePicker = true
+                }
+            )
             TvPill(text = "搜索", glass = true, horizontalPadding = 16.dp, verticalPadding = 10.dp, onClick = onSearch)
-            TvPill(text = "刷新", glass = true, horizontalPadding = 16.dp, verticalPadding = 10.dp) {
-                reloadTick += 1
-            }
+            TvPill(
+                text = "刷新",
+                glass = true,
+                horizontalPadding = 16.dp,
+                verticalPadding = 10.dp,
+                onClick = { reloadTick += 1 }
+            )
         }
 
         Spacer(Modifier.height(14.dp))
@@ -446,7 +461,14 @@ private fun SitePickerDialog(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("切换片源", color = Tokens.Text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
-                TvPill(text = "关闭", glass = true, horizontalPadding = 16.dp, verticalPadding = 8.dp, onClick = onDismiss)
+                TvPill(
+                    text = "关闭",
+                    glass = true,
+                    autofocus = true,
+                    horizontalPadding = 16.dp,
+                    verticalPadding = 8.dp,
+                    onClick = onDismiss
+                )
             }
             Spacer(Modifier.height(16.dp))
             val gridState = rememberLazyGridState()

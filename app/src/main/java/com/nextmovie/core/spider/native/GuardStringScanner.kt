@@ -23,9 +23,8 @@ object GuardStringScanner {
         val blob = runCatching { readZipOrRaw(file) }.getOrDefault(ByteArray(0))
         if (blob.isEmpty()) return Findings(emptyList(), emptyList(), emptyList())
         val strings = extractPrintable(blob, minLen = 8, maxCount = 8_000)
-        val urls = strings.filter {
-            it.startsWith("http://") || it.startsWith("https://")
-        }.filter {
+        // URL 常常不是整串的开头（"hello https://..." 这种），按正则从串里挖出来
+        val urls = strings.flatMap { s -> URL_RE.findAll(s).map { it.value } }.filter {
             !it.contains("github.com", true) &&
                 !it.contains("googleapis", true) &&
                 it.length < 200
@@ -45,6 +44,8 @@ object GuardStringScanner {
 
         return Findings(urls, keys, uas)
     }
+
+    private val URL_RE = Regex("""https?://[^\s\"'<>\\)\]]+""")
 
     private fun readZipOrRaw(file: File): ByteArray {
         // 可能是 PK zip / 或尾部 zip（jpg 伪装）

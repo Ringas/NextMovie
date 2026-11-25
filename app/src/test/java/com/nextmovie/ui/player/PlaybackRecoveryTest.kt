@@ -48,4 +48,18 @@ class PlaybackRecoveryTest {
         )
         assertEquals(PlaybackRecovery.Action.SHOW_ERROR, d.action)
     }
+
+    @Test
+    fun noSoftRendererSkipsStraightToLine() {
+        val d = PlaybackRecovery.decide(
+            error = err(PlaybackException.ERROR_CODE_DECODER_INIT_FAILED),
+            currentMode = DecodeMode.AUTO,
+            alreadyTriedSoft = false,
+            hasMoreLines = true,
+            autoSoft = true,
+            autoLine = true,
+            softAvailable = false,
+        )
+        assertEquals(PlaybackRecovery.Action.SWITCH_LINE, d.action)
+    }
 }

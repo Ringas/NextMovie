@@ -333,6 +333,11 @@ fun TvPill(
     var focused by remember { mutableStateOf(false) }
     val actual = focused
     val click = if (enabled) onClick else null
+    // autofocus 之前只声明没落地，弹窗里的按钮因此拿不到焦点（表现就是弹窗关不掉）
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(autofocus) {
+        if (autofocus) runCatching { focusRequester.requestFocus() }
+    }
     val bg: Color = when {
         prominent -> if (actual) Color.White else Color(0xF5F7F9FC)
         destructive -> if (actual) Color(0xFFE5484D) else Tokens.DangerDim
@@ -369,6 +374,7 @@ fun TvPill(
             .clip(shape)
             .background(bg)
             .border(borderWidth, border, shape)
+            .then(if (autofocus) Modifier.focusRequester(focusRequester) else Modifier)
             .onFocusChanged { focused = it.isFocused }
             .tvClickable(corner = borderRadius, showRing = false, enabled = click != null, onClick = { click?.invoke() })
             .padding(horizontal = horizontalPadding, vertical = verticalPadding)

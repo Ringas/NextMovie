@@ -36,7 +36,7 @@ object TvKeys {
         if (event.type != KeyEventType.KeyUp && event.type != KeyEventType.KeyDown) return null
         // 只在 KeyUp 触发一次的动作由调用方用 type 过滤；这里两种都映射
         return when (event.key) {
-            Key.DirectionCenter, Key.Enter, Key.NumPadEnter, Key.Space -> TvAction.Confirm
+            Key.DirectionCenter, Key.Enter, Key.NumPadEnter, Key.Spacebar -> TvAction.Confirm
             Key.Back, Key.Escape -> TvAction.Back
             Key.Menu, Key.Tab -> TvAction.Menu
             Key.DirectionUp -> TvAction.Up

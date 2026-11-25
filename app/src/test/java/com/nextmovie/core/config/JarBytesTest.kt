@@ -18,7 +18,10 @@ class JarBytesTest {
         val out = ByteArrayOutputStream()
         ZipOutputStream(out).use { z ->
             z.putNextEntry(ZipEntry("com/github/catvod/spider/Demo.class"))
-            z.write(ByteArray(2048) { 1 })
+            // 必须用高熵内容：全 0 会被 deflate 压到几百字节，触发生产侧「插件体积异常」护栏
+            val payload = ByteArray(4096)
+            java.util.Random(42L).nextBytes(payload)
+            z.write(payload)
             z.closeEntry()
         }
         return out.toByteArray()

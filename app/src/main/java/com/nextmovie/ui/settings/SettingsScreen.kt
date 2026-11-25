@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nextmovie.core.AppRepository
 import com.nextmovie.ui.player.engine.DecodeMode
+import com.nextmovie.ui.player.engine.DecoderProbe
 import com.nextmovie.ui.player.engine.NmRenderersFactory
 import com.nextmovie.ui.player.engine.PlayerEngineType
 import com.nextmovie.ui.player.engine.PlayerPrefs
@@ -650,6 +651,83 @@ private fun WebdavCard(repo: AppRepository) {
     }
 }
 
+/* ---------------- 解码自检 ---------------- */
+
+@Composable
+private fun DecodeProbeBlock() {
+    val video = remember { DecoderProbe.videoCapabilities() }
+    val audio = remember { DecoderProbe.audioCapabilities() }
+    val ffmpeg = remember { DecoderProbe.ffmpegReady() }
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("解码自检", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    "本机能力 · ${DecoderProbe.summary()}",
+                    color = Tokens.TextFaint,
+                    fontSize = 12.sp
+                )
+            }
+            Text(
+                if (ffmpeg) "FFmpeg 已就绪" else "无 FFmpeg 扩展",
+                color = if (ffmpeg) Color(0xFF63C98A) else Color(0xFFD8915B),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        ProbeRow("视频", video)
+        Spacer(Modifier.height(8.dp))
+        ProbeRow("音频", audio)
+        Spacer(Modifier.height(10.dp))
+        Text(
+            if (video.firstOrNull { it.label == "HEVC 10bit" }?.ok == false)
+                "提示：本机没有 HEVC 10bit 解码，4K 10bit 片源会黑屏或花屏，请选 1080p 或换线路"
+            else "提示：源站片源的编码/封装千差万别，播放失败时先看这份清单再换线路",
+            color = Tokens.TextFaint,
+            fontSize = 12.sp
+        )
+    }
+}
+
+@Composable
+private fun ProbeRow(title: String, items: List<DecoderProbe.Capability>) {
+    Column {
+        Text(title, color = Tokens.TextFaint, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(6.dp))
+        // 两列排布，窄屏也能一眼看全
+        items.chunked(2).forEach { rowItems ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                rowItems.forEach { cap ->
+                    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            cap.label,
+                            color = Tokens.TextDim,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            cap.status,
+                            color = when {
+                                cap.hardware -> Color(0xFF63C98A)
+                                cap.software -> Color(0xFFD8B45B)
+                                else -> Color(0xFFD8705E)
+                            },
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+                if (rowItems.size == 1) Spacer(Modifier.weight(1f))
+            }
+            Spacer(Modifier.height(4.dp))
+        }
+    }
+}
+
 /* ---------------- 播放与体验 ---------------- */
 
 @Composable
@@ -702,6 +780,10 @@ private fun PlaybackCard(repo: AppRepository) {
             autoLine = it
             PlayerPrefs.setAutoLineOnError(context, it)
         }
+        Spacer(Modifier.height(18.dp))
+        HLine()
+        Spacer(Modifier.height(16.dp))
+        DecodeProbeBlock()
         Spacer(Modifier.height(18.dp))
         HLine()
         Spacer(Modifier.height(16.dp))
