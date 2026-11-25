@@ -151,6 +151,17 @@ fun DetailScreen(
         }
     }
 
+    // 插件源首次初始化可能要 10–30s：别让用户对着没有任何信息的转圈
+    LaunchedEffect(loading, agg) {
+        if (!loading || agg != null) return@LaunchedEffect
+        var elapsed = 0
+        while (loading && agg == null) {
+            kotlinx.coroutines.delay(1_000)
+            elapsed += 1
+            if (elapsed >= 4) hint = "插件源首次初始化中，通常 10–30 秒…（已 ${elapsed}s）"
+        }
+    }
+
     // 海报增强只作用在最优源，避免为了一部片打十几次 TMDB/B站
     LaunchedEffect(agg?.best?.site?.key, agg?.best?.detail?.vod?.id) {
         val currentAgg = agg ?: return@LaunchedEffect

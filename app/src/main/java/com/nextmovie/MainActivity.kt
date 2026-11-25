@@ -152,6 +152,9 @@ private fun AppRoot(repo: AppRepository) {
             val restored = repo.restoreCachedConfig()
             android.util.Log.i("NextMovieTiming", "startup-config restored=$restored ${(System.nanoTime() - configStarted) / 1_000_000}ms")
             booting = !restored
+            // 首页有快照可秒开，插件源的下载/初始化放到后台先跑，别等用户点海报时才开始
+            repo.prefetchSpiderJar(if (restored) "restored" else "fresh")
+            repo.prewarmCurrentSite(if (restored) "restored" else "fresh")
             if (restored) {
                 if (repo.configSnapshotIsFresh()) return@LaunchedEffect
                 kotlinx.coroutines.delay(3_000)

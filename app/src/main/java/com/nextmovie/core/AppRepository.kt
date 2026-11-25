@@ -177,6 +177,34 @@ class AppRepository(private val context: Context) {
         if (configUrl().isNotBlank() && prefs.getBoolean(KEY_SITE_PLUGIN, true)) spiderHost.startBinding()
     }
 
+    /**
+     * 启动预热：在当前源上提前把插件跑起来（下载 jar → DexClassLoader → Init → home）。
+     *
+     * 对照 Marco：它靠内置适配器不走 jar，我们仍走生态的 jar 路径，那就把这段耗时挪到
+     * 用户还在看首页的时候（有快照时首页 200ms 就出画，用户不会察觉）。等真正点开海报时，
+     * 插件实例、dex、native lib 都已在 :spider 进程里就绪。
+     */
+    fun prewarmCurrentSite(reason: String = "startup") {
+        val site = currentSite ?: return
+        if (!site.isSpider || !site.isPlayable || site.runtimeKey in warmSites) return
+        prefetchScope.launch {
+            val started = System.nanoTime()
+            runCatching { spiderHost.home(site) }
+                .onSuccess { warmSites.add(site.runtimeKey); android.util.Log.i("NextMovieTiming", "prewarm-ok ${(System.nanoTime() - started) / 1_000_000}ms site=${site.name} reason=$reason items=${it.size}") }
+                .onFailure { android.util.Log.w("NextMovieTiming", "prewarm-fail ${(System.nanoTime() - started) / 1_000_000}ms site=${site.name} reason=$reason ${it.message}") }
+        }
+    }
+
+    /** 配置根部的 spyder jar 先拉到本地，别等第一次点开插件源才开始下载。 */
+    fun prefetchSpiderJar(reason: String = "startup") {
+        val raw = sites.firstOrNull { it.jar.isNotBlank() }?.let { it.jar } ?: return
+        prefetchScope.launch {
+            val started = System.nanoTime()
+            val ok = runCatching { com.nextmovie.core.spider.JarPrefetch.prefetch(context, http, raw) }.getOrDefault(false)
+            android.util.Log.i("NextMovieTiming", "jar-prefetch-done ${(System.nanoTime() - started) / 1_000_000}ms ok=$ok reason=$reason")
+        }
+    }
+
     suspend fun connectPluginHost(site: Site) {
         if (site.isSpider && site.isPlayable) spiderHost.preconnect()
     }
@@ -215,6 +243,8 @@ class AppRepository(private val context: Context) {
         currentSite = SiteSelector.pick(sites, savedKey, manual)
         currentSite?.let { prefs.edit().putString(KEY_SITE_KEY, it.key).putBoolean(KEY_SITE_PLUGIN, it.isSpider && it.isPlayable).apply() }
         recordConfigResult(true, "✓ 已加载 ${sites.size} 个站点")
+        prefetchSpiderJar("config-loaded")
+        prewarmCurrentSite("config-loaded")
         return sites.size
     }
 
@@ -270,8 +300,11 @@ class AppRepository(private val context: Context) {
             }
         }
         val snapshot = withContext(kotlinx.coroutines.Dispatchers.IO) { homeSnapshots.read(site.runtimeKey) }
+        // 没有任何快照时是真正的首次冷启动：插件要下载并初始化，硬砍到 8s 只会让用户看到"失败"，
+        // 这里放宽到 30s；有快照时仍然只等 8s，超时直接渲染旧内容。
+        val effectiveBudget = if (snapshot == null && site.isSpider && site.runtimeKey !in warmSites) 30_000L else budgetMs
         val network = runCatching {
-            kotlinx.coroutines.withTimeoutOrNull(budgetMs) {
+            kotlinx.coroutines.withTimeoutOrNull(effectiveBudget) {
                 lists.get(key) { loadHomeNetwork(site) }
             }
         }
@@ -284,9 +317,9 @@ class AppRepository(private val context: Context) {
             android.util.Log.i("NextMovieTiming", "home-stale ${(System.nanoTime() - started) / 1_000_000}ms items=${snapshot.size} budget=$budgetMs")
             return prepareForList(snapshot)
         }
-        android.util.Log.w("NextMovieTiming", "home-timeout ${(System.nanoTime() - started) / 1_000_000}ms budget=$budgetMs site=${site.name}")
+        android.util.Log.w("NextMovieTiming", "home-timeout ${(System.nanoTime() - started) / 1_000_000}ms budget=$effectiveBudget site=${site.name}")
         throw java.io.IOException(
-            "「${site.name}」首次读取超时（>${budgetMs / 1000}s）：插件源要先下载并初始化，已转到后台继续准备，稍后重试即可"
+            "「${site.name}」首次读取超时（>${effectiveBudget / 1000}s）：插件源要先下载并初始化，已转到后台继续准备，稍后重试即可"
         )
     }
 
@@ -347,7 +380,9 @@ class AppRepository(private val context: Context) {
         onFirstPlayable: (DetailHit) -> Unit = {}
     ): DetailHit? {
         val keyword = vod.name.trim()
-        val primaryBudgetMs = if (site.isSpider && site.runtimeKey !in warmSites) 9_000L else 5_000L
+        // 插件源第一次要下载 jar、解压 native、跑 Init（实测 19s），此前 9s 的预算会直接判失败
+        val warm = site.runtimeKey in warmSites
+        val primaryBudgetMs = if (site.isSpider && !warm) 30_000L else 5_000L
         val primary = withTimeoutOrNull(primaryBudgetMs) {
             detailAttempt {
                 val id = if (preferSearch) matchingVideo(site, keyword, vod.displayYear)?.id else vod.id
@@ -431,7 +466,7 @@ class AppRepository(private val context: Context) {
         candidates.mapIndexed { index, candidate ->
             launch(kotlinx.coroutines.Dispatchers.IO) {
                 gate.withPermit {
-                    val hit = withTimeoutOrNull(if (index == 0) 8_000L else 10_000L) {
+                    val hit = withTimeoutOrNull(if (index == 0 && candidate.isSpider && candidate.runtimeKey !in warmSites) 30_000L else if (index == 0) 8_000L else 10_000L) {
                         detailAttempt {
                             val resolved: VodDetail? =
                                 if (index == 0 && vod.id.isNotBlank()) detail(candidate, vod.id, altId = vod.name)

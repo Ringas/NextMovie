@@ -188,3 +188,57 @@ HUD 显示 `00:29 / 1:53:55 / -1:53:26` 与「下一集：20261022-02」。截�
 
 已知边界：插件源**首次**仍要下载并初始化 jar（盒子端 10–30s 区间），这段无法靠缓存消除；
 要真正做到 Marco 的 1 秒，需要对高频 `csp_*` 做本地原生适配器（Macro 走的就是这条），属于后续独立工程。
+
+## 十一、vc34 新源（newwex.json）性能对照：冷/暖/详情
+
+测试源 `https://9280.kstore.vip/newwex.json`（95 站，全部 type=3 guard 插件，根部共享 1 个 1.0MB jar）。
+设备 emulator-5556（API 30，abi arm64-v8a，Go 代理走 x86_64 二进制）。
+
+### 本轮改动（vc33 → vc34）
+
+| 项 | 改动 |
+| --- | --- |
+| 配置根部 jar | 新增 `JarPrefetch`，配置导入成功/冷启动即后台落盘到 `files/spiders`，不再等首次点击 |
+| 首页冷启动预算 | 无快照时 8s → 30s（有快照仍 8s） |
+| 详情冷插件预算 | 9s → 30s；聚合首源冷插件 30s、其余 10s |
+| 详情加载提示 | ≥4s 起显示"插件源首次初始化中，通常 10–30 秒…（已 Ns）" |
+| 预热 | `loadConfig` 成功后补调 `prewarmCurrentSite`，与 `prefetchSpiderJar` 一起跑 |
+
+### 实测（清空 files/spiders + files/home-snapshots 后冷启动）
+
+```
+jar-prefetch     1.0MB 落盘（10:10，早于首次取数）
+plugin-obtain    action=2  24721ms
+plugin-home-content         2006ms
+prewarm-ok                  34244ms  items=20
+home-timeout                30333ms  budget=30000 → 自动重试后成功
+home-ready                  35041ms
+```
+
+### 实测（保留 jar + 快照，force-stop 后重启）
+
+```
+home-snapshot-ready  399ms
+home-ready          1063ms     ← 与 Marco 的"1 秒"同量级
+home-cache            10ms     age=35263ms items=20
+plugin-service-ready  11ms
+```
+
+### 实测（暖插件下点进详情「两京十五日」）
+
+```
+plugin-queue action=4     17ms（实例已在内存，无 Init）
+detail-partial         14434ms sources=1   ← 首个网盘型 Wex 源返回如此之慢
+detail-ready           14882ms sources=3
+```
+
+结论：**冷启动的 24s 全部花在「下载 jar → DexClassLoader → Init → Wex 远程配置 + Go 代理起服务」**，
+网络与解析只占 2s。暖态已做到 1s 级；详情页不再"永远转圈"（预算 30s + 计秒提示），
+但首个网盘源的 detail 请求本身就要 14s，这是插件内部的远程握手，不是我们的超时问题。
+
+### 与 Marco 的机制差异（决定性）
+
+Marco 不下载、不加载、不执行这个 jar。`shared/catpaw/drpy-wex-*-adapter.cjs` 用本地规则
++ 直连源站 API 完成同样的事（`csp_bridge.dart` 的 `guardAdapterFor` 把 `csp_WexAppV7Guard`
+等映射到 `wexappv7-v1`）。所以它拿任何 `csp_wex*` 站点都是"直接 HTTP"，没有 24s 冷启动。
+本项目走的是 CatVod 原生 `DexClassLoader + Init`，冷启动成本无法靠预算/缓存消除。
