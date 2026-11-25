@@ -7,6 +7,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -16,6 +18,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.dp
 import com.github.catvod.crawler.Spider
 import com.nextmovie.core.config.Site
@@ -50,6 +53,15 @@ class PluginActivity : ComponentActivity() {
         var busy by remember { mutableStateOf(false) }
         var action by remember { mutableStateOf("") }
         var input by remember { mutableStateOf("") }
+        // 网盘登录：来源（Wex Guard 类插件）用 action 暴露扫码入口，先把二维码拿到手
+        var loginOpen by remember { mutableStateOf(false) }
+        var qrUrl by remember { mutableStateOf<String?>(null) }
+        var qrBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+        var qrHint by remember { mutableStateOf("") }
+        var activePan by remember { mutableStateOf("") }
+        var loginWeb by remember { mutableStateOf<String?>(null) }
+        var cookieMarker by remember { mutableStateOf("") }
+        var cookieMarked by remember { mutableStateOf(false) }
         val first = remember { FocusRequester() }
         val uiScope = rememberCoroutineScope()
         fun accept(raw: String) {
@@ -74,6 +86,70 @@ class PluginActivity : ComponentActivity() {
                 finally { busy = false }
             }
         }
+        // 网盘登录：直接打开官方登录页（页面本身就是扫码），轮询 WebView Cookie，抓到后注入来源
+        fun panLoginUrl(id: String): Pair<String, String> = when (id) {
+            "quark" -> "https://pan.quark.cn/" to "__puus"
+            "uc" -> "https://drive.uc.cn/login" to "__puus"
+            "ali" -> "https://www.alipan.com/" to "SESSIONID"
+            "baidu" -> "https://pan.baidu.com/" to "BDUSS"
+            else -> "" to ""
+        }
+
+        fun finishCasLogin(site: Site, id: String, cookie: String) {
+            if (cookieMarked) return
+            cookieMarked = true
+            val label = if (id == "quark") "夸克" else "UC"
+            getSharedPreferences("nextmovie", Context.MODE_PRIVATE).edit()
+                .putString("pan_cookie_$id", cookie).apply()
+            val injected = runCatching { engines.jar.injectPanCookie(site, id, cookie) }.getOrDefault(false)
+            qrHint = if (injected) "「$label」已登录并同步给来源，回去点播放就行"
+            else "「$label」Cookie 已拿到（${cookie.length} 字符），来源没有公开注入接口，重启来源后再试"
+            status = qrHint
+            qrBitmap = null
+        }
+
+        fun startCasLogin(id: String) {
+            activePan = id
+            loginWeb = null
+            cookieMarked = false
+            qrHint = "正在获取登录二维码…"
+            status = qrHint
+            com.nextmovie.core.pan.PanLogin.start(id) { snap ->
+                uiScope.launch {
+                    qrBitmap = snap.qr
+                    qrHint = snap.message
+                    status = snap.message
+                    if (snap.state == com.nextmovie.core.pan.PanLogin.State.SUCCESS) {
+                        finishCasLogin(site, id, snap.cookie)
+                    }
+                }
+            }
+        }
+
+        fun startPanLogin(id: String) {
+            val (url, marker) = panLoginUrl(id)
+            if (url.isBlank()) return
+            activePan = id
+            loginWeb = url
+            cookieMarker = marker
+            qrBitmap = null
+            qrHint = "登录页已打开：用手机 App 扫页面上的二维码，登录成功会自动同步"
+            status = qrHint
+        }
+
+        fun finishPanLogin(site: Site, id: String, cookie: String) {
+            if (id == activePan && cookieMarked) return
+            cookieMarked = true
+            val label = when (id) { "quark" -> "夸克"; "uc" -> "UC"; "ali" -> "阿里"; "baidu" -> "百度/嘟嘟"; else -> id }
+            getSharedPreferences("nextmovie", Context.MODE_PRIVATE).edit()
+                .putString("pan_cookie_$id", cookie).apply()
+            val injected = runCatching { engines.jar.injectPanCookie(site, id, cookie) }.getOrDefault(false)
+            qrHint = if (injected) "「$label」已登录并同步给来源，回去点播放就行"
+            else "「$label」Cookie 已抓到（长度 ${cookie.length}），但来源没有公开注入接口，重启来源后再试"
+            status = qrHint
+            loginWeb = null
+        }
+
         fun home(instance: Spider): String {
             val h = runCatching { JSONObject(instance.homeContent(true).ifBlank { "{}" }) }.getOrDefault(JSONObject())
             val videos = runCatching { JSONObject(instance.homeVideoContent().ifBlank { "{}" }) }.getOrDefault(JSONObject())
@@ -101,6 +177,19 @@ class PluginActivity : ComponentActivity() {
             catch (e: Throwable) { status = "无法打开来源账户：${e.cause?.message ?: e.message}" }
             finally { busy = false }
         }
+        LaunchedEffect(loginWeb, cookieMarker) {
+            val url = loginWeb ?: return@LaunchedEffect
+            val marker = cookieMarker
+            while (true) {
+                delay(1_500)
+                val cookie = android.webkit.CookieManager.getInstance().getCookie(url).orEmpty()
+                android.util.Log.i("NextMoviePan", "cookie poll marker=$marker len=${cookie.length}")
+                if (cookie.isNotBlank() && (marker.isBlank() || cookie.contains(marker, ignoreCase = true))) {
+                    finishPanLogin(site, activePan, cookie)
+                    break
+                }
+            }
+        }
         BackHandler { finish() }
         LazyColumn(Modifier.fillMaxSize().background(Tokens.Bg), contentPadding = PaddingValues(32.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             item {
@@ -111,6 +200,73 @@ class PluginActivity : ComponentActivity() {
             }
             item { Text(site.name + " · 账户与网盘", color = Tokens.Text, style = MaterialTheme.typography.headlineMedium) }
             item { Text(if (busy) "正在读取…" else status, color = Tokens.TextDim, style = MaterialTheme.typography.bodyLarge) }
+            item {
+                SettingsButton(if (loginOpen) "网盘登录（点来源名出二维码）" else "网盘登录 · 夸克 / UC / 阿里 / 百度", enabled = !busy) {
+                    loginOpen = true
+                }
+            }
+            if (loginOpen) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("选择你的网盘，点一下直接出扫码：", color = Tokens.TextDim, style = MaterialTheme.typography.bodyMedium)
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            listOf("quark" to "夸克", "uc" to "UC", "ali" to "阿里", "baidu" to "百度·嘟嘟").forEach { (id, label) ->
+                                SettingsButton(if (activePan == id) "$label ✓" else label, enabled = !busy) {
+                                    if (id == "quark" || id == "uc") startCasLogin(id) else startPanLogin(id)
+                                }
+                            }
+                            if (activePan == "quark" || activePan == "uc") {
+                                SettingsButton("扫码没反应？改用网页登录", enabled = !busy) { startPanLogin(activePan) }
+                            }
+                        }
+                    }
+                }
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val web = loginWeb?.takeIf { qrBitmap == null }
+                        if (web != null) {
+                            androidx.compose.ui.viewinterop.AndroidView(
+                                factory = { ctx ->
+                                    android.webkit.WebView(ctx).apply {
+                                        android.webkit.CookieManager.getInstance().setAcceptCookie(true)
+                                        settings.javaScriptEnabled = true
+                                        settings.domStorageEnabled = true
+                                        // TV 上整页塞进窗口，二维码才会一开始就在画面里
+                                        settings.useWideViewPort = true
+                                        settings.loadWithOverviewMode = true
+                                        settings.builtInZoomControls = true
+                                        settings.displayZoomControls = false
+                                        settings.userAgentString = settings.userAgentString + " NextMovieTV"
+                                        webViewClient = object : android.webkit.WebViewClient() {
+                                            override fun onPageFinished(view: android.webkit.WebView, url: String?) {
+                                                super.onPageFinished(view, url)
+                                                // 官方页顶部常是品牌大图，扫码框在下面：加载完自动滚到中部
+                                                view.postDelayed({ view.scrollTo(0, (view.contentHeight * 0.35f).toInt()) }, 1_200)
+                                            }
+                                        }
+                                        isFocusable = true
+                                        isFocusableInTouchMode = true
+                                        setBackgroundColor(android.graphics.Color.WHITE)
+                                        // 手机竖版 UA，页面才会直接给扫码框而不是官网大图
+                                        // 桌面 UA：官方页才会给「扫码登录」面板（手机 UA 会跳去下载 App）
+                                        settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+                                        loadUrl(web)
+                                    }
+                                },
+                                modifier = Modifier.width(700.dp).height(620.dp)
+                            )
+                        }
+                        qrBitmap?.let { bmp ->
+                            androidx.compose.foundation.Image(
+                                bitmap = bmp.asImageBitmap(),
+                                contentDescription = "登录二维码",
+                                modifier = Modifier.width(220.dp).height(220.dp).background(androidx.compose.ui.graphics.Color.White)
+                            )
+                        }
+                        if (qrHint.isNotBlank()) Text(qrHint, color = Tokens.TextDim, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
             itemsIndexed(categories) { _, c ->
                 SettingsButton(c.second, enabled = !busy) { runCall { it.categoryContent(c.first, "1", false, hashMapOf()) } }
             }

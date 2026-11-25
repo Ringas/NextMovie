@@ -279,6 +279,56 @@ class JarSpiderLoader(
         }
     }
 
+    /**
+     * 把宿主扫码拿到的网盘 Cookie 交给来源。
+     * 来源实现不统一，这里按常见写法依次尝试：`api.<Pan>.setCookie`、`utils.Pref.putString`。
+     */
+    fun injectPanCookie(site: Site, panId: String, cookie: String): Boolean {
+        if (cookie.isBlank()) return false
+        val apiNames = when (panId.lowercase()) {
+            "quark" -> listOf("Quark")
+            "uc" -> listOf("UC", "Uc")
+            "ali", "aliyun" -> listOf("Ali", "AliYun", "Aliyun")
+            "baidu" -> listOf("Baidu", "BaiduPan")
+            else -> emptyList()
+        }
+        var done = false
+        for (loader in proxyLoaders(site)) {
+            for (name in apiNames) {
+                for (pkg in listOf("com.github.catvod.api.", "com.github.catvod.spider.")) {
+                    val cls = runCatching { Class.forName(pkg + name, false, loader) }.getOrNull() ?: continue
+                    for (m in cls.methods.filter { it.name.equals("setCookie", true) || it.name.equals("putCookie", true) }) {
+                        runCatching {
+                            when (m.parameterTypes.size) {
+                                1 -> m.invoke(null, cookie)
+                                2 -> m.invoke(null, panId, cookie)
+                            }
+                            done = true
+                            android.util.Log.i("NextMoviePan", "inject ok ${pkg + name}#${m.name}")
+                        }.onFailure {
+                            android.util.Log.i("NextMoviePan", "inject fail ${pkg + name}#${m.name}: ${it.cause?.message ?: it.message}")
+                        }
+                    }
+                }
+            }
+            // FongMi 风格：Pref.putString("cookie_quark", cookie)
+            runCatching {
+                val pref = Class.forName("com.github.catvod.utils.Pref", false, loader)
+                val put = pref.methods.firstOrNull { it.name == "putString" && it.parameterTypes.size == 2 }
+                if (put != null) {
+                    for (key in listOf("cookie_$panId", "cookie_${panId.lowercase()}", panId)) {
+                        runCatching { put.invoke(null, key, cookie) }
+                    }
+                    done = true
+                    android.util.Log.i("NextMoviePan", "inject ok Pref.putString")
+                }
+            }.onFailure {
+                android.util.Log.i("NextMoviePan", "inject fail Pref: ${it.cause?.message ?: it.message}")
+            }
+        }
+        return done
+    }
+
     fun proxy(site: Site, params: Map<String, String>): Array<*>? {
         val instance = instances[site.runtimeKey] ?: return null
         val direct = runCatching { instance.proxy(HashMap(params)) }
