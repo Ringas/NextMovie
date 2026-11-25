@@ -76,3 +76,22 @@
 32 位包实测：`home-snapshot-ready 1058ms` / `home-ready 2297ms`；进入详情 `detail-ready 4171ms`；
 播放时插件给出**有效本地代理端口**（`127.0.0.1:37463/proxy?do=m3u8`，不再是 `-1`），ExoPlayer 正常起播，
 HUD 显示 `00:29 / 1:53:55 / -1:53:26` 与「下一集：20261022-02」。截图见 `10-arm32-home.jpg`、`11-arm32-player-hud.jpg`。
+
+## 七、最新上游（`05cf9d6`）复测：64 位端口问题是否仍在
+
+上游提交 `05cf9d6 Overlap plugin startup with configuration loading` 让插件宿主在配置加载期间并行绑定
+（`MainActivity` 里 `repo.startConfiguredPluginHost()` 先于 `setContent`），并移除了 `JarSpiderLoader`
+的 `.guard` 载荷落盘。
+
+复测环境：同一台 ONEPLUS A3010（`primaryCpuAbi=arm64-v8a`），安装最新 `arm64-v8a` 包，真实 `in.bmp` 配置。
+
+| 观测点 | 修复前（`afa20e1`） | 复测（`05cf9d6`） |
+| --- | --- | --- |
+| 插件绑定 | 随站点切换到才绑定 | 启动即 `plugin-bind-request` → `plugin-bind-connected`（早于配置加载完成） |
+| 播放代理端口 | `127.0.0.1:-1`（Malformed URL） | `127.0.0.1:38091`（有效端口） |
+| 起播 | 失败 | ExoPlayer `prepare hls=true`，画面出帧 |
+| HUD | 崩过（焦点未入树） | 正常：`00:32 / 1:53:55 / -1:53:22`、下一集、焦点金环 |
+| 首页 | 分类 tabs 需等分类请求 | 首页 6 个分类 tab 与片单同屏，`home 2651ms items=20` |
+
+结论：**64 位下 `port = -1` 的问题在当前最新代码上已不再复现**，真实插件源可正常起播。
+截图：`12-latest64-home.jpg`、`13-latest64-player.jpg`、`14-latest64-hud.jpg`。
