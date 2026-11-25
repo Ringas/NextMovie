@@ -48,6 +48,8 @@ import com.nextmovie.ui.common.PosterCard
 import com.nextmovie.ui.common.mouseWheel
 import com.nextmovie.ui.common.ScreenTopBar
 import com.nextmovie.ui.common.tvClickable
+import com.nextmovie.ui.common.TvKeys
+import com.nextmovie.ui.common.TvAction
 import com.nextmovie.ui.theme.Tokens
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
@@ -173,13 +175,18 @@ fun SearchScreen(
             .background(Tokens.Bg)
             .padding(Tokens.ScreenPadding)
             .onPreviewKeyEvent { event ->
+                val action = TvKeys.actionOf(event)
+                // 返回：非输入框抢焦时退出搜索
+                if (event.type == KeyEventType.KeyUp && action == TvAction.Back && !fieldFocused) {
+                    onBack(); return@onPreviewKeyEvent true
+                }
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 val native = event.nativeKeyEvent
-                when (native.keyCode) {
-                    android.view.KeyEvent.KEYCODE_ENTER -> {
+                when {
+                    action == TvAction.Confirm || native.keyCode == android.view.KeyEvent.KEYCODE_ENTER -> {
                         if (fieldFocused || editing) { submit(); true } else false
                     }
-                    android.view.KeyEvent.KEYCODE_DEL -> {
+                    native.keyCode == android.view.KeyEvent.KEYCODE_DEL -> {
                         if (fieldFocused) false else { keyword = keyword.dropLast(1); true }
                     }
                     else -> {

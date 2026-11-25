@@ -131,19 +131,34 @@ fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -
                         onClick = { section = item }
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "${index + 1}",
+                                color = if (section == item) Tokens.Accent else Tokens.TextGhost,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.width(18.dp)
+                            )
                             Icon(
                                 item.icon,
                                 null,
                                 tint = if (section == item) Color.White else Tokens.TextDim,
                                 modifier = Modifier.size(17.dp)
                             )
-                            Spacer(Modifier.width(12.dp))
-                            Text(
-                                item.title,
-                                color = if (section == item) Color.White else Tokens.TextDim,
-                                fontSize = 17.sp,
-                                fontWeight = if (section == item) FontWeight.SemiBold else FontWeight.Medium
-                            )
+                            Spacer(Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    item.title,
+                                    color = if (section == item) Color.White else Tokens.TextDim,
+                                    fontSize = 17.sp,
+                                    fontWeight = if (section == item) FontWeight.SemiBold else FontWeight.Medium
+                                )
+                                Text(
+                                    item.caption,
+                                    color = Tokens.TextGhost,
+                                    fontSize = 11.sp,
+                                    maxLines = 1
+                                )
+                            }
                         }
                     }
                     Spacer(Modifier.height(8.dp))

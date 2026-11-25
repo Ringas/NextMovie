@@ -98,7 +98,7 @@ fun PosterCard(
                 focused = it.isFocused
                 if (it.isFocused) onFocused()
             }
-            .tvClickable(onClick = onClick, corner = Tokens.Corner.card, showRing = false)
+            .tvClickable(onClick = onClick, corner = Tokens.Corner.card, showRing = true, scaleOnFocus = 1.06f)
     ) {
         Box(
             modifier = Modifier

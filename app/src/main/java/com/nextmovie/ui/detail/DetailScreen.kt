@@ -78,6 +78,10 @@ import com.nextmovie.ui.common.mouseFocusable
 import com.nextmovie.ui.common.mouseWheel
 import com.nextmovie.ui.common.posterModel
 import com.nextmovie.ui.common.tvClickable
+import com.nextmovie.ui.common.TvKeys
+import com.nextmovie.ui.common.TvAction
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.KeyEventType
 import com.nextmovie.ui.theme.Tokens
 import kotlin.math.min
 import kotlinx.coroutines.delay
@@ -110,6 +114,8 @@ fun DetailScreen(
     /** 从播放器退回时仍在播的画面，铺在剧照位置（对齐 Marco） */
     videoBackdrop: (@Composable () -> Unit)? = null
 ) {
+    androidx.activity.compose.BackHandler { onBack() }
+
     val screenStartedAt = remember { System.nanoTime() }
     val context = LocalContext.current
     var cachedMetadata by remember(site.runtimeKey, initial.id) { mutableStateOf<Vod?>(null) }

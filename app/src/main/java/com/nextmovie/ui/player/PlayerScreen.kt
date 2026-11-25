@@ -41,6 +41,8 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import com.nextmovie.ui.common.TvAction
+import com.nextmovie.ui.common.TvKeys
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -476,55 +478,63 @@ fun PlayerScreen(
             .focusable()
             // 键盘调试：空格/回车暂停，←→ 快退快进；Esc 由 Activity 统一处理
             .onPreviewKeyEvent { event ->
-                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                // 线路选择器：只吃 KeyUp 确认/返回，方向在 KeyDown 连按更跟手
                 if (pickerVisible) {
-                    when (event.key) {
-                        Key.DirectionUp -> {
+                    val action = TvKeys.actionOf(event) ?: return@onPreviewKeyEvent true
+                    return@onPreviewKeyEvent when {
+                        event.type == KeyEventType.KeyDown && action == TvAction.Up -> {
                             pickerIndex = (pickerIndex - 1).coerceAtLeast(0); true
                         }
-                        Key.DirectionDown -> {
+                        event.type == KeyEventType.KeyDown && action == TvAction.Down -> {
                             pickerIndex = (pickerIndex + 1).coerceAtMost(slots.lastIndex.coerceAtLeast(0)); true
                         }
-                        Key.Enter, Key.DirectionCenter -> {
+                        event.type == KeyEventType.KeyUp && action == TvAction.Confirm -> {
                             pickerVisible = false
                             if (pickerIndex != currentSlot) onSwitchSlot(pickerIndex)
                             true
                         }
-                        Key.Back -> { pickerVisible = false; true }
+                        event.type == KeyEventType.KeyUp && action == TvAction.Back -> {
+                            pickerVisible = false; true
+                        }
                         else -> true
                     }
                 }
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 hudVisible = true
                 hudSignal++
-                when (event.key) {
-                    Key.Spacebar, Key.Enter, Key.DirectionCenter, Key.P -> {
-                        if (controlsVisible && event.key != Key.Spacebar && event.key != Key.P) false
+                val action = TvKeys.actionOf(event)
+                val key = event.key
+                // 字母快捷键（键盘）：P 播放暂停、L 线路、S 倍速 — 与遥控语义并存
+                when {
+                    action == TvAction.PlayPause || key == Key.P ||
+                        (action == TvAction.Confirm && !controlsVisible) ||
+                        key == Key.Spacebar -> {
+                        if (controlsVisible && key != Key.Spacebar && key != Key.P && action != TvAction.PlayPause) false
                         else if (playbackError != null && slots.size > 1) {
                             pickerIndex = (currentSlot + 1) % slots.size
                             pickerVisible = true
                             true
                         } else { togglePlay(); true }
                     }
-                    Key.DirectionLeft -> {
-                        if (controlsVisible) false else { seekBy(if (event.nativeKeyEvent.repeatCount >= 5) -30_000L else -10_000L); true }
+                    action == TvAction.Rewind || action == TvAction.Left -> {
+                        if (controlsVisible) false
+                        else { seekBy(if (event.nativeKeyEvent.repeatCount >= 5) -30_000L else -10_000L); true }
                     }
-                    Key.DirectionRight -> {
-                        if (controlsVisible) false else { seekBy(if (event.nativeKeyEvent.repeatCount >= 5) 30_000L else 10_000L); true }
+                    action == TvAction.FastForward || action == TvAction.Right -> {
+                        if (controlsVisible) false
+                        else { seekBy(if (event.nativeKeyEvent.repeatCount >= 5) 30_000L else 10_000L); true }
                     }
-                    Key.DirectionUp, Key.DirectionDown -> {
-                        if (controlsVisible) false else {
-                            controlsVisible = true
-                            true
-                        }
+                    action == TvAction.Up || action == TvAction.Down -> {
+                        if (controlsVisible) false else { controlsVisible = true; true }
                     }
-                    Key.Menu, Key.L -> {
+                    action == TvAction.Menu || key == Key.L -> {
                         if (slots.size > 1) {
                             pickerIndex = currentSlot.coerceIn(0, slots.lastIndex)
                             pickerVisible = true
                             true
                         } else false
                     }
-                    Key.S -> {
+                    key == Key.S -> {
                         val steps = listOf(1f, 1.25f, 1.5f, 2f)
                         val idx = steps.indexOfFirst { it == speed }
                         speed = steps[(idx + 1) % steps.size]

@@ -39,6 +39,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nextmovie.ui.common.tvClickable
+import com.nextmovie.ui.common.TvKeys
+import com.nextmovie.ui.common.TvAction
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.KeyEventType
 import com.nextmovie.ui.theme.Tokens
 
 enum class ShellTab(val title: String, val icon: ImageVector) {

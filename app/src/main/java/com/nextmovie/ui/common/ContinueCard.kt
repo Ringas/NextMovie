@@ -69,7 +69,7 @@ fun ContinueCard(
             .graphicsLayer { scaleX = scale; scaleY = scale; transformOrigin = TransformOrigin(0.5f, 1f) }
             .onFocusChanged { focused = it.isFocused }
             .mouseFocusable()
-            .tvClickable(onClick = onClick, corner = Tokens.Corner.card, showRing = false)
+            .tvClickable(onClick = onClick, corner = Tokens.Corner.card, showRing = true, scaleOnFocus = 1.05f)
     ) {
         Box(
             modifier = Modifier
