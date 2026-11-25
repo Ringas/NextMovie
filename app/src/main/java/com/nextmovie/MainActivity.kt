@@ -9,6 +9,8 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import com.nextmovie.ui.common.tvClickable
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -161,6 +163,12 @@ private fun AppRoot(repo: AppRepository) {
     var playJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     // 播放器回报的当前位置：换线路时从这里接着播，不丢进度
     var lastPositionMs by remember { mutableStateOf(0L) }
+    // 网盘线路未登录：直接在播放界面弹二维码，扫完自动重试播放
+    var panQrId by remember { mutableStateOf("") }
+    var panQrLabel by remember { mutableStateOf("") }
+    var panQrMsg by remember { mutableStateOf("") }
+    var panQrBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var panQrRetry by remember { mutableStateOf<(() -> Unit)?>(null) }
     // 跨页面播放会话：Marco 的「退回详情页影片继续播」靠它把 ExoPlayer 留在进程里
     val playbackSession = remember { com.nextmovie.ui.player.PlaybackSession(context) }
     androidx.compose.runtime.DisposableEffect(Unit) { onDispose { playbackSession.release() } }
@@ -247,6 +255,50 @@ private fun AppRoot(repo: AppRepository) {
         scope.launch { withContext(Dispatchers.IO) { repo.history.upsert(entry) } }
     }
 
+    /** 把异常/线路名里的网盘线索认出来：夸克 / UC / 阿里 / 百度。 */
+    fun panOf(text: String): String? {
+        val t = text.lowercase()
+        return when {
+            t.contains("quark") || text.contains("夸克") -> "quark"
+            t.contains("uc") || text.contains("UC") -> "uc"
+            t.contains("ali") || text.contains("阿里") -> "ali"
+            t.contains("baidu") || text.contains("百度") || text.contains("嘟嘟") -> "baidu"
+            else -> null
+        }
+    }
+
+    /** 未登录网盘时：夸克/UC 当场出二维码，阿里/百度走账户页网页登录。 */
+    fun askPanLogin(activeSite: Site, panId: String, retry: (() -> Unit)?) {
+        panQrLabel = when (panId) { "quark" -> "夸克"; "uc" -> "UC"; "ali" -> "阿里"; else -> "百度·嘟嘟" }
+        if (panId == "quark" || panId == "uc") {
+            panQrId = panId
+            panQrLabel = if (panId == "quark") "夸克" else "UC"
+            panQrBitmap = null
+            panQrMsg = "正在获取「$panQrLabel」登录二维码…"
+            panQrRetry = retry
+            android.util.Log.i("NextMoviePan", "auto-pop qr pan=$panId site=${activeSite.key}")
+            com.nextmovie.core.pan.PanLogin.start(panId) { snap ->
+                scope.launch {
+                    panQrBitmap = snap.qr
+                    panQrMsg = snap.message
+                    if (snap.state == com.nextmovie.core.pan.PanLogin.State.SUCCESS) {
+                        context.getSharedPreferences("nextmovie", android.content.Context.MODE_PRIVATE)
+                            .edit().putString("pan_cookie_$panId", snap.cookie).apply()
+                        panQrMsg = "「$panQrLabel」登录成功，正在接着播放…"
+                        panQrBitmap = null
+                        val r = panQrRetry
+                        kotlinx.coroutines.delay(900)
+                        panQrId = ""
+                        r?.invoke()
+                    }
+                }
+            }
+        } else {
+            Toast.makeText(context, "「${panQrLabel.ifBlank { panId }}」需要网页登录，已打开账户页", Toast.LENGTH_LONG).show()
+            accountLauncher.launch(PluginActivity.intent(context, activeSite, "", null))
+        }
+    }
+
     /** 把插件异常翻成人话，别再让用户对着「解析失败」猜。 */
     fun explain(e: Throwable, lineName: String): String {
         val raw = (e.message.orEmpty() + " " + (e.cause?.message.orEmpty())).lowercase()
@@ -256,7 +308,7 @@ private fun AppRoot(repo: AppRepository) {
             e is java.util.concurrent.TimeoutException || raw.contains("timeout") ->
                 "「$lineName」15 秒内没拿到地址，已放弃。换一条线路"
             raw.contains("cookie") || raw.contains("登录") || raw.contains("auth") ->
-                "「$lineName」是网盘线路，来源还没登录（${e.message.orEmpty().take(60)}）。已打开来源配置，扫码登录后再播"
+                "「$lineName」是网盘线路，来源还没登录（${e.message.orEmpty().take(60)}）。已弹出扫码登录，扫完自动接着播"
             raw.contains("doctype") || raw.contains("jsonobject") ->
                 "来源返回了网页而不是数据（被防爬拦截），换一条线路"
             e is IllegalStateException && e.message == "网页解析未取得媒体地址，请更换线路" -> e.message.orEmpty()
@@ -311,16 +363,25 @@ private fun AppRoot(repo: AppRepository) {
                     val reason = "line-play-fail site=${activeSite.key} line=${line.name} " +
                         "${e.javaClass.simpleName}: ${e.message.orEmpty().take(120)}"
                     android.util.Log.i("NextMovieTiming", reason)
+                    val needsLogin = listOf("cookie", "登录", "auth", "网盘").any {
+                        (e.message.orEmpty()).contains(it, ignoreCase = true)
+                    }
+                    if (needsLogin) {
+                        // 网盘线路没登录：不把人踢去设置页，直接在播放界面弹扫码，扫完自动重试
+                        val panId = panOf(e.message.orEmpty() + " " + line.name)
+                        Toast.makeText(context, explain(e, line.name), Toast.LENGTH_LONG).show()
+                        if (panId != null) askPanLogin(activeSite, panId, {
+                            playEpisode(vod, line, episode, startMs, source, queue, slots, slotIndex, attemptedSlots, onResolveFailure)
+                        })
+                        else accountLauncher.launch(PluginActivity.intent(context, activeSite, "", null))
+                        if (onResolveFailure != null) retry = true
+                        return@launch
+                    }
                     if (onResolveFailure != null) {
                         retry = true
                         return@launch
                     }
-                    val needsLogin = listOf("cookie", "登录", "auth").any {
-                        (e.message.orEmpty()).contains(it, ignoreCase = true)
-                    }
                     Toast.makeText(context, explain(e, line.name), Toast.LENGTH_LONG).show()
-                    // 夸克/阿里这类网盘线路：插件已经把原因说清楚了，直接把用户送到「来源配置」扫码
-                    if (needsLogin) accountLauncher.launch(PluginActivity.intent(context, activeSite, "", null))
                     return@launch
                 }
             android.util.Log.i("NextMovieTiming", "play-resolve ${(System.nanoTime() - resolveStarted) / 1_000_000}ms")
@@ -428,6 +489,71 @@ private fun AppRoot(repo: AppRepository) {
             startMs = entry.positionMs,
             source = activeSite
         )
+    }
+
+    if (panQrId.isNotBlank()) {
+        androidx.compose.ui.window.Dialog(onDismissRequest = { }) {
+            Column(
+                modifier = Modifier
+                    .width(560.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(androidx.compose.ui.graphics.Color(0xFF11151C))
+                    .padding(horizontal = 24.dp, vertical = 18.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("登录「$panQrLabel」网盘", color = Tokens.Text, style = MaterialTheme.typography.labelLarge)
+                Spacer(Modifier.height(10.dp))
+                val bmp = panQrBitmap
+                if (bmp != null) {
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = "登录二维码",
+                        modifier = Modifier.width(115.dp).height(115.dp).background(androidx.compose.ui.graphics.Color.White)
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier.width(115.dp).height(115.dp).background(Tokens.Surface),
+                        contentAlignment = Alignment.Center
+                    ) { Text("生成二维码…", color = Tokens.TextDim, style = MaterialTheme.typography.bodyMedium) }
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(panQrMsg, color = Tokens.TextDim, style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.height(2.dp))
+                Text("扫码成功后自动继续播放", color = Tokens.TextFaint, style = MaterialTheme.typography.labelSmall)
+                Spacer(Modifier.height(12.dp))
+                androidx.compose.foundation.layout.Row(
+                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp)
+                ) {
+                    val first = remember { FocusRequester() }
+                    LaunchedEffect(panQrId) { kotlinx.coroutines.delay(120); runCatching { first.requestFocus() } }
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(Tokens.Corner.pill))
+                            .background(Tokens.Accent)
+                            .focusRequester(first)
+                            .tvClickable(onClick = { val s = site; if (s != null) askPanLogin(s, panQrId, panQrRetry) }, corner = Tokens.Corner.pill)
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                    ) { Text("重新出码", color = Tokens.OnAccent, style = MaterialTheme.typography.labelMedium) }
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(Tokens.Corner.pill))
+                            .background(Tokens.Surface)
+                            .tvClickable(onClick = {
+                                panQrId = ""
+                                site?.let { accountLauncher.launch(PluginActivity.intent(context, it, "", null)) }
+                            }, corner = Tokens.Corner.pill)
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                    ) { Text("网页登录", color = Tokens.Text, style = MaterialTheme.typography.labelMedium) }
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(Tokens.Corner.pill))
+                            .background(Tokens.Surface)
+                            .tvClickable(onClick = { panQrId = "" }, corner = Tokens.Corner.pill)
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                    ) { Text("关闭", color = Tokens.TextDim, style = MaterialTheme.typography.labelMedium) }
+                }
+            }
+        }
     }
 
     when (val current = route) {
