@@ -112,7 +112,7 @@ fun HomeScreen(
     val backgroundReady = remember(site.runtimeKey) { kotlinx.coroutines.CompletableDeferred<Unit>() }
     LaunchedEffect(site.runtimeKey) {
         repo.connectPluginHost(site)
-        if (initialSnapshot.await() != null) delay(2_500)
+        if (initialSnapshot.await() != null) delay(800)
         backgroundReady.complete(Unit)
     }
     LaunchedEffect(site.runtimeKey) {
@@ -144,6 +144,7 @@ fun HomeScreen(
                 if (cached != null && reloadTick == 0) {
                     vods = cached
                     loading = false
+                    android.util.Log.i("NextMovieTiming", "home-instant " + (System.nanoTime() - screenStartedAt) / 1_000_000 + "ms items=${cached.size}")
                     scope.launch {
                         backgroundReady.await()
                         runCatching { repo.home(site) }.onSuccess { fresh ->
@@ -154,6 +155,18 @@ fun HomeScreen(
                 }
                 repo.home(site)
             } else {
+                // 切 tab 先出磁盘快照，再后台刷新，避免每次点分类都等插件
+                val cachedCat = if (reloadTick == 0) repo.cachedCategory(site, cat.first) else null
+                if (cachedCat != null && vods.none { it.id.startsWith("cat-reset") }) {
+                    vods = cachedCat
+                    loading = false
+                    android.util.Log.i("NextMovieTiming", "cat-instant " + cat.first + " items=${cachedCat.size}")
+                    scope.launch {
+                        runCatching { repo.category(site, cat.first, page = 1) }
+                            .onSuccess { if (it.isNotEmpty() && tab == cats.indexOf(cat)) vods = it }
+                    }
+                    return@LaunchedEffect
+                }
                 repo.category(site, cat.first, page = 1)
             }
             vods = list

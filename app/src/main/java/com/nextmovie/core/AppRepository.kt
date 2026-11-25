@@ -564,10 +564,24 @@ class AppRepository(private val context: Context) {
         }
     }
 
-    suspend fun category(site: Site, tid: String, page: Int): List<Vod> =
-        lists.get("category|${site.runtimeKey}|$tid|$page") {
+    suspend fun category(site: Site, tid: String, page: Int): List<Vod> {
+        val key = "category|${site.runtimeKey}|$tid|$page"
+        val list = lists.get(key) {
             if (site.isCms) cms(site).category(tid, page) else spiderHost.category(site, tid, page, false, "")
         }
+        // 分类页也落盘：切 tab / 冷启动可以直接出画，不用等插件
+        if (page == 1 && list.isNotEmpty()) withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { homeSnapshots.write(snapshotKey(tid, site), list, homeSnapshots.generation) }
+        }
+        return list
+    }
+
+    /** 分类页磁盘快照（6 小时内有效），供切 tab 与冷启动秒开。 */
+    suspend fun cachedCategory(site: Site, tid: String): List<Vod>? = withContext(kotlinx.coroutines.Dispatchers.IO) {
+        homeSnapshots.read(snapshotKey(tid, site), maxAgeMs = 6 * 3_600_000L)
+    }
+
+    private fun snapshotKey(tid: String, site: Site) = "cat_${site.runtimeKey}_$tid"
 
     /** Speculation stays on the focused item of an already initialized source, at most one request. */
     suspend fun prefetchDetail(site: Site, vod: Vod): Vod? {

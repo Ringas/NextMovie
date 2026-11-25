@@ -51,6 +51,17 @@ data class Episode(val name: String, val url: String)
 
 data class PlayLine(val name: String, val episodes: List<Episode>)
 
+/** 云盘线路识别：这些线路要插件自带网盘代理/登录，失败率高，排到直链后面再试。 */
+val PlayLine.isPanLine: Boolean
+    get() {
+        val nameHit = listOf("云盘", "网盘", "阿里", "夸克", "115", "UC", "百度", "天翼", "移动云")
+            .any { name.contains(it, ignoreCase = true) }
+        val url = episodes.firstOrNull()?.url.orEmpty()
+        val urlHit = listOf("alipan.com", "quark.cn", "115.com", "uc.cn", "pan.baidu.com", "cloud.189.cn", "weiyun.com")
+            .any { url.contains(it, ignoreCase = true) }
+        return nameHit || urlHit
+    }
+
 /** 详情页所需的数据：影片信息 + 线路列表。 */
 data class VodDetail(val vod: Vod, val lines: List<PlayLine>)
 

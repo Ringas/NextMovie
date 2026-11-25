@@ -305,6 +305,7 @@ fun DetailScreen(
     }
 
     fun slotsOf(episodeIndex: Int, episode: Episode): List<com.nextmovie.core.model.PlaySlot> {
+        // 云盘线路依赖插件自己的网盘代理，失败率高，排在直链后面：先让能播的先播
         val out = ArrayList<com.nextmovie.core.model.PlaySlot>(sources.size)
         sources.forEach { src ->
             val orderedLines = listOfNotNull(src.detail.lines.getOrNull(src.bestLineIndex)) + src.detail.lines
@@ -320,7 +321,12 @@ fun DetailScreen(
                 )
             }
         }
-        return out
+        // 直链优先，云盘垫底（同分时保持聚合顺序）
+        return out.sortedBy { slot ->
+            val pan = listOf("云盘", "网盘", "阿里", "夸克", "115", "UC", "百度", "天翼")
+                .any { slot.lineName.contains(it, ignoreCase = true) }
+            if (pan) 1 else 0
+        }
     }
 
     fun resume() {

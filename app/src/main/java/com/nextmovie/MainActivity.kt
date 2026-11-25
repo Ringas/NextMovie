@@ -49,6 +49,8 @@ import com.nextmovie.ui.theme.Tokens
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 
 class MainActivity : ComponentActivity() {
 
@@ -245,6 +247,23 @@ private fun AppRoot(repo: AppRepository) {
         scope.launch { withContext(Dispatchers.IO) { repo.history.upsert(entry) } }
     }
 
+    /** 把插件异常翻成人话，别再让用户对着「解析失败」猜。 */
+    fun explain(e: Throwable, lineName: String): String {
+        val raw = (e.message.orEmpty() + " " + (e.cause?.message.orEmpty())).lowercase()
+        return when {
+            raw.contains("econnrefused") || raw.contains("failed to connect") ->
+                "「$lineName」需要来源的本地网盘代理，但它没起来（连接被拒）。换一条非云盘的线路，或稍后重试"
+            e is java.util.concurrent.TimeoutException || raw.contains("timeout") ->
+                "「$lineName」15 秒内没拿到地址，已放弃。换一条线路"
+            raw.contains("cookie") || raw.contains("登录") || raw.contains("auth") ->
+                "「$lineName」是网盘线路，来源还没登录（${e.message.orEmpty().take(60)}）。已打开来源配置，扫码登录后再播"
+            raw.contains("doctype") || raw.contains("jsonobject") ->
+                "来源返回了网页而不是数据（被防爬拦截），换一条线路"
+            e is IllegalStateException && e.message == "网页解析未取得媒体地址，请更换线路" -> e.message.orEmpty()
+            else -> "来源解析失败（${e.javaClass.simpleName}），换一条线路"
+        }
+    }
+
     /** 从详情页点某一集：走一次播放地址解析，然后进入播放器。 */
     fun playEpisode(
         vod: Vod,
@@ -272,17 +291,36 @@ private fun AppRoot(repo: AppRepository) {
             try {
                 val result = try {
                     repo.preparePlayback(activeSite)
-                    if (activeSite.isCms || activeSite.isJavaScript) repo.resolvePlay(activeSite, line.name, episode.url) { resolveStage = it }
-                    else PluginPlaybackWindow.resolve(context) { repo.resolvePlay(activeSite, line.name, episode.url) { resolveStage = it } }
+                    // 单条线路最多给 15s：插件连不上自己的网盘代理（ECONNREFUSED）时不要拖到用户以为死机
+                    withTimeout(15_000) {
+                        if (activeSite.isCms || activeSite.isJavaScript) repo.resolvePlay(activeSite, line.name, episode.url) { resolveStage = it }
+                        else PluginPlaybackWindow.resolve(context) { repo.resolvePlay(activeSite, line.name, episode.url) { resolveStage = it } }
+                    }
+                }
+                catch (e: TimeoutCancellationException) {
+                    // 超时也走同一条失败路径：换线 / 给人话提示
+                    repo.recordPlayOutcome(activeSite.key, false)
+                    android.util.Log.i("NextMovieTiming", "line-play-timeout site=${activeSite.key} line=${line.name}")
+                    if (onResolveFailure != null) { retry = true; return@launch }
+                    Toast.makeText(context, "「${line.name}」15 秒没拿到地址，已换下一条线路", Toast.LENGTH_LONG).show()
+                    return@launch
                 }
                 catch (e: kotlinx.coroutines.CancellationException) { repo.cancelPlayback(activeSite); throw e }
                 catch (e: Exception) {
                     repo.recordPlayOutcome(activeSite.key, false)
+                    val reason = "line-play-fail site=${activeSite.key} line=${line.name} " +
+                        "${e.javaClass.simpleName}: ${e.message.orEmpty().take(120)}"
+                    android.util.Log.i("NextMovieTiming", reason)
                     if (onResolveFailure != null) {
                         retry = true
                         return@launch
                     }
-                    Toast.makeText(context, if (e is IllegalStateException && e.message == "网页解析未取得媒体地址，请更换线路") e.message else "来源解析失败，请重试或换一条线路", Toast.LENGTH_LONG).show()
+                    val needsLogin = listOf("cookie", "登录", "auth").any {
+                        (e.message.orEmpty()).contains(it, ignoreCase = true)
+                    }
+                    Toast.makeText(context, explain(e, line.name), Toast.LENGTH_LONG).show()
+                    // 夸克/阿里这类网盘线路：插件已经把原因说清楚了，直接把用户送到「来源配置」扫码
+                    if (needsLogin) accountLauncher.launch(PluginActivity.intent(context, activeSite, "", null))
                     return@launch
                 }
             android.util.Log.i("NextMovieTiming", "play-resolve ${(System.nanoTime() - resolveStarted) / 1_000_000}ms")
@@ -368,10 +406,16 @@ private fun AppRoot(repo: AppRepository) {
 
     /** 首页「继续观看」：用记录里的地址直接续播，不再走搜索。 */
     fun resume(entry: HistoryEntry) {
-        val activeSite = repo.siteByKey(entry.siteKey)
+        // 历史记录可能来自已经删掉/换掉的源：优先用记录自己的源，找不到就退到当前源继续
+        val owner = repo.siteByKey(entry.siteKey)
+        val activeSite = owner ?: repo.currentSite ?: site
         if (activeSite == null) {
             Toast.makeText(context, "还没有选择数据源", Toast.LENGTH_SHORT).show()
             return
+        }
+        android.util.Log.i("NextMovieTiming", "continue-click vod=${entry.vodId} site=${activeSite.key} ownerMissing=${owner == null}")
+        if (owner == null) {
+            Toast.makeText(context, "这条记录来自已移除的来源，改用「${activeSite.name}」续播", Toast.LENGTH_SHORT).show()
         }
         val vod = Vod(id = entry.vodId, name = entry.name, pic = entry.pic, remark = entry.remark)
         playEpisode(
