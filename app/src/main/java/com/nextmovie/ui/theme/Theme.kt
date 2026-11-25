@@ -1,5 +1,6 @@
 package com.nextmovie.ui.theme
 
+import android.content.Context
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.MaterialTheme
@@ -14,107 +15,180 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * 动态主色：由「当前焦点的作品」决定。
+ * 客厅柔光主题（对齐 Marco TV 的 6 套预设）
  *
- * tvOS 的招牌做法是整屏被当前内容染色——不是固定一支品牌色，而是按作品 id 取色相，
- * 在深色底上取中高明度（保证它自己能从夜色里跳出来），再按对比度决定填充上的文字是黑是白。
- * 青 / 绿 / 黄这类色相在白字下永远不够看，交给 [ink] 换成黑字即可。
+ * 底色不是纯黑，而是一层「深夜蓝」——斜向三段渐变打底，再叠四团极软的光。
+ * 光的位置固定（左上 / 右上 / 顶部中 / 底部中），只有色相随主题换，
+ * 于是每套主题都长得很像，却又有明确的气质差别：这是它的克制之处。
  */
-object DynamicAccent {
-    var color by mutableStateOf(Color(0xFF3D8BFF))
-        private set
-    var ink by mutableStateOf(Color.White)
-        private set
-    var soft by mutableStateOf(Color(0x4D3D8BFF))
-        private set
-    private var currentSeed: String? = null
+data class AmbientPreset(
+    val id: String,
+    val name: String,
+    val subtitle: String,
+    val baseStart: Color,
+    val baseMid: Color,
+    val baseEnd: Color,
+    val orbPrimary: Color,
+    val orbSecondary: Color,
+    val orbWarm: Color,
+    val accent: Color
+)
 
-    /** 同一个作品永远得到同一个色相：按 id 做稳定哈希。 */
-    fun fromSeed(seed: String) {
-        if (seed == currentSeed) return
-        currentSeed = seed
-        val h = ((seed.hashCode().toLong() and 0x7FFFFFFFL) % 3600L) / 10f
-        fromHue(h)
-    }
+object Ambient {
+    val presets = listOf(
+        AmbientPreset(
+            id = "aurora", name = "极光青翠", subtitle = "翡翠湖光与晴空柔雾",
+            baseStart = Color(0xFF0F2B3D), baseMid = Color(0xFF121F38), baseEnd = Color(0xFF1A1A3B),
+            orbPrimary = Color(0xFF14C7AD), orbSecondary = Color(0xFF3894FA), orbWarm = Color(0xFF6157E0),
+            accent = Color(0xFF2E94F5)
+        ),
+        AmbientPreset(
+            id = "twilight", name = "暮色流光", subtitle = "鸢尾紫霞与玫瑰晚风",
+            baseStart = Color(0xFF291C47), baseMid = Color(0xFF1C1A38), baseEnd = Color(0xFF2E1A33),
+            orbPrimary = Color(0xFF8561FA), orbSecondary = Color(0xFFEB529E), orbWarm = Color(0xFFF08057),
+            accent = Color(0xFF7570FA)
+        ),
+        AmbientPreset(
+            id = "ocean", name = "深海晨雾", subtitle = "冰川海湾与蔚蓝天际",
+            baseStart = Color(0xFF0F2947), baseMid = Color(0xFF0F1C36), baseEnd = Color(0xFF0D2436),
+            orbPrimary = Color(0xFF24A3FA), orbSecondary = Color(0xFF14C7E0), orbWarm = Color(0xFF4266D6),
+            accent = Color(0xFF3394FA)
+        ),
+        AmbientPreset(
+            id = "amber", name = "暖金影院", subtitle = "胡桃木暖灯与胶片琥珀",
+            baseStart = Color(0xFF36211A), baseMid = Color(0xFF211A21), baseEnd = Color(0xFF2B1721),
+            orbPrimary = Color(0xFFEB8F2E), orbSecondary = Color(0xFFD14761), orbWarm = Color(0xFF9E6B38),
+            accent = Color(0xFFE69438)
+        ),
+        AmbientPreset(
+            id = "nebula", name = "星云紫夜", subtitle = "深空星尘与极夜紫罗兰",
+            baseStart = Color(0xFF291745), baseMid = Color(0xFF171430), baseEnd = Color(0xFF12243D),
+            orbPrimary = Color(0xFFA34DF5), orbSecondary = Color(0xFF299EE6), orbWarm = Color(0xFFD642A8),
+            accent = Color(0xFF8F66FA)
+        ),
+        AmbientPreset(
+            id = "frost", name = "冰川银雾", subtitle = "通透银灰与克制微光",
+            baseStart = Color(0xFF1C2636), baseMid = Color(0xFF141A26), baseEnd = Color(0xFF1A2130),
+            orbPrimary = Color(0xFF7099C7), orbSecondary = Color(0xFF478FC7), orbWarm = Color(0xFF5C7094),
+            accent = Color(0xFF4294F5)
+        )
+    )
 
-    fun fromHue(hue: Float) {
-        var l = 58f
-        while (l < 78f && relLum(hsl(hue, 0.74f, l / 100f)) < 0.22f) l += 2f
-        val c = hsl(hue, 0.74f, l / 100f)
-        color = c
-        ink = if (relLum(c) > 0.179f) Color(0xFF0B0C10) else Color.White
-        soft = hsl(hue, 0.78f, 0.58f).copy(alpha = 0.30f)
-    }
-
-    private fun relLum(c: Color): Float {
-        fun ch(v: Float) = if (v <= 0.03928f) v / 12.92f else Math.pow(((v + 0.055) / 1.055).toDouble(), 2.4).toFloat()
-        return 0.2126f * ch(c.red) + 0.7152f * ch(c.green) + 0.0722f * ch(c.blue)
-    }
-
-    private fun hsl(h: Float, s: Float, l: Float): Color {
-        val c = (1f - Math.abs(2f * l - 1f)) * s
-        val x = c * (1f - Math.abs(((h / 60f) % 2f) - 1f))
-        val m = l - c / 2f
-        val r: Float
-        val g: Float
-        val b: Float
-        when {
-            h < 60f -> { r = c; g = x; b = 0f }
-            h < 120f -> { r = x; g = c; b = 0f }
-            h < 180f -> { r = 0f; g = c; b = x }
-            h < 240f -> { r = 0f; g = x; b = c }
-            h < 300f -> { r = x; g = 0f; b = c }
-            else -> { r = c; g = 0f; b = x }
-        }
-        return Color((r + m).coerceIn(0f, 1f), (g + m).coerceIn(0f, 1f), (b + m).coerceIn(0f, 1f))
+    fun forId(id: String): AmbientPreset {
+        val lower = id.trim().lowercase()
+        return presets.firstOrNull { it.id == lower } ?: presets.first()
     }
 }
 
 /**
- * 10-foot UI 设计令牌（V3 · tvOS 原型）
+ * 柔光主题的当前取值。放在全局 compose state 里，
+ * 设置页一点，整屏背景立刻跟着换，并与 SharedPreferences 保持一致。
+ */
+object AmbientState {
+    private const val PREFS = "nextmovie_ambient"
+    private const val KEY_THEME = "theme"
+    private const val KEY_INTENSITY = "intensity"
+    private const val KEY_POSTER = "poster_sync"
+
+    var themeId by mutableStateOf("aurora")
+        private set
+    /** soft / standard / vivid */
+    var intensity by mutableStateOf("standard")
+        private set
+    var posterSync by mutableStateOf(true)
+        private set
+
+    private var bound = false
+
+    fun bind(context: Context) {
+        if (bound) return
+        bound = true
+        val p = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        themeId = p.getString(KEY_THEME, "aurora").orEmpty().ifBlank { "aurora" }
+        intensity = p.getString(KEY_INTENSITY, "standard").orEmpty().ifBlank { "standard" }
+        posterSync = p.getBoolean(KEY_POSTER, true)
+    }
+
+    fun setTheme(context: Context, id: String) {
+        themeId = id
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY_THEME, id).apply()
+    }
+
+    fun setIntensity(context: Context, value: String) {
+        intensity = value
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY_INTENSITY, value).apply()
+    }
+
+    fun setPosterSync(context: Context, value: Boolean) {
+        posterSync = value
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_POSTER, value).apply()
+    }
+
+    fun gain(): Float = when (intensity) {
+        "soft" -> 0.72f
+        "vivid" -> 1.32f
+        else -> 1.0f
+    }
+}
+
+/**
+ * 10-foot UI 设计令牌 · V4（对齐 Marco TV）
  *
- * 底色是石墨夜色（#0B0C10），层次靠半透明白叠加而不是换底色，
- * 于是海报、面板、浮层都在同一个「夜色」里自然融合。
- * 唯一的主色是动态的（见 [DynamicAccent]），文字四级透明度建立层级。
+ * 层次全靠白色半透明叠加，主色只有一支（#388FFA），金色只给评分。
+ * 卡片圆角 16、聚焦描边 1.1dp → 2.5dp 变白，配一层主色辉光；缩放只做 1.045。
  */
 object Tokens {
     // —— 底色 / 材质 ——
-    val Bg = Color(0xFF0B0C10)
-    val Surface = Color(0x0FFFFFFF)      // white 6%
-    val SurfaceHigh = Color(0x1FFFFFFF)  // white 12%
-    val SurfaceSunk = Color(0x05000000)
-    val ScrimTop = Color(0xE608090C)
-    val ScrimBottom = Color(0xF20B0C10)
+    val Bg = Color(0xFF0F1A29)
+    val Surface = Color(0x18FFFFFF)        // white 9.5%
+    val SurfaceHigh = Color(0x23FFFFFF)    // white 13.5%
+    val SurfaceSunk = Color(0x08000000)
+    val GlassFill = Color(0x21FFFFFF)
+    val GlassStroke = Color(0x3DFFFFFF)
+    val Panel = Color(0xB80E1420)
+    val PanelSolid = Color(0xF2141720)
+    val PosterPlaceholder = Color(0xFF1A2232)
 
-    // —— 主色（动态，读取时取当前值）——
-    val Accent: Color get() = DynamicAccent.color
-    val OnAccent: Color get() = DynamicAccent.ink
-    val AccentDim: Color get() = DynamicAccent.soft
-    val AccentGlow: Color get() = DynamicAccent.soft
-    val Score = Color(0xFFF5C451)
+    val Accent = Color(0xFF388FFA)
+    val OnAccent = Color.White
+    val AccentDim = Color(0x38388FFA)
+    val AccentGlow = Color(0x52388FFA)
+    val Score = Color(0xFFF5C247)
+    val ScoreInk = Color(0xFF0A0F18)
+    val Amber = Color(0xFFF5A623)
+    val AmberText = Color(0xFFFFD166)
+    val AmberDim = Color(0x38F5A623)
+    val Green = Color(0xFF34C759)
+    val GreenText = Color(0xFF7CF0A4)
+    val GreenDim = Color(0x3834C759)
+    val Danger = Color(0xFFE5484D)
+    val DangerDim = Color(0x38FF453A)
 
-    // —— 文本 / 发丝线 ——
-    val Text = Color(0xFFF4F6FA)
-    val TextDim = Color(0xB8F4F6FA)
-    val TextFaint = Color(0x7AF4F6FA)
-    val TextGhost = Color(0x47F4F6FA)
+    // —— 文本 ——
+    val Text = Color(0xFFFFFFFF)
+    val TextDim = Color(0xCCFFFFFF)
+    val TextFaint = Color(0x94FFFFFF)
+    val TextGhost = Color(0x5CFFFFFF)
     val Stroke = Color(0x1AFFFFFF)
-    val StrokeStrong = Color(0x2EFFFFFF)
-    val Danger = Color(0xFFD9635C)
+    val StrokeStrong = Color(0x3DFFFFFF)
+    val DarkInk = Color(0xFF0A0F1A)
 
-    val PosterRatio = 2f / 3f
-    val FocusScale = 1.075f
-    const val MotionMs = 220
+    val PosterRatio = 0.56f
+    val FocusScale = 1.045f
+    const val MotionMs = 160
 
-    val ScreenPadding = 36.dp
-    val RowGap = 14.dp
-    val CardWidth = 117.dp
-    val CardHeight = 175.dp
-    val WideWidth = 210.dp
-    val WideHeight = 118.dp
+    val ScreenPadding = 56.dp
+    val RowGap = 24.dp
+    val CardWidth = 156.dp
+    val CardHeight = 234.dp
+    val WideWidth = 268.dp
+    val WideHeight = 150.dp
     val Radius = 14.dp
 
-    // —— 8pt 间距栅格 ——
+    // —— 间距栅格 ——
     object Gap {
         val xs = 4.dp
         val s = 8.dp
@@ -124,54 +198,57 @@ object Tokens {
         val xxl = 48.dp
     }
 
-    // —— 圆角阶梯：图 14 / 面板 20 / 巨幕 28 / 胶囊整圆 ——
+    // —— 圆角阶梯 ——
     object Corner {
         val badge = 10.dp
-        val card = 14.dp
+        val card = 16.dp
+        val cardInner = 14.5.dp
+        val tile = 14.dp
         val panel = 20.dp
-        val hero = 28.dp
+        val hero = 24.dp
+        val sheet = 24.dp
         val pill = 999.dp
     }
 
-    // —— 字号阶梯（10-foot UI：最小 12sp，正文 15–16sp）——
+    // —— 字号阶梯（10-foot：最小 11.5sp，正文 15–18sp）——
     object Type {
-        val billboard = 44.sp
+        val hero = 44.sp
         val display = 32.sp
-        val hero = 28.sp
-        val rowTitle = 21.sp
-        val title = 19.sp
-        val section = 16.sp
-        val body = 15.sp
-        val caption = 13.5.sp
-        val badge = 12.sp
-        val micro = 11.sp
-        const val ROW_TRACK = -0.6f
-        const val MICRO_TRACK = 0.16f
+        val section = 24.sp
+        val rowTitle = 22.sp
+        val tab = 18.sp
+        val title = 17.sp
+        val body = 16.sp
+        val caption = 14.5.sp
+        val small = 13.5.sp
+        val badge = 13.sp
+        val micro = 11.5.sp
+        const val MICRO_TRACK = 0.35f
     }
 }
 
 private val TvColorScheme = darkColorScheme(
-    primary = Color(0xFF3D8BFF),
+    primary = Tokens.Accent,
     onPrimary = Color.White,
-    secondary = Color(0xFF3D8BFF),
+    secondary = Tokens.Accent,
     background = Tokens.Bg,
     onBackground = Tokens.Text,
-    surface = Color(0xFF13151B),
+    surface = Color(0xFF141A26),
     onSurface = Tokens.Text,
-    surfaceVariant = Color(0xFF1A1C23),
+    surfaceVariant = Color(0xFF1A2232),
     onSurfaceVariant = Tokens.TextDim,
     error = Tokens.Danger
 )
 
 private val TvTypography = Typography(
-    displaySmall = TextStyle(fontSize = 32.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-1.2).sp),
-    headlineMedium = TextStyle(fontSize = 26.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.8).sp),
-    titleLarge = TextStyle(fontSize = 21.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.6).sp),
-    bodyLarge = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.Normal, lineHeight = 25.sp),
+    displaySmall = TextStyle(fontSize = 32.sp, fontWeight = FontWeight.Bold),
+    headlineMedium = TextStyle(fontSize = 26.sp, fontWeight = FontWeight.Bold),
+    titleLarge = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Bold),
+    bodyLarge = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.Normal, lineHeight = 24.sp),
     bodyMedium = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.Normal, lineHeight = 23.sp),
-    labelLarge = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.2).sp),
-    labelSmall = TextStyle(fontSize = 13.5.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.sp),
-    labelMedium = TextStyle(fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.sp),
+    labelLarge = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.SemiBold),
+    labelSmall = TextStyle(fontSize = 13.5.sp, fontWeight = FontWeight.Medium),
+    labelMedium = TextStyle(fontSize = 14.5.sp, fontWeight = FontWeight.Medium),
     titleSmall = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
 )
 

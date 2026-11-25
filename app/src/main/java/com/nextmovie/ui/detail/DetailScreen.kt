@@ -2,25 +2,24 @@
 
 package com.nextmovie.ui.detail
 
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import kotlinx.coroutines.ensureActive
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import com.nextmovie.ui.common.tvClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -28,8 +27,10 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -37,19 +38,25 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import coil.compose.AsyncImage
 import com.nextmovie.core.AppRepository
 import com.nextmovie.core.config.Site
@@ -57,17 +64,30 @@ import com.nextmovie.core.history.HistoryEntry
 import com.nextmovie.core.model.Episode
 import com.nextmovie.core.model.PlayLine
 import com.nextmovie.core.model.Vod
-import com.nextmovie.core.model.VodDetail
+import com.nextmovie.ui.common.AmberChip
+import com.nextmovie.ui.common.BrandLogo
+import com.nextmovie.ui.common.GoldChip
+import com.nextmovie.ui.common.MetaChip
+import com.nextmovie.ui.common.PosterTint
+import com.nextmovie.ui.common.TvPill
 import com.nextmovie.ui.common.mouseFocusable
 import com.nextmovie.ui.common.mouseWheel
 import com.nextmovie.ui.common.posterModel
+import com.nextmovie.ui.common.tvClickable
 import com.nextmovie.ui.theme.Tokens
+import kotlin.math.min
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
- * 详情页（10-foot 版式）
+ * 详情页（对齐 Marco TvDetailScreen）
  *
- * 左栏：海报 + 主操作 + 换源；右栏：片名 / 元信息胶囊 / 简介 / 线路 / 多行选集网格。
- * 相比首版的单行选集，网格让 40+ 集的剧不必横向拉几屏，一屏能看全并可方向键直达。
+ * 整屏是一张剧照 + 多层压暗，文字压在「编辑式」左侧一栏（最宽 880dp）：
+ * 元信息胶囊 → 44sp 片名 → 上次观看进度 → 主演 / 简介 → 行动胶囊行。
+ * 下方是一整块深色玻璃面板：播放线路（每个源一条，带 HLS / 4K 云盘标识）、
+ * 集数分组与 76dp 高的选集格子。
+ *
+ * 数据侧仍然走 NextMovie 的多源聚合：首个源回来就先渲染，全部回来按画质/成功率重排。
  */
 @Composable
 fun DetailScreen(
@@ -82,10 +102,13 @@ fun DetailScreen(
         startMs: Long,
         slots: List<com.nextmovie.core.model.PlaySlot>
     ) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    /** 从播放器退回时仍在播的画面，铺在剧照位置（对齐 Marco） */
+    videoBackdrop: (@Composable () -> Unit)? = null
 ) {
     val screenStartedAt = remember { System.nanoTime() }
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var agg by remember { mutableStateOf<AppRepository.AggregatedDetail?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var sourceIndex by remember { mutableIntStateOf(0) }
@@ -93,12 +116,15 @@ fun DetailScreen(
     var loading by remember { mutableStateOf(true) }
     var hint by remember { mutableStateOf("正在聚合全网来源…") }
     var manual by remember { mutableStateOf(false) }
-    // 聚合结果二次筛选：0 全部 / 1 4K+ / 2 1080P+ / 3 集数最全
     var filter by remember { mutableIntStateOf(0) }
-    val playFocus = remember { androidx.compose.ui.focus.FocusRequester() }
     var reload by remember { mutableIntStateOf(0) }
+    var descending by remember { mutableStateOf(false) }
+    var groupIndex by remember { mutableIntStateOf(0) }
+    var synopsisExpanded by remember { mutableStateOf(false) }
+    var episodeSheet by remember { mutableStateOf(false) }
+    var posterTint by remember { mutableStateOf<Color?>(null) }
+    val playFocus = remember { FocusRequester() }
 
-    // 进详情页就自动聚合：第一个回来的源先渲染，全部回来后按画质/成功率重排，默认选最优
     LaunchedEffect(initial.id, site.key, reload) {
         loading = true
         hint = "正在聚合全网来源…"
@@ -107,13 +133,11 @@ fun DetailScreen(
         sourceIndex = 0
         lineIndex = 0
         manual = false
+        groupIndex = 0
         val result = runCatching {
             repo.aggregateDetail(site, initial) { partial ->
                 if (agg == null && partial.sources.isNotEmpty()) {
-                    android.util.Log.i(
-                        "NextMovieTiming",
-                        "detail-partial ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms sources=${partial.sources.size}"
-                    )
+                    android.util.Log.i("NextMovieTiming", "detail-partial ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms sources=${partial.sources.size}")
                     agg = partial
                     lineIndex = partial.best?.bestLineIndex ?: 0
                     loading = false
@@ -131,38 +155,32 @@ fun DetailScreen(
             loading = false
             if (agg == null) error = "所有站点都没有返回这部片的可用线路"
         } else {
-            android.util.Log.i(
-                "NextMovieTiming",
-                "detail-ready ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms sources=${full.sources.size}"
-            )
+            android.util.Log.i("NextMovieTiming", "detail-ready ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms sources=${full.sources.size}")
             val previousBest = agg?.best?.site?.key
             agg = full
-            val best = full.best
             if (!manual) {
                 sourceIndex = 0
-                lineIndex = best?.bestLineIndex ?: 0
+                lineIndex = full.best?.bestLineIndex ?: 0
             }
             loading = false
             hint = buildString {
-                append("已聚合 ${full.sources.size} 个来源 · 自动选中「${best?.site?.name ?: site.name}」")
-                best?.badge?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
-                if (previousBest != null && previousBest != best?.site?.key) append("（已自动切到更优源）")
+                append("已聚合 ${full.sources.size} 个来源 · 自动选中「${full.best?.site?.name ?: site.name}」")
+                full.best?.badge?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
+                if (previousBest != null && previousBest != full.best?.site?.key) append("（已自动切到更优源）")
             }
         }
     }
 
-    // 插件源首次初始化可能要 10–30s：别让用户对着没有任何信息的转圈
     LaunchedEffect(loading, agg) {
         if (!loading || agg != null) return@LaunchedEffect
         var elapsed = 0
         while (loading && agg == null) {
-            kotlinx.coroutines.delay(1_000)
+            delay(1_000)
             elapsed += 1
             if (elapsed >= 4) hint = "插件源首次初始化中，通常 10–30 秒…（已 ${elapsed}s）"
         }
     }
 
-    // 海报增强只作用在最优源，避免为了一部片打十几次 TMDB/B站
     LaunchedEffect(agg?.best?.site?.key, agg?.best?.detail?.vod?.id) {
         val currentAgg = agg ?: return@LaunchedEffect
         val best = currentAgg.best ?: return@LaunchedEffect
@@ -177,18 +195,17 @@ fun DetailScreen(
     }
 
     val sources = agg?.sources.orEmpty()
-    val allSources = sources
-    val maxEpisodes = remember(allSources) {
-        allSources.maxOfOrNull { src -> src.detail.lines.maxOfOrNull { it.episodes.size } ?: 0 } ?: 0
+    val maxEpisodes = remember(sources) {
+        sources.maxOfOrNull { src -> src.detail.lines.maxOfOrNull { it.episodes.size } ?: 0 } ?: 0
     }
-    val visibleSources = remember(allSources, filter) {
+    val visibleSources = remember(sources, filter) {
         val picked = when (filter) {
-            1 -> allSources.filter { it.height >= 1440 }
-            2 -> allSources.filter { it.height >= 1080 }
-            3 -> allSources.filter { (it.detail.lines.maxOfOrNull { line -> line.episodes.size } ?: 0) >= maxEpisodes }
-            else -> allSources
+            1 -> sources.filter { it.height >= 1440 }
+            2 -> sources.filter { it.height >= 1080 }
+            3 -> sources.filter { (it.detail.lines.maxOfOrNull { line -> line.episodes.size } ?: 0) >= maxEpisodes }
+            else -> sources
         }
-        picked.ifEmpty { allSources }
+        picked.ifEmpty { sources }
     }
     val safeSourceIndex = sourceIndex.coerceIn(0, sources.lastIndex.coerceAtLeast(0))
     val activeSource = sources.getOrNull(safeSourceIndex)
@@ -199,25 +216,25 @@ fun DetailScreen(
         ?: activeSource?.let { src -> lines.getOrNull(src.bestLineIndex) }
         ?: lines.firstOrNull()
 
-
-    // 本机看过这部片且没看完时，给一个一键续播入口
     LaunchedEffect(lines.isNotEmpty()) {
-        if (lines.isNotEmpty()) { kotlinx.coroutines.delay(100); runCatching { playFocus.requestFocus() } }
+        if (lines.isNotEmpty()) { delay(120); runCatching { playFocus.requestFocus() } }
     }
 
-    // 收藏状态跟着「当前生效源 + 影片 id」走：换源后按钮会自动反映该源是否已收藏
     var isFavorite by remember { mutableStateOf(repo.favorites.contains(active.key, vod.id)) }
     LaunchedEffect(active.key, vod.id, agg) {
         isFavorite = repo.favorites.contains(active.key, vod.id)
     }
 
-    // 进度按「片名」取，所以换了源/线路仍然是同一部片的进度
     val resumeEntry = remember(vod.name, agg) {
         (repo.history.findByName(vod.name) ?: repo.history.find(active.key, vod.id))
             ?.takeIf { it.resumable && it.episodeUrl.isNotBlank() }
     }
 
-    /** 把「当前这一集」在所有已聚合源里的对应集收成可切换清单，顺序与自动优选一致。 */
+    LaunchedEffect(vod.displayBackdrop, vod.displayPic) {
+        val url = vod.displayBackdrop.ifBlank { vod.displayPic }
+        PosterTint.resolve(context, url)?.let { posterTint = it }
+    }
+
     fun slotsOf(episodeIndex: Int, episode: Episode): List<com.nextmovie.core.model.PlaySlot> {
         val out = ArrayList<com.nextmovie.core.model.PlaySlot>(sources.size)
         sources.forEach { src ->
@@ -246,557 +263,634 @@ fun DetailScreen(
         val srcSite = src?.site ?: active
         val target = srcLines.firstOrNull { it.name == entry.playFrom } ?: srcLines.firstOrNull() ?: return
         val idx = target.episodes.indexOfFirst { it.url == entry.episodeUrl }
-        val ep = target.episodes.getOrNull(idx)
-            ?: Episode(entry.episodeName.ifBlank { "继续观看" }, entry.episodeUrl)
+        val ep = target.episodes.getOrNull(idx) ?: Episode(entry.episodeName.ifBlank { "继续观看" }, entry.episodeUrl)
         onPlay(srcSite, srcVod, target, ep, entry.positionMs, slotsOf(idx.coerceAtLeast(0), ep))
     }
 
+    val totalEpisodes = line?.episodes?.size ?: 0
+    val episodesPerGroup = 30
+    val groupCount = if (totalEpisodes > 0) (totalEpisodes + episodesPerGroup - 1) / episodesPerGroup else 0
+    val safeGroup = groupIndex.coerceIn(0, (groupCount - 1).coerceAtLeast(0))
+    val episodeIndices = remember(totalEpisodes, safeGroup, descending) {
+        if (totalEpisodes == 0) emptyList()
+        else {
+            val start = safeGroup * episodesPerGroup
+            val end = min(totalEpisodes, start + episodesPerGroup)
+            val range = (start until end).toList()
+            if (descending) range.reversed() else range
+        }
+    }
+    val heroWidth = LocalConfiguration.current.screenWidthDp.dp
+    val horizontalPad = (heroWidth * 0.036f).coerceIn(36.dp, 64.dp)
+    val topBreathing = (LocalConfiguration.current.screenHeightDp.dp * 0.12f).coerceIn(56.dp, 128.dp)
+
+    if (episodeSheet && line != null) {
+        EpisodeSheet(
+            title = vod.name,
+            line = line,
+            resumeUrl = resumeEntry?.episodeUrl.orEmpty(),
+            onPlay = { ep ->
+                episodeSheet = false
+                val idx = line.episodes.indexOf(ep).coerceAtLeast(0)
+                onPlay(active, vod, line, ep, 0L, slotsOf(idx, ep))
+            },
+            onDismiss = { episodeSheet = false }
+        )
+    }
+
     Box(modifier = Modifier.fillMaxSize().background(Tokens.Bg)) {
-        AsyncImage(
-            model = remember(vod.displayBackdrop) { posterModel(context, vod.displayBackdrop, detail = true) },
+        // 剧照铺满 + 多层压暗：左边最实（压文字），右侧保留画面呼吸
+        if (videoBackdrop != null) {
+            Box(Modifier.fillMaxSize()) { videoBackdrop() }
+        } else AsyncImage(
+            model = remember(vod.displayBackdrop, vod.displayPic) {
+                posterModel(context, vod.displayBackdrop.ifBlank { vod.displayPic }, detail = true)
+            },
             contentDescription = null,
             contentScale = ContentScale.Crop,
-            alpha = 0.18f,
+            alpha = 0.62f,
             modifier = Modifier.fillMaxSize()
         )
-        // 左重右轻的横向压暗 + 上下渐隐，让文字区永远有足够对比度
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.horizontalGradient(
-                        0f to Color(0xF20B0C10),
-                        0.45f to Color(0xC00B0C10),
-                        1f to Color(0x990B0C10)
-                    )
+            Modifier.fillMaxSize().background(
+                Brush.horizontalGradient(
+                    0f to Color(0xF00B1420),
+                    0.46f to Color(0xB80B1420),
+                    1f to Color(0x660B1420)
                 )
+            )
         )
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        0f to Color(0xE60B0C10),
-                        0.22f to Color.Transparent,
-                        0.72f to Color.Transparent,
-                        1f to Color(0xF20B0C10)
+            Modifier.fillMaxSize().background(
+                Brush.verticalGradient(
+                    0f to Color(0xB30B1420),
+                    0.26f to Color(0x470B1420),
+                    0.72f to Color(0x590B1420),
+                    1f to Color(0xF00B1420)
+                )
+            )
+        )
+        if (posterTint != null) {
+            Box(
+                Modifier.fillMaxSize().background(
+                    Brush.radialGradient(
+                        0f to posterTint!!.copy(alpha = 0.26f),
+                        0.55f to posterTint!!.copy(alpha = 0.08f),
+                        1f to Color.Transparent,
+                        center = androidx.compose.ui.geometry.Offset(360f, 420f),
+                        radius = 1100f
                     )
                 )
-        )
+            )
+        }
 
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 44.dp, vertical = 26.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(start = horizontalPad, end = horizontalPad, top = 24.dp, bottom = 40.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    text = "‹ 首页",
-                    color = Tokens.TextDim,
-                    style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(Tokens.Corner.pill))
-                        .background(Color(0x12FFFFFF))
-                        .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
-                        .mouseFocusable()
-                        .tvClickable(onClick = onBack, corner = Tokens.Corner.pill)
-                        .padding(horizontal = 18.dp, vertical = 9.dp)
-                )
-                Spacer(Modifier.width(10.dp))
-                FavoritePill(
-                    active = isFavorite,
-                    onClick = {
-                        isFavorite = repo.favorites.toggle(
-                            com.nextmovie.core.history.FavoriteEntry(
-                                siteKey = active.key,
-                                vodId = vod.id,
-                                name = vod.name,
-                                pic = vod.displayPic,
-                                remark = vod.remark,
-                                year = vod.displayYear
-                            )
-                        )
-                    }
-                )
+                TvPill(text = "← 返回", glass = true, horizontalPadding = 18.dp, verticalPadding = 10.dp, onClick = onBack)
                 Spacer(Modifier.weight(1f))
+                BrandLogo(iconSize = 34.dp, fontSize = 20f)
+            }
+
+            Spacer(Modifier.height(topBreathing))
+
+            Column(modifier = Modifier.widthIn(max = 880.dp).fillMaxWidth(0.62f)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    MetaChip(if (sources.isEmpty()) site.name else active.name, highlight = true)
+                    val score = vod.tmdb?.voteAverage?.takeIf { it > 0.0 } ?: vod.score.toDoubleOrNull()
+                    if (score != null && score > 0) GoldChip("TMDB %.1f".format(score))
+                    vod.displayYear.takeIf { it.isNotBlank() }?.let { MetaChip(it) }
+                    vod.area.takeIf { it.isNotBlank() }?.let { MetaChip(it) }
+                    vod.remark.takeIf { it.isNotBlank() }?.let { MetaChip(it.take(16)) }
+                    if (line != null && totalEpisodes > 0) MetaChip("共 $totalEpisodes 集")
+                    if (detectDrive(line?.name.orEmpty()) != null) AmberChip("4K 云盘")
+                }
+                Spacer(Modifier.height(14.dp))
                 Text(
-                    text = if (sources.isEmpty()) site.name else "${active.name} · ${sources.size} 源 / ${lines.size} 线路",
-                    color = Tokens.TextFaint,
-                    style = MaterialTheme.typography.labelSmall
+                    text = vod.name,
+                    color = Color.White,
+                    fontSize = 44.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = (-0.7).sp,
+                    lineHeight = 50.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
                 )
-            }
-
-            Spacer(Modifier.height(22.dp))
-
-            Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                // —— 左栏 ——
-                Column(modifier = Modifier.width(208.dp).fillMaxHeight().verticalScroll(rememberScrollState())) {
-                    Box(
-                        modifier = Modifier
-                            .width(208.dp)
-                            .height(312.dp)
-                            .clip(RoundedCornerShape(Tokens.Corner.card))
-                            .background(Tokens.SurfaceHigh)
-                            .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.card))
-                    ) {
-                        AsyncImage(
-                            model = remember(vod.displayPic) { posterModel(context, vod.displayPic, detail = true) },
-                            contentDescription = vod.name,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
-                    Spacer(Modifier.height(16.dp))
-                    PrimaryButton(
-                        label = "▶ 播放",
-                        modifier = Modifier.focusRequester(playFocus),
-                        enabled = line != null && line.episodes.isNotEmpty(),
-                        onClick = {
-                            line?.episodes?.firstOrNull()?.let { first ->
-                                onPlay(active, vod, line, first, 0L, slotsOf(0, first))
-                            }
-                        }
-                    )
-                    if (resumeEntry != null) {
-                        Spacer(Modifier.height(10.dp))
-                        val pct = (resumeEntry.progress * 100).toInt()
-                        GhostButton(
-                            label = "继续观看 · ${resumeEntry.episodeName.ifBlank { "上次位置" }}${if (pct > 0) "  $pct%" else ""}",
-                            onClick = { resume() }
-                        )
-                    }                }
-
-                Spacer(Modifier.width(36.dp))
-
-                // —— 右栏 ——
-                Column(modifier = Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState())) {
-                    Text(
-                        text = vod.name,
-                        color = Tokens.Text,
-                        fontSize = 36.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        lineHeight = 44.sp
-                    )
+                if (resumeEntry != null) {
                     Spacer(Modifier.height(12.dp))
-                    val chips = buildList {
-                        vod.displayYear.takeIf { it.isNotBlank() }?.let { add(it) }
-                        vod.area.takeIf { it.isNotBlank() }?.let { add(it) }
-                        vod.typeName.takeIf { it.isNotBlank() }?.let { add(it) }
-                        vod.tmdb?.voteAverage?.takeIf { it > 0.0 }?.let { add("TMDB %.1f".format(it)) }
-                        if (line != null && line.episodes.isNotEmpty()) add("${line.episodes.size} 集")
-                        vod.remark.takeIf { it.isNotBlank() }?.let { add(it.take(14)) }
-                    }
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        chips.forEach { MetaChip(it) }
-                    }
-
-                    val overview = vod.displayOverview
-                    if (overview.isNotBlank()) {
-                        Spacer(Modifier.height(14.dp))
-                        Text(
-                            text = overview,
-                            color = Tokens.TextDim,
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 3,
-                            overflow = TextOverflow.Ellipsis,
-                            lineHeight = 28.sp
-                        )
-                    }
-
-                    Spacer(Modifier.height(18.dp))
-
-                    when {
-                        loading -> Column {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(
-                                    Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(Tokens.Accent)
-                                )
-                                Spacer(Modifier.width(10.dp))
-                                Text(
-                                    "正在读取剧集",
-                                    color = Tokens.Text,
-                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
-                                )
-                            }
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                hint.ifBlank { "正在读取剧集…" },
-                                color = Tokens.TextDim,
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        }
-                        error != null -> ErrorCard(message = error!!, onRetry = { reload++ })
-                        lines.isEmpty() -> Text(
-                            "暂无可用播放线路",
-                            color = Tokens.TextDim,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        else -> {
-                            if (hint.isNotBlank()) {
-                                Text(
-                                    text = hint,
-                                    color = Tokens.Accent,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    modifier = Modifier.padding(bottom = 10.dp)
-                                )
-                            }
-                            // 已聚合的源：按「实测分辨率 + 画质 + 历史成功率」排序，第一个就是自动优选的
-                            if (sources.size > 1) {
-                                SourceFilters(
-                                    total = sources.size,
-                                    uhd = sources.count { it.height >= 1440 },
-                                    fhd = sources.count { it.height >= 1080 },
-                                    mostEpisodes = sources.count {
-                                        (it.detail.lines.maxOfOrNull { line -> line.episodes.size } ?: 0) >= maxEpisodes
-                                    },
-                                    selected = filter,
-                                    onSelect = { picked ->
-                                        filter = picked
-                                        manual = true
-                                        val next = when (picked) {
-                                            1 -> sources.firstOrNull { it.height >= 1440 }
-                                            2 -> sources.firstOrNull { it.height >= 1080 }
-                                            3 -> sources.firstOrNull {
-                                                (it.detail.lines.maxOfOrNull { line -> line.episodes.size } ?: 0) >= maxEpisodes
-                                            }
-                                            else -> sources.firstOrNull()
-                                        }
-                                        if (next != null) {
-                                            sourceIndex = sources.indexOfFirst { it.site.key == next.site.key }
-                                            lineIndex = next.bestLineIndex
-                                        }
-                                    }
-                                )
-                                Spacer(Modifier.height(10.dp))
-                                SourceChips(
-                                    sources = visibleSources,
-                                    selectedKey = active.key,
-                                    bestKey = sources.firstOrNull()?.site?.key,
-                                    onPick = { picked ->
-                                        manual = true
-                                        val idx = sources.indexOfFirst { it.site.key == picked.site.key }
-                                        if (idx >= 0) {
-                                            sourceIndex = idx
-                                            lineIndex = picked.bestLineIndex
-                                        }
-                                    }
-                                )
-                                Spacer(Modifier.height(12.dp))
-                            }
-                            if (lines.size > 1) {
-                                LineTabs(lines = lines, selected = lineIndex, onSelect = { lineIndex = it })
-                                Spacer(Modifier.height(14.dp))
-                            }
-                            EpisodeGrid(
-                                line = line!!,
-                                onPlay = { ep ->
-                                    val idx = line.episodes.indexOf(ep).coerceAtLeast(0)
-                                    onPlay(active, vod, line, ep, 0L, slotsOf(idx, ep))
-                                }
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun MetaChip(text: String) {
-    Text(
-        text = text,
-        color = Tokens.TextDim,
-        fontSize = Tokens.Type.badge,
-        modifier = Modifier
-            .clip(RoundedCornerShape(Tokens.Corner.pill))
-            .background(Tokens.Surface)
-            .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
-            .padding(horizontal = 12.dp, vertical = 5.dp)
-    )
-}
-
-@Composable
-private fun PrimaryButton(label: String, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(Tokens.Corner.pill)
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(52.dp)
-            .clip(shape)
-            .background(if (enabled) Tokens.Accent else Tokens.SurfaceHigh)
-            .mouseFocusable()
-            .tvClickable(enabled = enabled, onClick = onClick, corner = Tokens.Corner.pill, scaleOnFocus = 1.02f),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = label,
-            color = if (enabled) Tokens.OnAccent else Tokens.TextDim,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.SemiBold
-        )
-    }
-}
-
-@Composable
-private fun FavoritePill(active: Boolean, onClick: () -> Unit) {
-    Text(
-        text = if (active) "★ 已收藏" else "☆ 收藏",
-        color = if (active) Tokens.Accent else Tokens.TextDim,
-        style = MaterialTheme.typography.labelLarge,
-        modifier = Modifier
-            .clip(RoundedCornerShape(Tokens.Corner.pill))
-            .background(if (active) Tokens.AccentDim else Tokens.Surface)
-            .border(
-                width = if (active) 2.dp else 1.dp,
-                color = if (active) Tokens.Accent else Tokens.Stroke,
-                shape = RoundedCornerShape(Tokens.Corner.pill)
-            )
-            .mouseFocusable()
-            .tvClickable(onClick = onClick, corner = Tokens.Corner.pill)
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-    )
-}
-
-@Composable
-private fun GhostButton(label: String, onClick: () -> Unit) {
-    Text(
-        text = label,
-        color = Tokens.TextDim,
-        fontSize = Tokens.Type.caption,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Tokens.Corner.pill))
-            .background(Tokens.Surface)
-            .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
-            .mouseFocusable()
-            .tvClickable(onClick = onClick, corner = Tokens.Corner.pill)
-            .padding(horizontal = 16.dp, vertical = 13.dp)
-    )
-}
-
-@Composable
-private fun ErrorCard(message: String, onRetry: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .clip(RoundedCornerShape(Tokens.Corner.panel))
-            .background(Tokens.Surface)
-            .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.panel))
-            .padding(18.dp)
-    ) {
-        Text(message, color = Tokens.TextDim, style = MaterialTheme.typography.bodyMedium)
-        Spacer(Modifier.height(10.dp))
-        Text(
-            text = "重试",
-            color = Tokens.Accent,
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier
-                .clip(RoundedCornerShape(Tokens.Corner.pill))
-                .background(Tokens.AccentDim)
-                .mouseFocusable()
-                .tvClickable(onClick = onRetry, corner = Tokens.Corner.pill)
-                .padding(horizontal = 16.dp, vertical = 8.dp)
-        )
-    }
-}
-
-@Composable
-private fun SourceFilters(
-    total: Int,
-    uhd: Int,
-    fhd: Int,
-    mostEpisodes: Int,
-    selected: Int,
-    onSelect: (Int) -> Unit
-) {
-    val items = listOf(
-        0 to "全部 $total",
-        1 to "4K/2K $uhd",
-        2 to "1080P+ $fhd",
-        3 to "集数最全 $mostEpisodes"
-    )
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            text = "筛选",
-            color = Tokens.TextFaint,
-            style = MaterialTheme.typography.labelSmall
-        )
-        items.forEach { (value, label) ->
-            val isActive = value == selected
-            val disabled = (value == 1 && uhd == 0) || (value == 2 && fhd == 0)
-            Text(
-                text = label,
-                color = when {
-                    isActive -> Tokens.Accent
-                    disabled -> Tokens.TextFaint
-                    else -> Tokens.TextDim
-                },
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(Tokens.Corner.pill))
-                    .background(if (isActive) Tokens.AccentDim else Tokens.Surface)
-                    .border(
-                        width = if (isActive) 2.dp else 1.dp,
-                        color = if (isActive) Tokens.Accent else Tokens.Stroke,
-                        shape = RoundedCornerShape(Tokens.Corner.pill)
-                    )
-                    .mouseFocusable()
-                    .tvClickable(enabled = !disabled, onClick = { onSelect(value) }, corner = Tokens.Corner.pill)
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-            )
-        }
-    }
-}
-
-@Composable
-private fun SourceChips(
-    sources: List<AppRepository.SourceDetail>,
-    selectedKey: String,
-    bestKey: String?,
-    onPick: (AppRepository.SourceDetail) -> Unit
-) {
-    val state = rememberLazyListState()
-    Column {
-        Text(
-            text = "来源 · 已按实测分辨率与历史成功率排序",
-            color = Tokens.Accent,
-            style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.06.sp),
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
-        LazyRow(
-            state = state,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.mouseWheel(state, horizontal = true)
-        ) {
-            itemsIndexed(sources) { _, src ->
-                val isActive = src.site.key == selectedKey
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(Tokens.Corner.pill))
-                        .background(if (isActive) Tokens.AccentDim else Tokens.Surface)
-                        .border(
-                            width = if (isActive) 2.dp else 1.dp,
-                            color = if (isActive) Tokens.Accent else Tokens.Stroke,
-                            shape = RoundedCornerShape(Tokens.Corner.pill)
-                        )
-                        .mouseFocusable()
-                        .tvClickable(onClick = { onPick(src) }, corner = Tokens.Corner.pill)
-                        .padding(horizontal = 14.dp, vertical = 7.dp)
-                ) {
-                    if (src.site.key == bestKey) {
-                        Text(
-                            text = "最优",
-                            color = Tokens.OnAccent,
-                            style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(999.dp))
-                                .background(Tokens.Accent)
-                                .padding(horizontal = 7.dp, vertical = 2.dp)
-                        )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(Tokens.Accent))
                         Spacer(Modifier.width(8.dp))
+                        Text(
+                            "上次观看：${resumeEntry.episodeName.ifBlank { "上次位置" }} · ${fmtMs(resumeEntry.positionMs)}",
+                            color = Color(0xE6FFFFFF),
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        if (resumeEntry.progress > 0.01f) {
+                            Spacer(Modifier.width(12.dp))
+                            Box(
+                                Modifier.width(110.dp).height(4.dp).clip(RoundedCornerShape(999.dp))
+                                    .background(Color(0x2EFFFFFF))
+                            ) {
+                                Box(
+                                    Modifier.fillMaxWidth(resumeEntry.progress.coerceIn(0f, 1f))
+                                        .height(4.dp)
+                                        .clip(RoundedCornerShape(999.dp))
+                                        .background(Tokens.Accent)
+                                )
+                            }
+                        }
                     }
-                    Text(
-                        text = "${if (isActive) "● " else ""}${src.site.name}",
-                        color = if (isActive) Tokens.Accent else Tokens.TextDim,
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = src.badge,
-                        color = Tokens.TextFaint,
-                        style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro)
-                    )
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LineTabs(lines: List<PlayLine>, selected: Int, onSelect: (Int) -> Unit) {
-    val state = rememberLazyListState()
-    LazyRow(
-        state = state,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier.mouseWheel(state, horizontal = true)
-    ) {
-        itemsIndexed(lines) { index, line ->
-            val active = index == selected
-            Text(
-                text = line.name,
-                color = if (active) Tokens.Accent else Tokens.TextDim,
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(Tokens.Corner.pill))
-                    .background(if (active) Tokens.AccentDim else Tokens.Surface)
-                    .border(
-                        width = 1.dp,
-                        color = if (active) Tokens.Accent.copy(alpha = 0.55f) else Tokens.Stroke,
-                        shape = RoundedCornerShape(Tokens.Corner.pill)
-                    )
-                    .mouseFocusable()
-                    .tvClickable(onClick = { onSelect(index) }, corner = Tokens.Corner.pill)
-                    .padding(horizontal = 16.dp, vertical = 7.dp)
-            )
-        }
-    }
-}
-
-/**
- * 选集网格：自适应列宽 + 固定高度滚动区。
- * 40 集以上的剧不再需要横向拉好几屏，方向键上下就能跳行。
- */
-@Composable
-private fun EpisodeGrid(line: PlayLine, onPlay: (Episode) -> Unit) {
-    val state = rememberLazyGridState()
-    Column {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
-            Text(
-                text = "选集",
-                color = Tokens.Accent,
-                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.06.sp)
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = "共 ${line.episodes.size} 集",
-                color = Color(0x66FFFFFF),
-                style = MaterialTheme.typography.labelSmall
-            )
-        }
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = 140.dp),
-            state = state,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(220.dp)
-                .mouseWheel(state)
-        ) {
-            itemsIndexed(line.episodes) { _, ep ->
-                Box(
-                    modifier = Modifier
-                        .height(56.dp)
-                        .clip(RoundedCornerShape(Tokens.Radius))
-                        .background(Tokens.Surface)
-                        .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Radius))
-                        .mouseFocusable()
-                        .tvClickable(onClick = { onPlay(ep) }, corner = Tokens.Radius, scaleOnFocus = 1.02f),
-                    contentAlignment = Alignment.Center
-                ) {
+                if (vod.actor.isNotBlank()) {
+                    Spacer(Modifier.height(10.dp))
                     Text(
-                        text = ep.name,
-                        color = Tokens.Text,
-                        style = MaterialTheme.typography.titleSmall,
+                        "主演：${vod.actor}",
+                        color = Color(0xC7FFFFFF),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                val overview = vod.displayOverview
+                if (overview.isNotBlank()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = overview,
+                        color = Color(0xD6FFFFFF),
+                        fontSize = 16.sp,
+                        lineHeight = 26.sp,
+                        maxLines = if (synopsisExpanded) 8 else 2,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(horizontal = 8.dp)
+                        modifier = Modifier
+                            .mouseFocusable()
+                            .tvClickable(showRing = false, onClick = { synopsisExpanded = !synopsisExpanded })
+                    )
+                }
+                Spacer(Modifier.height(24.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    val ctaLabel = resumeEntry?.let {
+                        "▶ 续播 ${it.episodeName.ifBlank { "上次位置" }} (${fmtMs(it.positionMs)})"
+                    } ?: "▶ 立即播放"
+                    Box(modifier = Modifier.focusRequester(playFocus)) {
+                        TvPill(
+                            text = ctaLabel,
+                            prominent = true,
+                            enabled = line != null && line.episodes.isNotEmpty(),
+                            autofocus = true,
+                            horizontalPadding = 28.dp,
+                            verticalPadding = 14.dp,
+                            onClick = {
+                                if (resumeEntry != null) resume()
+                                else line?.episodes?.firstOrNull()?.let { first ->
+                                    onPlay(active, vod, line, first, 0L, slotsOf(0, first))
+                                }
+                            }
+                        )
+                    }
+                    if (totalEpisodes > 1) {
+                        TvPill(
+                            text = "选集 · 共${totalEpisodes}集",
+                            glass = true,
+                            horizontalPadding = 22.dp,
+                            verticalPadding = 14.dp,
+                            onClick = { episodeSheet = true }
+                        )
+                    }
+                    TvPill(
+                        text = if (isFavorite) "★ 已收藏" else "☆ 收藏",
+                        glass = true,
+                        selected = isFavorite,
+                        horizontalPadding = 22.dp,
+                        verticalPadding = 14.dp,
+                        onClick = {
+                            isFavorite = repo.favorites.toggle(
+                                com.nextmovie.core.history.FavoriteEntry(
+                                    siteKey = active.key,
+                                    vodId = vod.id,
+                                    name = vod.name,
+                                    pic = vod.displayPic,
+                                    remark = vod.remark,
+                                    year = vod.displayYear
+                                )
+                            )
+                        }
+                    )
+                    if (sources.size > 1) {
+                        TvPill(
+                            text = "☁️ 多源聚合 ${sources.size}",
+                            glass = true,
+                            horizontalPadding = 20.dp,
+                            verticalPadding = 14.dp,
+                            onClick = { filter = 0; sourceIndex = 0; manual = true }
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(34.dp))
+
+            // —— 播放线路 + 选集玻璃面板 ——
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(Tokens.Corner.hero))
+                    .background(Tokens.Panel)
+                    .border(1.1.dp, Color(0x26FFFFFF), RoundedCornerShape(Tokens.Corner.hero))
+                    .padding(start = 26.dp, end = 26.dp, top = 22.dp, bottom = 26.dp)
+            ) {
+                when {
+                    loading && lines.isEmpty() -> Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(vertical = 42.dp).fillMaxWidth()
+                    ) {
+                        CircularProgressIndicator(color = Tokens.Accent, modifier = Modifier.size(22.dp))
+                        Spacer(Modifier.width(14.dp))
+                        Column {
+                            Text("正在解析选集与播放线路…", color = Color(0xB3FFFFFF), fontSize = 15.sp)
+                            if (hint.isNotBlank()) Text(hint, color = Tokens.TextFaint, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
+                        }
+                    }
+                    error != null && lines.isEmpty() -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "加载详情失败：$error",
+                            color = Color(0xFFFF9A9A),
+                            fontSize = 15.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TvPill(text = "重试加载", glass = true, onClick = { reload++ })
+                    }
+                    lines.isEmpty() -> Text(
+                        "当前条目暂无可播放线路",
+                        color = Tokens.TextFaint,
+                        fontSize = 15.sp,
+                        modifier = Modifier.padding(vertical = 16.dp)
+                    )
+                    else -> {
+                        // 播放线路：一个源一条，带集数 + HLS / 4K 云盘标识
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("播放线路", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.width(16.dp))
+                            val lineState = rememberLazyListState()
+                            LazyRow(
+                                state = lineState,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.weight(1f).mouseWheel(lineState, horizontal = true)
+                            ) {
+                                itemsIndexed(lines) { index, item ->
+                                    LinePill(
+                                        name = item.name,
+                                        count = item.episodes.size,
+                                        drive = detectDrive(item.name),
+                                        selected = index == lineIndex,
+                                        onClick = {
+                                            lineIndex = index
+                                            groupIndex = 0
+                                            manual = true
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        if (sources.size > 1) {
+                            Spacer(Modifier.height(14.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("来源", color = Tokens.TextFaint, fontSize = 13.sp)
+                                Spacer(Modifier.width(10.dp))
+                                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    listOf(
+                                        0 to "全部 ${sources.size}",
+                                        1 to "4K/2K ${sources.count { it.height >= 1440 }}",
+                                        2 to "1080P+ ${sources.count { it.height >= 1080 }}",
+                                        3 to "集数最全 ${sources.count { (it.detail.lines.maxOfOrNull { l -> l.episodes.size } ?: 0) >= maxEpisodes }}"
+                                    ).forEach { (value, label) ->
+                                        TvPill(
+                                            text = label,
+                                            selected = value == filter,
+                                            enabled = !((value == 1 && sources.none { it.height >= 1440 }) || (value == 2 && sources.none { it.height >= 1080 })),
+                                            horizontalPadding = 14.dp,
+                                            verticalPadding = 7.dp,
+                                            onClick = {
+                                                filter = value
+                                                manual = true
+                                                val next = when (value) {
+                                                    1 -> sources.firstOrNull { it.height >= 1440 }
+                                                    2 -> sources.firstOrNull { it.height >= 1080 }
+                                                    3 -> sources.firstOrNull { (it.detail.lines.maxOfOrNull { l -> l.episodes.size } ?: 0) >= maxEpisodes }
+                                                    else -> sources.firstOrNull()
+                                                }
+                                                if (next != null) {
+                                                    sourceIndex = sources.indexOfFirst { it.site.key == next.site.key }
+                                                    lineIndex = next.bestLineIndex
+                                                    groupIndex = 0
+                                                }
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(10.dp))
+                            val srcState = rememberLazyListState()
+                            LazyRow(
+                                state = srcState,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.mouseWheel(srcState, horizontal = true)
+                            ) {
+                                itemsIndexed(visibleSources) { _, src ->
+                                    val isActive = src.site.key == active.key
+                                    TvPill(
+                                        text = "${src.site.name}  ${src.badge}",
+                                        glass = true,
+                                        selected = isActive,
+                                        horizontalPadding = 14.dp,
+                                        verticalPadding = 7.dp,
+                                        onClick = {
+                                            manual = true
+                                            val idx = sources.indexOfFirst { it.site.key == src.site.key }
+                                            if (idx >= 0) {
+                                                sourceIndex = idx
+                                                lineIndex = src.bestLineIndex
+                                                groupIndex = 0
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        Box(
+                            Modifier.padding(vertical = 16.dp).fillMaxWidth().height(1.dp).background(Color(0x1AFFFFFF))
+                        )
+
+                        // 选集工具条
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("选集列表（共 $totalEpisodes 集）", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.width(14.dp))
+                            TvPill(
+                                text = if (descending) "↓ 倒序" else "↑ 正序",
+                                glass = true,
+                                horizontalPadding = 14.dp,
+                                verticalPadding = 7.dp,
+                                onClick = { descending = !descending }
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            if (groupCount > 1) {
+                                val groupState = rememberLazyListState()
+                                LazyRow(
+                                    state = groupState,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.weight(1f).mouseWheel(groupState, horizontal = true)
+                                ) {
+                                    itemsIndexed((0 until groupCount).toList()) { g, _ ->
+                                        TvPill(
+                                            text = "${g * episodesPerGroup + 1}-${min(totalEpisodes, (g + 1) * episodesPerGroup)}",
+                                            glass = true,
+                                            selected = g == safeGroup,
+                                            horizontalPadding = 14.dp,
+                                            verticalPadding = 7.dp,
+                                            onClick = { groupIndex = g }
+                                        )
+                                    }
+                                }
+                            } else {
+                                Spacer(Modifier.weight(1f))
+                            }
+                            if (totalEpisodes > 12) {
+                                TvPill(
+                                    text = "全屏选集 ›",
+                                    glass = true,
+                                    horizontalPadding = 14.dp,
+                                    verticalPadding = 7.dp,
+                                    onClick = { episodeSheet = true }
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(16.dp))
+
+                        val epState = rememberLazyGridState()
+                        LazyVerticalGrid(
+                            columns = GridCells.Adaptive(minSize = 132.dp),
+                            state = epState,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightInGrid(totalEpisodes)
+                                .mouseWheel(epState)
+                        ) {
+                            itemsIndexed(episodeIndices) { _, epIndex ->
+                                val ep = line!!.episodes[epIndex]
+                                val watched = resumeEntry?.episodeUrl == ep.url
+                                EpisodeTile(
+                                    number = epIndex + 1,
+                                    title = ep.name,
+                                    watched = watched,
+                                    isNetdisk = detectDrive(line.name) != null,
+                                    onClick = {
+                                        onPlay(active, vod, line, ep, 0L, slotsOf(epIndex, ep))
+                                    }
+                                )
+                            }
+                        }
+                        if (hint.isNotBlank()) {
+                            Spacer(Modifier.height(12.dp))
+                            Text(hint, color = Tokens.Accent, fontSize = 13.sp, maxLines = 2)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 一屏最多显示 6 行选集，超出后网格内部滚动；避免详情页被 40 集顶到几米长。 */
+private fun Modifier.heightInGrid(total: Int) = this.height(
+    when {
+        total <= 12 -> 88.dp
+        total <= 24 -> 176.dp
+        total <= 36 -> 264.dp
+        else -> 352.dp
+    }
+)
+
+@Composable
+private fun LinePill(name: String, count: Int, drive: String?, selected: Boolean, onClick: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        TvPill(
+            text = "$name ($count)",
+            glass = true,
+            selected = selected,
+            horizontalPadding = 18.dp,
+            verticalPadding = 9.dp,
+            onClick = onClick
+        )
+        Spacer(Modifier.width(8.dp))
+        if (drive != null) AmberChip("4K 云盘") else HlsBadge()
+    }
+}
+
+@Composable
+private fun HlsBadge() {
+    Text(
+        text = "HLS",
+        color = Tokens.GreenText,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(Tokens.GreenDim)
+            .border(0.9.dp, Color(0x8834C759), RoundedCornerShape(6.dp))
+            .padding(horizontal = 7.dp, vertical = 2.dp)
+    )
+}
+
+@Composable
+private fun EpisodeTile(
+    number: Int,
+    title: String,
+    watched: Boolean,
+    isNetdisk: Boolean,
+    onClick: () -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(if (focused) 1.04f else 1f, tween(140), label = "epScale")
+    val bg = when {
+        focused -> Color.White
+        watched -> Tokens.Accent.copy(alpha = 0.28f)
+        else -> Color(0x14FFFFFF)
+    }
+    val borderColor = when {
+        focused -> Color.White
+        watched -> Tokens.Accent.copy(alpha = 0.85f)
+        else -> Color(0x29FFFFFF)
+    }
+    Column(
+        verticalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier
+            .height(76.dp)
+            .clip(RoundedCornerShape(Tokens.Corner.tile))
+            .background(bg)
+            .border(
+                if (focused) 2.4.dp else if (watched) 1.4.dp else 1.dp,
+                borderColor,
+                RoundedCornerShape(Tokens.Corner.tile)
+            )
+            .onFocusChanged { focused = it.isFocused }
+            .tvClickable(showRing = false, onClick = onClick)
+            .padding(start = 16.dp, end = 16.dp, top = 11.dp, bottom = 10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (watched) {
+                Text("▶", color = if (focused) Tokens.Accent else Color(0xFF7EC0FF), fontSize = 11.sp)
+                Spacer(Modifier.width(4.dp))
+            }
+            Text(
+                "EP ${number.toString().padStart(2, '0')}",
+                color = if (focused) Color(0xFF3E4A5C) else Color(0x9EFFFFFF),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.4.sp
+            )
+            Spacer(Modifier.weight(1f))
+            if (watched) {
+                Text(
+                    "上次观看",
+                    color = Color.White,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(Tokens.Accent)
+                        .padding(horizontal = 7.dp, vertical = 1.5.dp)
+                )
+            } else if (isNetdisk) {
+                Text("4K", color = Tokens.AmberText, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        Text(
+            text = title,
+            color = if (focused) Color(0xFF0A0F18) else Color.White,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/** 全屏选集：40 集以上的剧不再靠详情页里挤 6 行。 */
+@Composable
+private fun EpisodeSheet(
+    title: String,
+    line: PlayLine,
+    resumeUrl: String,
+    onPlay: (Episode) -> Unit,
+    onDismiss: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.86f)
+                .fillMaxHeight(0.78f)
+                .clip(RoundedCornerShape(24.dp))
+                .background(Tokens.PanelSolid)
+                .border(1.dp, Color(0x26FFFFFF), RoundedCornerShape(24.dp))
+                .padding(28.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(title, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("${line.name} · 共 ${line.episodes.size} 集", color = Tokens.TextDim, fontSize = 14.sp)
+                }
+                TvPill(text = "关闭", glass = true, horizontalPadding = 16.dp, verticalPadding = 8.dp, onClick = onDismiss)
+            }
+            Spacer(Modifier.height(18.dp))
+            val state = rememberLazyGridState()
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 132.dp),
+                state = state,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxSize().mouseWheel(state)
+            ) {
+                itemsIndexed(line.episodes) { index, ep ->
+                    EpisodeTile(
+                        number = index + 1,
+                        title = ep.name,
+                        watched = resumeUrl.isNotBlank() && ep.url == resumeUrl,
+                        isNetdisk = detectDrive(line.name) != null,
+                        onClick = { onPlay(ep) }
                     )
                 }
             }
         }
     }
+}
+
+/** 线路名里出现这些词，基本就是网盘直链（夸克 / UC / 阿里 / 百度 / 115 / AList）。 */
+private fun detectDrive(name: String): String? {
+    val lower = name.lowercase()
+    val keys = listOf("夸克", "quark", "uc", "阿里", "ali", "百度", "baidu", "115", "alist", "云盘", "网盘", "4k")
+    return keys.firstOrNull { lower.contains(it) }
+}
+
+private fun fmtMs(ms: Long): String {
+    val total = (ms / 1000).coerceAtLeast(0)
+    val h = total / 3600
+    val m = (total % 3600) / 60
+    val s = total % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
 }

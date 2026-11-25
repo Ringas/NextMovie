@@ -98,10 +98,12 @@ fun PlayerScreen(
     slots: List<com.nextmovie.core.model.PlaySlot> = emptyList(),
     currentSlot: Int = 0,
     onSwitchSlot: (Int) -> Unit = {},
+    /** 跨页面会话：从播放器退回详情页时用它继续播，不销毁播放器 */
+    session: PlaybackSession? = null,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    val player = remember { ExoPlayer.Builder(context).build() }
+    val player = session?.player ?: remember { ExoPlayer.Builder(context).build() }
     val lifecycleOwner = LocalLifecycleOwner.current
     val view = LocalView.current
     var requestStarted by remember { mutableLongStateOf(0L) }
@@ -120,6 +122,8 @@ fun PlayerScreen(
     val rootFocus = remember { FocusRequester() }
     val toolbarFocus = remember { FocusRequester() }
     var controlsVisible by remember { mutableStateOf(false) }
+    var playerView by remember { mutableStateOf<androidx.media3.ui.PlayerView?>(null) }
+    var resizeMode by remember { mutableIntStateOf(androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT) }
     // 线路切换面板：不抢 Compose 焦点（播放器根节点独占按键），方向键在这里走自己的游标
     var pickerVisible by remember { mutableStateOf(false) }
     var pickerIndex by remember { androidx.compose.runtime.mutableIntStateOf(currentSlot.coerceIn(0, slots.lastIndex.coerceAtLeast(0))) }
@@ -183,7 +187,8 @@ fun PlayerScreen(
             // 退出前补记一次，避免最后 5 秒的进度丢失
             report()
             player.removeListener(listener)
-            player.release()
+            // 有会话时（退回详情页）不销毁播放器，画面会接着在详情页底层播
+            if (session == null) player.release()
         }
     }
 
@@ -367,10 +372,11 @@ fun PlayerScreen(
     ) {
         AndroidView(
             factory = { ctx ->
-                PlayerView(ctx).apply {
+                (if (session != null) session.view(ctx)
+                else PlayerView(ctx).apply {
                     this.player = player
                     useController = false
-                }
+                }).also { playerView = it }
             },
             modifier = Modifier.fillMaxSize()
         )
@@ -387,26 +393,28 @@ fun PlayerScreen(
         }
 
         if (controlsVisible) {
-            Row(
-                Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 92.dp)
-                    .clip(RoundedCornerShape(Tokens.Corner.panel))
-                    .background(Color(0xF2111319))
-                    .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.panel))
-                    .padding(horizontal = 10.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                com.nextmovie.ui.settings.SettingsButton(if (player.isPlaying) "暂停" else "继续", Modifier.focusRequester(toolbarFocus)) { togglePlay() }
-                com.nextmovie.ui.settings.SettingsButton("−10 秒") { seekBy(-10_000L) }
-                com.nextmovie.ui.settings.SettingsButton("+10 秒") { seekBy(10_000L) }
-                com.nextmovie.ui.settings.SettingsButton("倍速 $speed×") {
-                    val steps = listOf(1f, 1.25f, 1.5f, 2f)
-                    speed = steps[(steps.indexOf(speed) + 1) % steps.size]
-                    player.setPlaybackSpeed(speed)
-                }
-                com.nextmovie.ui.settings.SettingsButton("返回详情", onClick = onBack)
-            }
+            PlayerSheet(
+                player = player,
+                speed = speed,
+                onSpeed = { v ->
+                    speed = v
+                    runCatching { player.setPlaybackSpeed(v) }
+                },
+                resizeMode = resizeMode,
+                onResizeMode = { mode ->
+                    resizeMode = mode
+                    playerView?.resizeMode = mode
+                },
+                slots = slots,
+                currentSlot = currentSlot,
+                onSwitchSlot = onSwitchSlot,
+                playing = player.isPlaying,
+                onToggle = { togglePlay() },
+                onSeekBy = { seekBy(it) },
+                onFullEpisodes = onBack,
+                onClose = { controlsVisible = false },
+                modifier = Modifier.align(Alignment.BottomCenter)
+            )
         }
 
         // —— HUD ——
@@ -761,3 +769,158 @@ private suspend fun sniffHls(url: String, headers: Map<String, String>): Boolean
 
         }.getOrDefault(false)
     }
+
+/**
+ * 播控与音画设置（对齐 Marco tv_player_overlay.dart 的底部玻璃 sheet）
+ *
+ * 4 行：播放倍速 / 画面比例 / 播放线路 / 传输控制；抬头带线路与倍速角标，
+ * 右侧「选集 / 关闭」。线路行按聚合排序原样展示，标注源站与 HLS，可手动切换。
+ */
+@Composable
+private fun PlayerSheet(
+    player: androidx.media3.exoplayer.ExoPlayer,
+    speed: Float,
+    onSpeed: (Float) -> Unit,
+    resizeMode: Int,
+    onResizeMode: (Int) -> Unit,
+    slots: List<com.nextmovie.core.model.PlaySlot>,
+    currentSlot: Int,
+    onSwitchSlot: (Int) -> Unit,
+    playing: Boolean,
+    onToggle: () -> Unit,
+    onSeekBy: (Long) -> Unit,
+    onFullEpisodes: () -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val speeds = listOf(0.75f, 1f, 1.25f, 1.5f, 2f)
+    val ratios = listOf(
+        androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT to "适应屏幕",
+        androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM to "裁切填满",
+        androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL to "拉伸铺满"
+    )
+    val position = runCatching { player.currentPosition }.getOrDefault(0L)
+    val duration = runCatching { player.duration }.getOrDefault(0L).takeIf { it > 0 } ?: 0L
+
+    Column(
+        modifier = modifier
+            .padding(start = 32.dp, end = 32.dp, bottom = 24.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Tokens.Corner.sheet))
+            .background(Color(0xF2141720))
+            .border(1.dp, Color(0x24FFFFFF), RoundedCornerShape(Tokens.Corner.sheet))
+            .padding(start = 28.dp, end = 28.dp, top = 22.dp, bottom = 24.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("播控与音画设置", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.width(14.dp))
+            if (slots.size > 1) com.nextmovie.ui.common.MetaChip("线路 ${currentSlot + 1}/${slots.size}")
+            Spacer(Modifier.width(8.dp))
+            com.nextmovie.ui.common.MetaChip("${speed}×")
+            Spacer(Modifier.weight(1f))
+            com.nextmovie.ui.common.TvPill(
+                text = "选集",
+                glass = true,
+                horizontalPadding = 16.dp,
+                verticalPadding = 9.dp,
+                onClick = onFullEpisodes
+            )
+            Spacer(Modifier.width(8.dp))
+            com.nextmovie.ui.common.TvPill(
+                text = "关闭",
+                glass = true,
+                horizontalPadding = 16.dp,
+                verticalPadding = 9.dp,
+                onClick = onClose
+            )
+        }
+        Spacer(Modifier.height(16.dp))
+
+        // 传输控制
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            com.nextmovie.ui.common.TvPill(
+                text = if (playing) "⏸ 暂停" else "▶ 继续",
+                prominent = true,
+                onClick = onToggle
+            )
+            Spacer(Modifier.width(8.dp))
+            com.nextmovie.ui.common.TvPill(text = "−10s", glass = true, onClick = { onSeekBy(-10_000L) })
+            Spacer(Modifier.width(8.dp))
+            com.nextmovie.ui.common.TvPill(text = "+10s", glass = true, onClick = { onSeekBy(10_000L) })
+            Spacer(Modifier.width(16.dp))
+            Box(
+                Modifier
+                    .weight(1f)
+                    .height(5.dp)
+                    .background(Color(0x33FFFFFF), RoundedCornerShape(999.dp))
+            ) {
+                val fraction = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
+                Box(
+                    Modifier
+                        .fillMaxWidth(fraction)
+                        .height(5.dp)
+                        .background(Tokens.Accent, RoundedCornerShape(999.dp))
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Text(
+                fmt(position) + " / " + fmt(duration),
+                color = Tokens.TextDim,
+                fontSize = 13.sp
+            )
+        }
+        Spacer(Modifier.height(16.dp))
+
+        SheetRow("播放倍速") {
+            speeds.forEach { v ->
+                com.nextmovie.ui.common.TvPill(
+                    text = if (v == 1f) "1.0×" else "${v}×",
+                    selected = speed == v,
+                    glass = speed != v,
+                    horizontalPadding = 15.dp,
+                    verticalPadding = 8.dp,
+                    onClick = { onSpeed(v) }
+                )
+                Spacer(Modifier.width(8.dp))
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        SheetRow("画面比例") {
+            ratios.forEach { (mode, label) ->
+                com.nextmovie.ui.common.TvPill(
+                    text = label,
+                    selected = resizeMode == mode,
+                    glass = resizeMode != mode,
+                    horizontalPadding = 15.dp,
+                    verticalPadding = 8.dp,
+                    onClick = { onResizeMode(mode) }
+                )
+                Spacer(Modifier.width(8.dp))
+            }
+        }
+        if (slots.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            SheetRow("播放线路") {
+                slots.take(4).forEachIndexed { index, slot ->
+                    com.nextmovie.ui.common.TvPill(
+                        text = slot.siteName + (if (slot.badge.isNotBlank()) " · ${slot.badge}" else ""),
+                        selected = index == currentSlot,
+                        glass = index != currentSlot,
+                        horizontalPadding = 14.dp,
+                        verticalPadding = 8.dp,
+                        onClick = { onSwitchSlot(index) }
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SheetRow(label: String, content: @Composable () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = Tokens.TextDim, fontSize = 14.sp, modifier = Modifier.width(88.dp))
+        content()
+    }
+}

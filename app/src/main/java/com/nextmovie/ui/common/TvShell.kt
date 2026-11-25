@@ -2,14 +2,17 @@ package com.nextmovie.ui.common
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,101 +21,181 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.foundation.focusable
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.key.type
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
-import com.nextmovie.core.model.Vod
-import com.nextmovie.ui.theme.DynamicAccent
+import com.nextmovie.ui.theme.Ambient
+import com.nextmovie.ui.theme.AmbientPreset
+import com.nextmovie.ui.theme.AmbientState
 import com.nextmovie.ui.theme.Tokens
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /**
- * 舞台背景：石墨夜色 + 一团取自当前作品的主色氛围光 + 极淡颗粒。
- * 这是 tvOS 让整块屏幕「有空气」的关键，颜色随焦点作品漂移。
+ * 客厅柔光背景（对齐 Marco TV 的 TvAmbientSoftGlowBackground）
+ *
+ * 斜向三段渐变打底 + 四团固定位置的软光 + 可选的海报色联动光。
+ * 全部用径向渐变直接铺满矩形，不做实时模糊：1080p 电视盒子上零掉帧，
+ * 这才是「高级但不卡」的取舍。
  */
 @Composable
-fun StageBackdrop(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
-    val accent = Tokens.Accent
+fun AmbientBackdrop(
+    modifier: Modifier = Modifier,
+    themeId: String = AmbientState.themeId,
+    intensity: String = AmbientState.intensity,
+    posterTint: Color? = null,
+    posterSync: Boolean = AmbientState.posterSync
+) {
+    val preset = Ambient.forId(themeId)
+    val gain = if (intensity == "soft") 0.72f else if (intensity == "vivid") 1.32f else 1.0f
     Box(
         modifier = modifier
             .fillMaxSize()
             .drawBehind {
-                drawRect(Tokens.Bg)
-                drawGradientGlow(accent.copy(alpha = 0.34f))
-                drawNoise()
+                drawRect(
+                    Brush.linearGradient(
+                        colors = listOf(preset.baseStart, preset.baseMid, preset.baseEnd),
+                        start = Offset.Zero,
+                        end = Offset(size.width, size.height)
+                    )
+                )
+                orb(preset.orbPrimary, 0.46f * gain, 0.14f, 0.18f, 0.64f)
+                orb(preset.orbSecondary, 0.42f * gain, 0.86f, 0.22f, 0.60f)
+                orb(preset.orbSecondary, 0.24f * gain, 0.50f, 0.06f, 0.44f)
+                orb(preset.orbWarm, 0.36f * gain, 0.52f, 0.94f, 0.66f)
+                if (posterSync && posterTint != null && posterTint.alpha > 0.01f) {
+                    orb(posterTint, 0.22f, 0.50f, 0.42f, 0.68f)
+                }
             }
-    ) { content() }
-}
-
-private fun DrawScope.drawGradientGlow(color: Color) {
-    val brush = Brush.radialGradient(
-        0f to color,
-        0.45f to color.copy(alpha = color.alpha * 0.42f),
-        1f to Color.Transparent,
-        center = Offset(size.width * 0.62f, size.height * 0.02f),
-        radius = size.width * 0.85f
     )
-    drawRect(brush)
 }
 
-/** 颗粒：几十个像素级小点，成本可忽略，但能去掉大面积渐变的「塑料感」。 */
-private fun DrawScope.drawNoise() {
-    var seed = 20261125
-    repeat(900) {
-        seed = seed * 1103515245 + 12345
-        val x = ((seed ushr 8) % 1000) / 1000f * size.width
-        seed = seed * 1103515245 + 12345
-        val y = ((seed ushr 8) % 1000) / 1000f * size.height
-        drawCircle(Color.White.copy(alpha = 0.05f), radius = 0.9f, center = Offset(x, y))
+private fun DrawScope.orb(color: Color, alpha: Float, cx: Float, cy: Float, radiusFactor: Float) {
+    val a = alpha.coerceIn(0f, 0.85f)
+    val center = Offset(size.width * cx, size.height * cy)
+    val radius = (size.width * radiusFactor).coerceIn(160f, 2400f)
+    drawRect(
+        Brush.radialGradient(
+            0f to color.copy(alpha = a),
+            0.48f to color.copy(alpha = a * 0.42f),
+            1f to Color.Transparent,
+            center = center,
+            radius = radius
+        )
+    )
+}
+
+/**
+ * 通用舞台：柔光背景 + 内容。posterTint 传入当前焦点海报的主色即可整屏联动。
+ * 既有页面（设置、详情、搜索）继续复用这个入口。
+ */
+@Composable
+fun StageBackdrop(
+    modifier: Modifier = Modifier,
+    posterTint: Color? = null,
+    content: @Composable () -> Unit
+) {
+    Box(modifier = modifier) {
+        AmbientBackdrop(posterTint = posterTint)
+        content()
     }
 }
 
-/** 顶栏：居中玻璃胶囊 tab + 右侧时钟，滚动后可换浅一档背景（这里固定用最浅档）。 */
+/** 品牌字标：图标 + Next / Movie 两段字重，与 Macro 的 Marco Movie 同构。 */
 @Composable
-fun GlassTopBar(
-    tabs: List<TabSpec>,
+fun BrandLogo(
+    iconSize: Dp = 42.dp,
+    fontSize: Float = 23f,
+    stacked: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    val mark: @Composable () -> Unit = {
+        Box(
+            modifier = Modifier
+                .size(iconSize)
+                .clip(RoundedCornerShape(iconSize * 0.24f))
+                .background(
+                    Brush.linearGradient(
+                        colors = listOf(Color(0xFF2A4E7E), Color(0xFF15243A))
+                    )
+                )
+                .border(0.8.dp, Color(0x33FFFFFF), RoundedCornerShape(iconSize * 0.24f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "N",
+                color = Color(0xFFE8F1FF),
+                fontSize = (iconSize.value * 0.52f).sp,
+                fontWeight = FontWeight.ExtraBold,
+                lineHeight = (iconSize.value * 0.52f).sp
+            )
+        }
+    }
+    val wordmark: @Composable () -> Unit = {
+        Row {
+            Text("Next", color = Color(0xFFF8FAFC), fontSize = fontSize.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.4).sp)
+            Text(" Movie", color = Color(0xFFD8E0EE), fontSize = fontSize.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.4).sp)
+        }
+    }
+    if (stacked) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = modifier) {
+            mark()
+            Spacer(Modifier.height(10.dp))
+            wordmark()
+        }
+    } else {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier) {
+            mark()
+            Spacer(Modifier.width(8.dp))
+            wordmark()
+        }
+    }
+}
+
+data class NavTab(
+    val icon: ImageVector?,
+    val label: String,
+    val active: Boolean,
+    val onClick: () -> Unit
+)
+
+/**
+ * 浮动玻璃胶囊导航（对齐 Marco TvLivingRoomShell 的顶栏）
+ * 左：品牌；右：时钟；中：五枚胶囊，选中是浅白实心、聚焦是浅白 88%。
+ */
+@Composable
+fun FloatingTopBar(
+    tabs: List<NavTab>,
     modifier: Modifier = Modifier,
-    status: String? = null,
-    statusOk: Boolean = true,
-    onStatusClick: (() -> Unit)? = null
+    status: String? = null
 ) {
     var clock by remember { mutableStateOf(currentClock()) }
     LaunchedEffect(Unit) {
@@ -121,392 +204,334 @@ fun GlassTopBar(
             clock = currentClock()
         }
     }
-    Row(
-        modifier = modifier.fillMaxWidth().height(56.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Spacer(Modifier.weight(1f))
-        tabs.forEachIndexed { i, tab ->
-            if (i > 0) Spacer(Modifier.width(6.dp))
-            GlassTab(tab)
-        }
-        Spacer(Modifier.weight(1f))
-        if (status != null) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(Tokens.Corner.pill))
-                    .background(Tokens.Surface)
-                    .then(if (onStatusClick != null) Modifier.tvClickable(corner = Tokens.Corner.pill, onClick = onStatusClick) else Modifier)
-                    .padding(horizontal = 12.dp, vertical = 7.dp)
-            ) {
-                Box(
-                    Modifier.size(6.dp).clip(CircleShape)
-                        .background(if (statusOk) Tokens.Accent else Tokens.Danger)
-                )
-                Spacer(Modifier.width(7.dp))
-                Text(status, color = if (statusOk) Tokens.TextDim else Tokens.Danger, style = MaterialTheme.typography.labelSmall, maxLines = 1)
-            }
-            Spacer(Modifier.width(18.dp))
-        }
-        Text(clock, color = Tokens.TextDim, style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Medium))
-    }
-}
-
-private fun currentClock(): String = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
-
-data class TabSpec(val label: String, val active: Boolean, val onClick: () -> Unit)
-
-/** 玻璃胶囊：默认白 6%，聚焦时整块被主色吃掉、文字转成对比色。 */
-@Composable
-fun GlassTab(spec: TabSpec) {
-    var focused by remember { mutableStateOf(false) }
-    val bg by animateColorAsState(
-        when {
-            focused -> Tokens.Accent
-            spec.active -> Color(0x24FFFFFF)
-            else -> Color(0x10FFFFFF)
-        },
-        tween(180), label = "tabBg"
-    )
-    val fg by animateColorAsState(
-        when {
-            focused -> Tokens.OnAccent
-            spec.active -> Tokens.Text
-            else -> Tokens.TextDim
-        },
-        tween(180), label = "tabFg"
-    )
-    val scale by animateFloatAsState(if (focused) 1.04f else 1f, tween(160, easing = FastOutSlowInEasing), label = "tabScale")
-    Box(
-        modifier = Modifier
-            .height(34.dp)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .clip(RoundedCornerShape(Tokens.Corner.pill))
-            .background(bg)
-            .border(1.dp, if (focused) Tokens.Accent else Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
-            .onFocusChanged { focused = it.isFocused }
-            .tvClickable(corner = Tokens.Corner.pill, showRing = false, onClick = spec.onClick)
-            .padding(horizontal = 16.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(spec.label, color = fg, style = MaterialTheme.typography.labelLarge)
-    }
-}
-
-/**
- * 巨幕：一张 20/28 圆角的暗色卡片，内部是剧照 + 左上主色氛围 + 左侧压暗 + 底收边。
- * 左下是 kicker / 片名 / 元信息 / 简介 / 操作，右下是 7 个小指示点（当前一枚拉成短棒）。
- */
-@Composable
-fun Billboard(
-    vod: Vod,
-    page: Int,
-    pageCount: Int,
-    onOpen: () -> Unit,
-    onPlay: () -> Unit,
-    onFocused: () -> Unit = {},
-    onPageStep: (Int) -> Unit = {},
-    modifier: Modifier = Modifier,
-    height: androidx.compose.ui.unit.Dp = 186.dp
-) {
-    val context = LocalContext.current
-    val bgUrl = remember(vod.displayBackdrop, vod.displayPic, vod.pic) { vod.displayBackdrop.ifBlank { vod.displayPic.ifBlank { vod.pic } } }
-    val backdrop = remember(bgUrl) { posterModel(context, bgUrl, detail = true) }
-    var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(Tokens.Corner.hero)
-    val accent = Tokens.Accent
-
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(height)
-            .clip(shape)
-            .background(Color(0xFF101116))
-            .border(if (focused) 2.dp else 1.dp, if (focused) Tokens.Accent else Tokens.Stroke, shape)
-            .tvClickable(corner = Tokens.Corner.hero, showRing = false, onClick = onOpen)
-            .onPreviewKeyEvent { e ->
-                if (!focused || e.type != androidx.compose.ui.input.key.KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                when (e.key) {
-                    androidx.compose.ui.input.key.Key.DirectionLeft -> { onPageStep(-1); true }
-                    androidx.compose.ui.input.key.Key.DirectionRight -> { onPageStep(1); true }
-                    else -> false
-                }
-            }
-            .onFocusChanged {
-                focused = it.isFocused
-                if (it.isFocused) DynamicAccent.fromSeed(vod.id)
-            }
+            .height(62.dp)
     ) {
-        AsyncImage(
-            model = backdrop,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize()
+        BrandLogo(
+            iconSize = 42.dp,
+            fontSize = 23f,
+            modifier = Modifier.align(Alignment.CenterStart)
         )
-        // 主色氛围光（左上一团）+ 左侧压暗 + 底部收边
-        Box(
-            Modifier.fillMaxSize().drawBehind {
-                drawRect(
-                    Brush.radialGradient(
-                        0f to accent.copy(alpha = 0.55f),
-                        0.55f to accent.copy(alpha = 0.18f),
-                        1f to Color.Transparent,
-                        center = Offset(size.width * 0.18f, size.height * 0.1f),
-                        radius = size.width * 0.62f
-                    )
-                )
-            }
-        )
-        Box(
-            Modifier.fillMaxSize().background(
-                Brush.horizontalGradient(0f to Color(0xF20B0C10), 0.46f to Color(0x990B0C10), 0.82f to Color.Transparent)
-            )
-        )
-        Box(
-            Modifier.fillMaxSize().background(
-                Brush.verticalGradient(0f to Color.Transparent, 0.62f to Color(0x660B0C10), 1f to Color(0xEE0B0C10))
-            )
-        )
-
-        Column(
+        Row(
             modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(start = 30.dp, end = 220.dp, bottom = 18.dp)
+                .align(Alignment.Center)
+                .clip(RoundedCornerShape(999.dp))
+                .background(Color(0x880B1320))
+                .border(1.1.dp, Color(0x29FFFFFF), RoundedCornerShape(999.dp))
+                .padding(5.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    Modifier.size(6.dp).clip(CircleShape).background(accent)
-                )
-                Spacer(Modifier.width(8.dp))
+            tabs.forEach { NavCapsule(it) }
+        }
+        Row(
+            modifier = Modifier.align(Alignment.CenterEnd),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (status != null) {
                 Text(
-                    text = buildString {
-                        append("当前焦点")
-                        if (vod.remark.isNotBlank()) append(" · ").append(vod.remark.take(10))
-                    },
-                    color = Tokens.TextDim,
-                    style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.4.sp),
-                    maxLines = 1
-                )
-            }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = vod.name,
-                color = Tokens.Text,
-                style = MaterialTheme.typography.titleLarge.copy(
-                    fontSize = 32.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    letterSpacing = (-1.6).sp,
-                    lineHeight = 38.sp
-                ),
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            val meta = listOf(vod.displayYear, vod.area, vod.typeName.substringBefore(','))
-                .filter { it.isNotBlank() }.distinct().joinToString("  ·  ")
-            if (meta.isNotBlank()) {
-                Text(
-                    text = meta,
-                    color = Tokens.Score,
-                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                    maxLines = 1,
-                    modifier = Modifier.padding(top = 10.dp)
-                )
-            }
-            val overview = vod.displayOverview
-            if (overview.isNotBlank()) {
-                Text(
-                    text = overview,
-                    color = Tokens.TextDim,
-                    style = MaterialTheme.typography.bodyMedium,
+                    text = status,
+                    color = Tokens.TextFaint,
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 8.dp).fillMaxWidth(0.9f)
+                    modifier = Modifier.width(190.dp),
+                    textAlign = TextAlign.End
                 )
+                Spacer(Modifier.width(14.dp))
             }
-            Spacer(Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                BillboardButton("立即播放", primary = true, onClick = onPlay)
-                Spacer(Modifier.width(12.dp))
-                BillboardButton("详情", primary = false, onClick = onOpen)
-            }
-        }
-
-        if (pageCount > 1) {
-            Row(
-                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 40.dp, bottom = 40.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                repeat(pageCount.coerceAtMost(8)) { i ->
-                    val on = i == page
-                    Box(
-                        Modifier
-                            .padding(horizontal = 3.dp)
-                            .size(width = if (on) 20.dp else 7.dp, height = 7.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(if (on) accent else Color(0x4DFFFFFF))
-                    )
-                }
-            }
+            Text(
+                text = clock,
+                color = Tokens.TextDim,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold
+            )
         }
     }
 }
 
 @Composable
-fun BillboardButton(text: String, primary: Boolean, onClick: () -> Unit) {
+private fun NavCapsule(tab: NavTab) {
     var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(Tokens.Corner.pill)
-    val bg by animateColorAsState(if (focused) Tokens.Accent else if (primary) Color(0xE6FFFFFF) else Color(0x1AFFFFFF), tween(160), label = "bbBg")
-    val fg by animateColorAsState(if (focused) Tokens.OnAccent else if (primary) Color(0xFF0B0C10) else Tokens.Text, tween(160), label = "bbFg")
-    Box(
+    val active = tab.active || focused
+    val fg by animateColorAsState(
+        if (active) Tokens.DarkInk else Color(0xDBFFFFFF),
+        tween(Tokens.MotionMs), label = "navFg"
+    )
+    val bg by animateColorAsState(
+        when {
+            tab.active -> Color(0xECEAECEF)
+            focused -> Color(0xE0FFFFFF)
+            else -> Color.Transparent
+        },
+        tween(Tokens.MotionMs), label = "navBg"
+    )
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
-            
-            .height(40.dp)
-            .clip(shape)
+            .clip(RoundedCornerShape(999.dp))
             .background(bg)
-            .border(1.dp, if (primary || focused) Color.Transparent else Tokens.StrokeStrong, shape)
             .onFocusChanged { focused = it.isFocused }
-            .tvClickable(corner = Tokens.Corner.pill, showRing = false, onClick = onClick)
-            .padding(horizontal = 26.dp),
-        contentAlignment = Alignment.Center
+            .tvClickable(corner = Tokens.Corner.pill, showRing = false, onClick = tab.onClick)
+            .padding(horizontal = 26.dp, vertical = 11.dp)
     ) {
-        Text(text, color = fg, style = MaterialTheme.typography.labelLarge)
+        tab.icon?.let {
+            androidx.compose.material3.Icon(
+                imageVector = it,
+                contentDescription = null,
+                tint = fg,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(Modifier.width(8.dp))
+        }
+        Text(
+            text = tab.label,
+            color = fg,
+            fontSize = 18.sp,
+            fontWeight = if (active) FontWeight.Bold else FontWeight.SemiBold
+        )
     }
 }
 
 /**
- * 横排：标题（可带灰色副标题）+ 两端翻页圆钮 + 卡片轨道。
- * 轨道左右留 56dp（与 [Tokens.ScreenPadding] 对齐），卡片间距 20dp。
+ * 胶囊控件（对齐 Marco TvFocusPill）：四种语气
+ * - 普通：白 11% 底，聚焦时主色实心
+ * - prominent：浅白实心 + 深墨字，聚焦时白色辉光 + 主色描边（主行动）
+ * - glass：白 12%，聚焦变实白深墨字，选中时主色 90%
+ * - destructive：红色危险项
+ *
+ * 描边 1.1dp → 聚焦 2.4dp，缩放只做 1.045，符合客厅 3 米观看距离。
  */
 @Composable
-fun <T> Rail(
-    title: String,
-    subtitle: String?,
-    items: List<T>,
-    key: (T) -> String,
+fun TvPill(
+    text: String? = null,
     modifier: Modifier = Modifier,
-    contentPadding: PaddingValues = PaddingValues(start = 36.dp, end = 36.dp),
-    state: LazyListState = rememberLazyListState(),
-    card: @Composable (T) -> Unit
+    selected: Boolean = false,
+    prominent: Boolean = false,
+    glass: Boolean = false,
+    destructive: Boolean = false,
+    enabled: Boolean = true,
+    autofocus: Boolean = false,
+    preserveColor: Boolean = false,
+    borderRadius: Dp = Tokens.Corner.pill,
+    horizontalPadding: Dp = 18.dp,
+    verticalPadding: Dp = 10.dp,
+    onClick: (() -> Unit)? = null,
+    content: (@Composable () -> Unit)? = null
 ) {
-    val scope = rememberCoroutineScope()
-    var index by remember { mutableIntStateOf(0) }
-    LaunchedEffect(state.firstVisibleItemIndex) { index = state.firstVisibleItemIndex }
-    Column(modifier = modifier.fillMaxWidth().padding(bottom = 12.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 40.dp, end = 36.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.Bottom
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    title,
-                    color = Tokens.Text,
-                    style = MaterialTheme.typography.titleLarge.copy(fontSize = 21.sp, letterSpacing = (-0.6).sp),
-                    maxLines = 1
-                )
-                if (!subtitle.isNullOrBlank()) {
-                    Text(subtitle, color = Tokens.TextFaint, style = MaterialTheme.typography.labelSmall, maxLines = 1)
-                }
-            }
-            RailArrow("‹") { scope.launch { state.animateScrollToItem((index - 5).coerceAtLeast(0)) } }
-            Spacer(Modifier.width(8.dp))
-            RailArrow("›") { scope.launch { state.animateScrollToItem((index + 5).coerceAtMost(items.size - 1)) } }
-        }
-        LazyRow(
-            state = state,
-            contentPadding = contentPadding,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            itemsIndexed(items, key = { _, item -> key(item) }) { _, item -> card(item) }
-        }
-    }
-}
-
-@Composable
-fun RailArrow(glyph: String, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
-    Box(
-        modifier = Modifier
-            
-            .size(30.dp)
-            .clip(CircleShape)
-            .background(if (focused) Tokens.Accent else Color(0x1AFFFFFF))
-            .border(1.dp, Tokens.Stroke, CircleShape)
-            .onFocusChanged { focused = it.isFocused }
-            .tvClickable(corner = Tokens.Corner.pill, showRing = false, onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(glyph, color = if (focused) Tokens.OnAccent else Tokens.TextDim, style = MaterialTheme.typography.titleLarge)
+    val actual = focused
+    val click = if (enabled) onClick else null
+    val bg: Color = when {
+        prominent -> if (actual) Color.White else Color(0xF5F7F9FC)
+        destructive -> if (actual) Color(0xFFE5484D) else Tokens.DangerDim
+        glass -> when {
+            actual && !preserveColor -> Color.White
+            selected -> Tokens.Accent.copy(alpha = 0.90f)
+            else -> if (actual) Color(0x33FFFFFF) else Color(0x1FFFFFFF)
+        }
+        selected -> Tokens.Accent
+        actual && !preserveColor -> Tokens.Accent
+        else -> Color(0x1CFFFFFF)
     }
-}
-
-/** 筛选/分类胶囊行（原型的 .chip）。 */
-@Composable
-fun ChipRow(labels: List<String>, selected: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
-    LazyRow(
-        modifier = modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(horizontal = 36.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    val fg: Color = when {
+        prominent -> if (!enabled) Color(0x73FFFFFF) else Tokens.DarkInk
+        destructive -> if (actual) Color.White else Color(0xFFFFB7B3)
+        glass -> if (actual && !preserveColor) Tokens.DarkInk else Color.White
+        else -> Color.White
+    }
+    val border: Color = when {
+        prominent -> if (actual) Tokens.Accent else Color(0xD9FFFFFF)
+        destructive -> if (actual) Color.White else Color(0x70FF6961)
+        actual -> Color.White
+        selected -> Color(0x6BFFFFFF)
+        else -> Tokens.GlassStroke
+    }
+    val borderWidth by animateDpAsState(if (actual) 2.4.dp else 1.1.dp, tween(Tokens.MotionMs), label = "pillBorder")
+    val scale by animateFloatAsState(if (actual) 1.045f else 1f, tween(140, easing = FastOutSlowInEasing), label = "pillScale")
+    val shape = RoundedCornerShape(borderRadius)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+        modifier = modifier
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(shape)
+            .background(bg)
+            .border(borderWidth, border, shape)
+            .onFocusChanged { focused = it.isFocused }
+            .tvClickable(corner = borderRadius, showRing = false, enabled = click != null, onClick = { click?.invoke() })
+            .padding(horizontal = horizontalPadding, vertical = verticalPadding)
     ) {
-        itemsIndexed(labels) { i, label ->
-            var focused by remember { mutableStateOf(false) }
-            val bg by animateColorAsState(
-                when {
-                    focused -> Tokens.Accent
-                    i == selected -> Color(0x2EFFFFFF)
-                    else -> Color(0x0FFFFFFF)
-                }, tween(160), label = "chipBg"
+        if (content != null) {
+            androidx.compose.runtime.CompositionLocalProvider(
+                androidx.compose.material3.LocalContentColor provides fg
+            ) { content() }
+        }
+        if (text != null) {
+            Text(
+                text = text,
+                color = fg,
+                fontSize = 16.sp,
+                fontWeight = if (prominent || actual || selected) FontWeight.Bold else FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
-            val fg by animateColorAsState(
-                when {
-                    focused -> Tokens.OnAccent
-                    i == selected -> Tokens.Text
-                    else -> Tokens.TextDim
-                }, tween(160), label = "chipFg"
-            )
-            Box(
-                modifier = Modifier
-                    .height(42.dp)
-                    .clip(RoundedCornerShape(Tokens.Corner.pill))
-                    .background(bg)
-                    .border(1.dp, if (focused) Tokens.Accent else Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
-                    .onFocusChanged { focused = it.isFocused }
-                    .tvClickable(corner = Tokens.Corner.pill, showRing = false, onClick = { onSelect(i) })
-                    .padding(horizontal = 16.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(label, color = fg, style = MaterialTheme.typography.labelLarge)
-            }
         }
     }
 }
 
-/** 二级页统一顶栏：返回胶囊 + 页名 + 右侧统计。所有内页都从这里拿同一套 chrome。 */
+/** 玻璃卡片（对齐 Marco _settingsGlassCard）：白 8.5% 底 + 20dp 圆角 + 26dp 内边距。 */
 @Composable
-fun ScreenTopBar(title: String, onBack: () -> Unit, trailing: String? = null, modifier: Modifier = Modifier) {
-    Row(modifier = modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+fun GlassCard(
+    modifier: Modifier = Modifier,
+    title: String? = null,
+    subtitle: String? = null,
+    content: @Composable () -> Unit
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Tokens.Corner.panel))
+            .background(Color(0x16FFFFFF))
+            .border(1.1.dp, Tokens.GlassStroke, RoundedCornerShape(Tokens.Corner.panel))
+            .padding(26.dp)
+    ) {
+        if (title != null) {
+            Text(title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            if (subtitle != null) {
+                Spacer(Modifier.height(5.dp))
+                Text(subtitle, color = Tokens.TextDim, fontSize = 14.5.sp)
+            }
+            Spacer(Modifier.height(18.dp))
+        }
+        content()
+    }
+}
+
+/** 元信息胶囊（白 13% 底 / 主色 28% 高亮）。 */
+@Composable
+fun MetaChip(text: String, highlight: Boolean = false, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        color = if (highlight) Color(0xFFD6EAFF) else Color.White,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(if (highlight) Tokens.Accent.copy(alpha = 0.28f) else Color(0x21FFFFFF))
+            .border(
+                0.9.dp,
+                if (highlight) Tokens.Accent.copy(alpha = 0.65f) else Color(0x33FFFFFF),
+                RoundedCornerShape(999.dp)
+            )
+            .padding(horizontal = 12.dp, vertical = 5.dp)
+    )
+}
+
+/** 金色评分胶囊：唯一允许用「亮底深字」的地方，因为它就是全场最亮的一点。 */
+@Composable
+fun GoldChip(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        color = Tokens.ScoreInk,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.ExtraBold,
+        modifier = modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(Tokens.Score)
+            .padding(horizontal = 11.dp, vertical = 5.dp)
+    )
+}
+
+/** 琥珀「4K 云盘」角标。 */
+@Composable
+fun AmberChip(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        color = Tokens.AmberText,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(Tokens.AmberDim)
+            .border(0.9.dp, Tokens.Amber, RoundedCornerShape(999.dp))
+            .padding(horizontal = 11.dp, vertical = 5.dp)
+    )
+}
+
+/** 内页顶栏：返回胶囊 + 标题 + 右侧品牌，替代旧的居中玻璃 tab（详情/搜索/片库共用）。 */
+@Composable
+fun ScreenTopBar(
+    title: String,
+    onBack: () -> Unit,
+    trailing: String? = null,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier.fillMaxWidth()
+    ) {
+        TvPill(text = "← 返回", glass = true, horizontalPadding = 18.dp, verticalPadding = 10.dp, onClick = onBack)
+        Spacer(Modifier.width(18.dp))
         Text(
-            text = "‹ 首页",
-            color = Tokens.TextDim,
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier
-                .clip(RoundedCornerShape(Tokens.Corner.pill))
-                .background(Color(0x12FFFFFF))
-                .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
-                .tvClickable(corner = Tokens.Corner.pill, onClick = onBack)
-                .padding(horizontal = 18.dp, vertical = 9.dp)
+            text = title,
+            color = Color.White,
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
         Spacer(Modifier.weight(1f))
-        if (title.isNotBlank()) {
-            Text(title, color = Tokens.Text, style = MaterialTheme.typography.titleLarge.copy(fontSize = 20.sp))
-            Spacer(Modifier.width(16.dp))
-        }
         if (trailing != null) {
-            Text(trailing, color = Tokens.TextFaint, style = MaterialTheme.typography.labelSmall)
+            Text(trailing, color = Tokens.TextFaint, fontSize = 13.5.sp, maxLines = 1)
+            Spacer(Modifier.width(18.dp))
+        }
+        BrandLogo(iconSize = 30.dp, fontSize = 17f)
+    }
+}
+
+/** 设置/详情里的小节标题。 */
+@Composable
+fun SectionLabel(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        color = Color.White,
+        fontSize = 22.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = modifier
+    )
+}
+
+private fun currentClock(): String =
+    SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+
+/** 极简搜索框样式（Macro 的遥控键盘太依赖输入法，这里保留一个可视化入口）。 */
+@Composable
+fun EmptyState(
+    title: String,
+    detail: String,
+    modifier: Modifier = Modifier,
+    action: (@Composable () -> Unit)? = null
+) {
+    Column(
+        modifier = modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(title, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(10.dp))
+        Text(
+            detail,
+            color = Tokens.TextDim,
+            fontSize = 15.sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.width(640.dp)
+        )
+        if (action != null) {
+            Spacer(Modifier.height(22.dp))
+            action()
         }
     }
 }

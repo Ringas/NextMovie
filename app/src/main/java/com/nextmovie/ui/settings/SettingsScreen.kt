@@ -1,20 +1,14 @@
-@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
-
 package com.nextmovie.ui.settings
 
-import androidx.compose.animation.animateColorAsState
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -22,13 +16,22 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -38,991 +41,697 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nextmovie.core.AppRepository
-import com.nextmovie.ui.common.StageBackdrop
-import com.nextmovie.ui.common.tvClickable
-import com.nextmovie.ui.theme.LocalTvDisplay
+import com.nextmovie.core.config.Site
+import com.nextmovie.ui.common.AmbientBackdrop
+import com.nextmovie.ui.common.BrandLogo
+import com.nextmovie.ui.common.GlassCard
+import com.nextmovie.ui.common.TvPill
+import com.nextmovie.ui.theme.Ambient
+import com.nextmovie.ui.theme.AmbientState
 import com.nextmovie.ui.theme.Tokens
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
-private enum class Group(val title: String, val caption: String) {
-    Overview("总览", "常用项 · 设备 · 状态"),
-    Sources("数据源", "配置 · 导入 · 站点"),
-    Network("网络与 DNS", "解析 · 线路 · 测速"),
-    Posters("海报与元信息", "TMDB · 缓存 · 补全"),
-    Display("外观与交互", "大屏 · 字号 · 键位"),
-    Maintenance("维护", "缓存 · 历史"),
-    About("关于", "版本 · 开源")
+/**
+ * 系统设置（对齐 Marco TV / tv_living_room_shell.dart 的设置页）
+ *
+ * 左栏 328dp：标题「系统设置」+ 7 段胶囊导航 + 底部品牌与版本；
+ * 右栏：一张滚动玻璃卡，内容随左侧选中段落切换。
+ */
+private enum class Section(val title: String, val caption: String, val icon: ImageVector) {
+    Appearance("外观与柔光", "主题、强度、海报取色", Icons.Filled.Star),
+    Sources("订阅与片源", "订阅地址、站点、加载状态", Icons.Filled.List),
+    Posters("海报与图片", "TMDB、增强、缓存", Icons.Filled.Search),
+    Network("网络与解析", "DNS 策略与线路", Icons.Filled.Home),
+    Playback("播放与体验", "连播、预热、返回行为", Icons.Filled.Settings),
+    Storage("数据与存储", "收藏、历史、清理", Icons.Filled.List),
+    Version("版本与更新", "版本号、项目主页", Icons.Filled.Info)
 }
 
-/**
- * 设置页：左侧分组导航 + 中间行式设置 + 右侧上下文卡。
- *
- * 设置项不做二次确认，改动即时生效；危险项用红色单独标出。
- * 右侧卡只放「当前是什么状态」，避免每行都堆一句解释。
- */
 @Composable
 fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -> Unit) {
+    var section by remember { mutableStateOf(Section.Appearance) }
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val display = LocalTvDisplay.current
-    var config by remember { mutableStateOf(repo.configUrl()) }
-    var message by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    var pairing by remember { mutableStateOf(false) }
-    var group by remember { mutableStateOf(Group.Overview) }
-    var token by remember { mutableStateOf(repo.tmdb.token) }
-    var mirror by remember { mutableStateOf(repo.tmdbMirrorEnabled()) }
-    var images by remember { mutableStateOf(repo.tmdbImageProxyEnabled()) }
-    var enhance by remember { mutableStateOf(repo.posterEnhance) }
-    var race by remember { mutableStateOf(repo.tmdbRaceEnabled()) }
-    var dnsCustom by remember { mutableStateOf(repo.dnsCustom()) }
-    var dnsMode by remember { mutableStateOf(repo.dnsMode()) }
-    var routeMode by remember { mutableStateOf(repo.tmdbRouteMode()) }
-    var probe by remember { mutableStateOf("") }
-    var custom by remember { mutableStateOf(repo.tmdbCustomBase()) }
-    var cacheBytes by remember { mutableStateOf(repo.posterCacheBytes()) }
-    val accountLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
-    ) {
-        scope.launch { repo.invalidateContent(); message = "账户界面已关闭，已刷新内容缓存" }
+
+    Box(Modifier.fillMaxSize()) {
+        AmbientBackdrop()
+        Row(Modifier.fillMaxSize()) {
+            Column(
+                Modifier
+                    .width(328.dp)
+                    .fillMaxSize()
+                    .padding(start = 56.dp, top = 44.dp, bottom = 40.dp, end = 24.dp)
+            ) {
+                Text("系统设置", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(6.dp))
+                Text("全部设置项都在这一屏", color = Tokens.TextFaint, fontSize = 13.5.sp)
+                Spacer(Modifier.height(18.dp))
+                val first = remember { FocusRequester() }
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                Section.entries.forEachIndexed { index, item ->
+                    TvPill(
+                        modifier = if (index == 0) Modifier.focusRequester(first) else Modifier,
+                        selected = section == item,
+                        autofocus = index == 0,
+                        borderRadius = 14.dp,
+                        horizontalPadding = 18.dp,
+                        verticalPadding = 14.dp,
+                        onClick = { section = item }
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                item.icon,
+                                null,
+                                tint = if (section == item) Color.White else Tokens.TextDim,
+                                modifier = Modifier.size(17.dp)
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                item.title,
+                                color = if (section == item) Color.White else Tokens.TextDim,
+                                fontSize = 17.sp,
+                                fontWeight = if (section == item) FontWeight.SemiBold else FontWeight.Medium
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+                }
+                Spacer(Modifier.height(14.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    BrandLogo(iconSize = 30.dp, fontSize = 17f)
+                    Spacer(Modifier.width(12.dp))
+                    Text(versionLabel(context), color = Tokens.TextFaint, fontSize = 12.5.sp)
+                }
+            }
+
+            Column(
+                Modifier
+                    .weight(1f)
+                    .fillMaxSize()
+                    .padding(end = 56.dp, top = 44.dp)
+            ) {
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(bottom = 44.dp)
+                ) {
+                    when (section) {
+                        Section.Appearance -> AppearanceCard()
+                        Section.Sources -> SourcesCard(repo, onConfigLoaded)
+                        Section.Posters -> PostersCard(repo)
+                        Section.Network -> NetworkCard(repo)
+                        Section.Playback -> PlaybackCard(repo)
+                        Section.Storage -> StorageCard(repo)
+                        Section.Version -> VersionCard(context, repo)
+                    }
+                    Spacer(Modifier.height(18.dp))
+                    TvPill("‹ 返回首页", glass = true, onClick = onBack)
+                }
+            }
+        }
     }
-    val navFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { delay(150); runCatching { navFocus.requestFocus() } }
+}
+
+/* ---------------- 外观与柔光 ---------------- */
+
+@Composable
+private fun AppearanceCard() {
+    val context = LocalContext.current
+    var theme by remember { mutableStateOf(AmbientState.themeId) }
+    var intensity by remember { mutableStateOf(AmbientState.intensity) }
+    var sync by remember { mutableStateOf(AmbientState.posterSync) }
+    GlassCard(
+        title = "外观与柔光",
+        subtitle = "客厅背景的柔光配色；选中后立即生效，全局通用"
+    ) {
+        SettingLabel("柔光主题")
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Ambient.presets.chunked(3).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    row.forEach { preset ->
+                        TvPill(
+                            selected = theme == preset.id,
+                            glass = theme != preset.id,
+                            horizontalPadding = 16.dp,
+                            onClick = {
+                                theme = preset.id
+                                AmbientState.setTheme(context, preset.id)
+                            }
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    Modifier
+                                        .size(14.dp)
+                                        .background(preset.accent, RoundedCornerShape(999.dp))
+                                )
+                                Spacer(Modifier.width(9.dp))
+                                Text(preset.name, color = Color.White, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(22.dp))
+        SettingLabel("柔光强度")
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            listOf("soft" to "柔和", "standard" to "标准", "vivid" to "鲜亮").forEach { (id, label) ->
+                TvPill(
+                    text = label,
+                    selected = intensity == id,
+                    glass = intensity != id,
+                    onClick = {
+                        intensity = id
+                        AmbientState.setIntensity(context, id)
+                    }
+                )
+            }
+        }
+        Spacer(Modifier.height(22.dp))
+        ToggleRow("海报取色联动", "聚焦海报时用它的主色点亮整屏柔光", sync) {
+            sync = it
+            AmbientState.setPosterSync(context, it)
+        }
+    }
+}
+
+/* ---------------- 订阅与片源 ---------------- */
+
+@Composable
+private fun SourcesCard(repo: AppRepository, onConfigLoaded: () -> Unit) {
+    var url by remember { mutableStateOf(repo.configUrl()) }
+    var busy by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    var status by remember { mutableStateOf(repo.configStatus()) }
+    val scope = rememberCoroutineScope()
 
     fun load() {
         if (busy) return
+        busy = true
+        message = "加载中…"
         scope.launch {
-            busy = true
-            message = "正在读取配置…"
-            try {
-                val count = repo.loadConfig(config.trim())
-                message = "已导入 $count 个来源"
-                onConfigLoaded()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                message = e.message ?: "导入失败，请检查地址"
-            } finally {
-                busy = false
-            }
+            val count = runCatching { repo.loadConfig(url) }.getOrElse { -1 }
+            status = repo.configStatus()
+            message = if (count > 0) "已载入 $count 个片源" else "载入失败，检查地址或网络"
+            busy = false
+            if (count > 0) onConfigLoaded()
         }
     }
 
-    if (pairing) {
-        PairingDialog(
-            onDismiss = { pairing = false },
-            onReceived = {
-                config = it
-                pairing = false
-                message = "已从手机接收配置，按「加载配置」完成导入"
-            }
-        )
-    }
-
-    val versionName = remember {
-        runCatching {
-            context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull().orEmpty()
-    }
-    val versionCode = remember {
-        runCatching {
-            val info = context.packageManager.getPackageInfo(context.packageName, 0)
-            if (android.os.Build.VERSION.SDK_INT >= 28) info.longVersionCode.toInt() else info.versionCode
-        }.getOrNull() ?: 0
-    }
-
-    StageBackdrop {
-    Column(modifier = Modifier.fillMaxSize().padding(start = 40.dp, end = 40.dp, top = 6.dp, bottom = 4.dp)) {
-        SettingsTopBar(onBack = onBack)
-        Spacer(Modifier.height(14.dp))
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
-            Text(
-                text = "设置",
-                color = Tokens.Text,
-                fontSize = Tokens.Type.display,
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = 1.sp
-            )
-            Spacer(Modifier.width(12.dp))
-            Text(
-                text = group.title,
-                color = Tokens.TextFaint,
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
-            Spacer(Modifier.weight(1f))
-            if (message.isNotBlank()) {
-                Text(
-                    text = message,
-                    color = Tokens.Accent,
-                    style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 360.dp).padding(bottom = 8.dp)
-                )
-            }
-        }
-        Spacer(Modifier.height(12.dp))
-
-        Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
-            // —— 左：分组导航 ——
-            LazyColumn(
-                modifier = Modifier.width(176.dp).fillMaxHeight(),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                itemsIndexed(Group.values().toList()) { index, item ->
-                    GroupNavItem(
-                        index = index + 1,
-                        group = item,
-                        active = group == item,
-                        modifier = if (index == 0) Modifier.focusRequester(navFocus) else Modifier,
-                        onClick = { group = item; message = "" }
-                    )
-                }
-            }
-            Spacer(Modifier.width(14.dp))
-
-            // —— 中：行式设置 ——
-            Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                when (group) {
-                    Group.Overview -> OverviewGroup(
-                        repo, display, dnsMode, message, versionName,
-                        onGo = { group = it }
-                    )
-                    Group.Sources -> SourcesGroup(
-                        repo, config, { config = it }, busy, message,
-                        onLoad = ::load,
-                        onPair = { pairing = true },
-                        onAccount = { site -> accountLauncher.launch(com.nextmovie.PluginActivity.intent(context, site)) },
-                        onSitePicked = { repo.selectSite(it.key); onConfigLoaded() },
-                        onGo = { group = it }
-                    )
-                    Group.Network -> NetworkGroup(
-                        repo, dnsMode, { dnsMode = it }, dnsCustom, { dnsCustom = it },
-                        routeMode, { routeMode = it }, race, { race = it },
-                        probe, { probe = it }, message = { message = it }
-                    )
-                    Group.Posters -> PostersGroup(
-                        repo, token, { token = it }, custom, { custom = it },
-                        mirror, { mirror = it }, images, { images = it },
-                        enhance, { enhance = it }, cacheBytes, { cacheBytes = it },
-                        message = { message = it }
-                    )
-                    Group.Display -> DisplayGroup(display, versionName)
-                    Group.Maintenance -> MaintenanceGroup(repo, cacheBytes, { cacheBytes = it }, message = { message = it })
-                    Group.About -> AboutGroup(versionName, versionCode)
-                }
-            }
-            Spacer(Modifier.width(14.dp))
-
-            // —— 右：上下文卡 ——
-            ContextCard(
-                repo = repo,
-                display = display,
-                message = message,
-                versionName = versionName,
-                cacheBytes = cacheBytes
-            )
-        }
-        Spacer(Modifier.height(12.dp))
-        Row(modifier = Modifier.fillMaxWidth().padding(bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = "App 不内置任何站点与 Key · 配置只从你给的地址或文件导入",
-                color = Tokens.TextFaint,
-                style = MaterialTheme.typography.labelSmall
-            )
-            Spacer(Modifier.weight(1f))
-            Text(
-                text = "GPL-3.0 · 零内置源",
-                color = Tokens.TextFaint,
-                style = MaterialTheme.typography.labelSmall
-            )
-        }
-    }
-    }
-}
-
-@Composable
-private fun SettingsTopBar(onBack: () -> Unit) {
-    Row(modifier = Modifier.fillMaxWidth().padding(top = 22.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            text = "‹ 首页",
-            color = Tokens.TextDim,
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier
-                .clip(RoundedCornerShape(Tokens.Corner.pill))
-                .background(Color(0x12FFFFFF))
-                .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.pill))
-                .tvClickable(onClick = onBack, corner = Tokens.Corner.pill)
-                .padding(horizontal = 18.dp, vertical = 9.dp)
-        )
-
-        Spacer(Modifier.weight(1f))
-        Text(
-            text = "更改即时生效 · 无需确认",
-            color = Tokens.TextFaint,
-            style = MaterialTheme.typography.labelSmall
-        )
-    }
-}
-
-@Composable
-private fun GroupNavItem(
-    index: Int,
-    group: Group,
-    active: Boolean,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit
-) {
-    val bg by animateColorAsState(if (active) Tokens.AccentDim.copy(alpha = 0.18f) else Color.Transparent, label = "navBg")
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Tokens.Corner.card))
-            .background(bg)
-            .tvClickable(onClick = onClick, corner = Tokens.Corner.card)
-            .padding(horizontal = 10.dp, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically
+    GlassCard(
+        title = "订阅与片源",
+        subtitle = "粘贴 TVBox / CatVod 订阅地址，加载后首页自动按站点聚合"
     ) {
-        Box(
-            modifier = Modifier
-                .width(2.dp)
-                .height(22.dp)
-                .background(if (active) Tokens.Accent else Color.Transparent)
+        SettingsField(
+            label = "订阅地址",
+            value = url,
+            placeholder = "https://example.com/sub.json",
+            onValueChange = { url = it },
+            imeAction = ImeAction.Go,
+            onDone = { load() }
         )
-        Spacer(Modifier.width(10.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "%02d".format(index),
-                    color = if (active) Tokens.Accent else Tokens.TextFaint,
-                    style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro, letterSpacing = 0.08.sp)
-                )
-                Spacer(Modifier.width(7.dp))
-                Text(
-                    text = group.title,
-                    color = if (active) Tokens.Text else Tokens.TextDim,
-                    style = MaterialTheme.typography.labelLarge
-                )
+        Spacer(Modifier.height(14.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            TvPill(
+                text = if (busy) "载入中…" else "载入订阅",
+                prominent = true,
+                enabled = !busy && url.isNotBlank(),
+                onClick = { load() }
+            )
+            TvPill("扫码快传", glass = true, onClick = { Pairing.show = true })
+            TvPill("刷新状态", glass = true, onClick = { status = repo.configStatus() })
+        }
+        message?.let {
+            Spacer(Modifier.height(12.dp))
+            Text(it, color = Tokens.GreenText, fontSize = 13.5.sp)
+        }
+        Spacer(Modifier.height(22.dp))
+        HLine()
+        Spacer(Modifier.height(18.dp))
+        Text("当前站点", color = Tokens.TextDim, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(10.dp))
+        Text(
+            repo.currentSite?.let { it.name + (if (it.isSpider) " · 插件" else " · 接口") } ?: "未选择",
+            color = Color.White,
+            fontSize = 16.sp
+        )
+        status?.let {
+            Spacer(Modifier.height(6.dp))
+            Text(it.text, color = Tokens.TextFaint, fontSize = 13.sp)
+        }
+        Spacer(Modifier.height(18.dp))
+        Text("片源列表（${repo.sites.size}）", color = Tokens.TextDim, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(10.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            repo.sites.take(40).chunked(2).forEach { pair ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    pair.forEach { site: Site ->
+                        TvPill(
+                            text = site.name,
+                            selected = repo.currentSite?.key == site.key,
+                            glass = repo.currentSite?.key != site.key,
+                            horizontalPadding = 14.dp,
+                            onClick = {
+                                repo.selectSite(site.key)
+                                status = repo.configStatus()
+                                onConfigLoaded()
+                            }
+                        )
+                    }
+                }
             }
-            Text(
-                text = group.caption,
-                color = if (active) Tokens.TextDim else Tokens.TextFaint,
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro),
-                maxLines = 1,
-                modifier = Modifier.padding(top = 1.dp, start = 1.dp)
+        }
+        if (repo.sites.isEmpty()) {
+            Spacer(Modifier.height(10.dp))
+            Text("还没有片源，先载入一个订阅。", color = Tokens.TextFaint, fontSize = 13.5.sp)
+        }
+    }
+    PairingHost()
+}
+
+/* ---------------- 海报与图片 ---------------- */
+
+@Composable
+private fun PostersCard(repo: AppRepository) {
+    val scope = rememberCoroutineScope()
+    var token by remember { mutableStateOf(repo.tmdb.token) }
+    var enhance by remember { mutableStateOf(repo.posterEnhance) }
+    var mirror by remember { mutableStateOf(repo.tmdbMirrorEnabled()) }
+    var proxy by remember { mutableStateOf(repo.tmdbImageProxyEnabled()) }
+    var cache by remember { mutableStateOf(repo.posterCacheBytes()) }
+    var probe by remember { mutableStateOf<List<Triple<String, Boolean, String>>?>(null) }
+    var probing by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) { cache = repo.posterCacheBytes() }
+
+    GlassCard(
+        title = "海报与图片",
+        subtitle = "源站海报为主，TMDB 只做增强；无 Key 时用 B站兜底补图"
+    ) {
+        SettingsField(
+            label = "TMDB Token（可选）",
+            value = token,
+            placeholder = "v3 / v4 只读 Token",
+            onValueChange = { token = it },
+            onDone = { repo.configureTmdb(token) }
+        )
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            TvPill("保存 Token", prominent = true, onClick = { repo.configureTmdb(token) })
+            TvPill(
+                text = if (probing) "测速中…" else "线路测速",
+                glass = true,
+                enabled = !probing,
+                onClick = {
+                    probing = true
+                    scope.launch {
+                        probe = repo.probeTmdb()
+                        probing = false
+                    }
+                }
             )
         }
-    }
-}
-
-@Composable
-private fun GroupHeader(title: String, caption: String? = null) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp, top = 2.dp)) {
-        Box(Modifier.size(width = 2.dp, height = 12.dp).background(Tokens.Accent))
-        Spacer(Modifier.width(8.dp))
-        Text(
-            text = title,
-            color = Tokens.TextDim,
-            style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.badge, letterSpacing = Tokens.Type.MICRO_TRACK.sp)
-        )
-        if (caption != null) {
-            Spacer(Modifier.width(8.dp))
-            Text(caption, color = Tokens.TextFaint, style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro))
-        }
-        Spacer(Modifier.weight(1f))
-    }
-}
-
-/** 一行设置：标题 + 一行说明，右侧放控件。 */
-@Composable
-private fun SettingRow(
-    title: String,
-    desc: String? = null,
-    last: Boolean = false,
-    control: @Composable () -> Unit
-) {
-    Column {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 7.5.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title, color = Tokens.Text, style = MaterialTheme.typography.bodyMedium)
-                if (desc != null) {
+        probe?.let { result ->
+            Spacer(Modifier.height(12.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                result.take(6).forEach { (host, ok, detail) ->
                     Text(
-                        text = desc,
-                        color = Tokens.TextFaint,
-                        style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 2.dp)
+                        (if (ok) "✓ " else "✕ ") + host + "  " + detail.take(48),
+                        color = if (ok) Tokens.GreenText else Tokens.TextFaint,
+                        fontSize = 13.sp
                     )
                 }
             }
-            Spacer(Modifier.width(12.dp))
-            control()
         }
-        if (!last) Box(Modifier.fillMaxWidth().height(1.dp).background(Tokens.Stroke))
+        Spacer(Modifier.height(20.dp))
+        ToggleRow("海报增强（B站 / TMDB 兜底）", "源图缺失或过小时自动补一张高清海报", enhance) {
+            enhance = it
+            repo.setPosterEnhance(it)
+        }
+        Spacer(Modifier.height(10.dp))
+        ToggleRow("TMDB 公共反代", "直连不通时走内置镜像线路", mirror) {
+            mirror = it
+            repo.setTmdbMirror(it)
+        }
+        Spacer(Modifier.height(10.dp))
+        ToggleRow("图片走代理", "海报经 image proxy 拉取，国内更稳", proxy) {
+            proxy = it
+            repo.setTmdbImageProxy(it)
+        }
+        Spacer(Modifier.height(20.dp))
+        HLine()
+        Spacer(Modifier.height(16.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("海报缓存", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(3.dp))
+                Text(formatBytes(cache), color = Tokens.TextFaint, fontSize = 13.sp)
+            }
+            TvPill("清空缓存", destructive = true, onClick = {
+                repo.clearPosterCache()
+                cache = repo.posterCacheBytes()
+            })
+        }
+    }
+}
+
+/* ---------------- 网络与解析 ---------------- */
+
+@Composable
+private fun NetworkCard(repo: AppRepository) {
+    var mode by remember { mutableStateOf(repo.dnsMode()) }
+    var custom by remember { mutableStateOf(repo.dnsCustom()) }
+    GlassCard(
+        title = "网络与解析",
+        subtitle = "源站域名常被污染，自动模式会自动挑可用解析"
+    ) {
+        SettingLabel("DNS 策略")
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(
+                "auto" to "自动（推荐）",
+                "system" to "跟随系统",
+                "cloudflare" to "Cloudflare",
+                "aliyun" to "阿里 223.5.5.5",
+                "google" to "Google 8.8.8.8",
+                "custom" to "自定义"
+            ).chunked(2).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    row.forEach { (id, label) ->
+                        TvPill(
+                            text = label,
+                            selected = mode == id,
+                            glass = mode != id,
+                            onClick = {
+                                mode = id
+                                repo.setDns(id, custom)
+                            }
+                        )
+                    }
+                }
+            }
+        }
+        if (mode == "custom") {
+            Spacer(Modifier.height(14.dp))
+            SettingsField(
+                label = "自定义 DNS（可填 DoH / IP）",
+                value = custom,
+                placeholder = "https://doh.example/dns-query",
+                onValueChange = { custom = it },
+                onDone = { repo.setDns("custom", custom) }
+            )
+        }
+        Spacer(Modifier.height(20.dp))
+        HLine()
+        Spacer(Modifier.height(16.dp))
+        Text("当前线路：" + dnsLabel(mode), color = Tokens.TextDim, fontSize = 14.sp)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "SmartDNS 只在插件/接口的域名解析阶段生效，不改动系统全局设置。",
+            color = Tokens.TextFaint,
+            fontSize = 13.sp
+        )
+        Spacer(Modifier.height(14.dp))
+        TvPill("应用并刷新", prominent = true, onClick = { repo.setDns(mode, custom) })
+    }
+}
+
+/* ---------------- 播放与体验 ---------------- */
+
+@Composable
+private fun PlaybackCard(repo: AppRepository) {
+    var autoNext by remember { mutableStateOf(repo.autoNext) }
+    var warmed by remember { mutableStateOf(false) }
+    GlassCard(
+        title = "播放与体验",
+        subtitle = "对齐 Marco：从播放器退回详情页，影片仍在详情页底层继续播放"
+    ) {
+        ToggleRow("自动连播下一集", "播完弹出 5 秒倒计时并自动进入下一集", autoNext) {
+            autoNext = it
+            repo.setAutoNext(it)
+        }
+        Spacer(Modifier.height(18.dp))
+        HLine()
+        Spacer(Modifier.height(16.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("源预热", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    if (warmed) "已在后台预热当前站点，点开详情更快" else "提前下载插件 jar 并跑 Init，减少详情等待",
+                    color = Tokens.TextFaint,
+                    fontSize = 13.sp
+                )
+            }
+            TvPill(
+                text = if (warmed) "已预热" else "立即预热",
+                glass = true,
+                enabled = !warmed,
+                onClick = {
+                    repo.prewarmCurrentSite("manual")
+                    warmed = true
+                }
+            )
+        }
+        Spacer(Modifier.height(18.dp))
+        Text(
+            "线路聚合：详情页会按连通性、分辨率把同一影片的多条线路排序，播放器内可随时换源。",
+            color = Tokens.TextFaint,
+            fontSize = 13.sp
+        )
+    }
+}
+
+/* ---------------- 数据与存储 ---------------- */
+
+@Composable
+private fun StorageCard(repo: AppRepository) {
+    val scope = rememberCoroutineScope()
+    var favCount by remember { mutableStateOf(repo.favorites.list().size) }
+    var hisCount by remember { mutableStateOf(repo.history.list().size) }
+    var cache by remember { mutableStateOf(repo.posterCacheBytes()) }
+    GlassCard(
+        title = "数据与存储",
+        subtitle = "收藏与播放记录按片名去重，换线路不会重复记账"
+    ) {
+        StatRow("收藏", "$favCount 部", "清空收藏") {
+            repo.favorites.clear()
+            favCount = 0
+        }
+        Spacer(Modifier.height(12.dp))
+        StatRow("播放记录", "$hisCount 条", "清空记录") {
+            repo.history.clear()
+            hisCount = 0
+        }
+        Spacer(Modifier.height(12.dp))
+        StatRow("海报缓存", formatBytes(cache), "清空缓存") {
+            repo.clearPosterCache()
+            cache = repo.posterCacheBytes()
+        }
+        Spacer(Modifier.height(20.dp))
+        HLine()
+        Spacer(Modifier.height(16.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("缓存与索引", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(3.dp))
+                Text("清掉首页快照、详情与插件缓存，下次重新拉取", color = Tokens.TextFaint, fontSize = 13.sp)
+            }
+            TvPill("重建缓存", glass = true, onClick = { scope.launch { repo.invalidateContent() } })
+        }
+    }
+}
+
+/* ---------------- 版本与更新 ---------------- */
+
+@Composable
+private fun VersionCard(context: Context, repo: AppRepository) {
+    val scope = rememberCoroutineScope()
+    var snapshotFresh by remember { mutableStateOf<Boolean?>(null) }
+    GlassCard(
+        title = "版本与更新",
+        subtitle = "开源、零内置源：订阅地址与 Key 都由你自己填"
+    ) {
+        InfoRow("版本", versionLabel(context))
+        Spacer(Modifier.height(12.dp))
+        InfoRow(
+            "订阅快照",
+            when (snapshotFresh) {
+                true -> "6 小时内，冷启动直接可用"
+                false -> "已过期，下次启动会重新拉"
+                null -> "检测中…"
+            }
+        )
+        Spacer(Modifier.height(20.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            TvPill("项目主页", prominent = true, onClick = {
+                runCatching {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Ringas/NextMovie"))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                }
+            })
+            TvPill("刷新快照状态", glass = true, onClick = {
+                scope.launch { snapshotFresh = repo.configSnapshotIsFresh() }
+            })
+        }
+        Spacer(Modifier.height(20.dp))
+        Text(
+            "NextMovie 只做 Android TV 播放器，不内置任何源、Key 或解析规则；GPL-3.0 开源。",
+            color = Tokens.TextFaint,
+            fontSize = 13.sp
+        )
+    }
+    LaunchedEffect(Unit) { snapshotFresh = repo.configSnapshotIsFresh() }
+}
+
+/* ---------------- 通用小部件 ---------------- */
+
+@Composable
+private fun SettingLabel(text: String) {
+    Text(text, color = Tokens.TextDim, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold)
+    Spacer(Modifier.height(10.dp))
+}
+
+@Composable
+private fun ToggleRow(title: String, caption: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(3.dp))
+            Text(caption, color = Tokens.TextFaint, fontSize = 13.sp)
+        }
+        TvPill(
+            text = if (checked) "开" else "关",
+            selected = checked,
+            glass = !checked,
+            onClick = { onChange(!checked) }
+        )
     }
 }
 
 @Composable
-private fun ValueText(text: String, color: Color = Tokens.TextDim, wide: Boolean = false) {
-    Text(
-        text = text,
-        color = color,
-        style = MaterialTheme.typography.labelSmall,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier.widthIn(max = if (wide) 210.dp else 160.dp)
+private fun StatRow(label: String, value: String, action: String, onAction: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(label, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(3.dp))
+            Text(value, color = Tokens.TextFaint, fontSize = 13.sp)
+        }
+        TvPill(action, glass = true, onClick = onAction)
+    }
+}
+
+@Composable
+private fun InfoRow(label: String, value: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = Tokens.TextDim, fontSize = 14.5.sp, modifier = Modifier.widthIn(min = 120.dp))
+        Text(value, color = Color.White, fontSize = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun HLine() {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(1.dp)
+            .background(Tokens.Stroke)
     )
 }
 
 @Composable
-private fun Pill(
-    text: String,
-    active: Boolean = false,
-    primary: Boolean = false,
-    danger: Boolean = false,
-    enabled: Boolean = true,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit
-) {
-    val shape = RoundedCornerShape(Tokens.Corner.pill)
-    val bg = when {
-        primary -> Tokens.Accent
-        danger -> Tokens.Danger.copy(alpha = 0.14f)
-        active -> Tokens.AccentDim
-        else -> Tokens.Surface
-    }
-    val fg = when {
-        !enabled -> Tokens.TextFaint
-        primary -> Tokens.OnAccent
-        danger -> Tokens.Danger
-        active -> Tokens.Accent
-        else -> Tokens.TextDim
-    }
-    Box(
-        modifier = modifier
-            .clip(shape)
-            .background(bg)
-            .border(
-                width = 1.dp,
-                color = when {
-                    primary -> Color.Transparent
-                    danger -> Tokens.Danger.copy(alpha = 0.5f)
-                    active -> Tokens.Accent.copy(alpha = 0.5f)
-                    else -> Tokens.Stroke
-                },
-                shape = shape
-            )
-            .tvClickable(enabled = enabled, onClick = onClick, corner = Tokens.Corner.pill)
-            .padding(horizontal = 14.dp, vertical = 7.dp)
-    ) {
-        Text(text, color = fg, style = MaterialTheme.typography.labelSmall)
-    }
-}
-
-/** 分段选择：一眼能看出「现在选的是哪个」。 */
-@Composable
-private fun Segment(options: List<Pair<String, String>>, selected: String, onSelect: (String) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        options.forEach { (value, label) ->
-            Pill(text = label, active = value == selected, onClick = { onSelect(value) })
-        }
-    }
-}
-
-@Composable
-private fun TvToggle(checked: Boolean, onChange: (Boolean) -> Unit) {
-    val shape = RoundedCornerShape(Tokens.Corner.pill)
-    Box(
-        modifier = Modifier
-            .size(width = 44.dp, height = 24.dp)
-            .clip(shape)
-            .background(if (checked) Tokens.Accent.copy(alpha = 0.9f) else Tokens.SurfaceHigh)
-            .border(1.dp, if (checked) Tokens.Accent else Tokens.Stroke, shape)
-            .tvClickable(onClick = { onChange(!checked) }, corner = Tokens.Corner.pill)
-    ) {
-        Box(
-            modifier = Modifier
-                .align(if (checked) Alignment.CenterEnd else Alignment.CenterStart)
-                .padding(horizontal = 3.dp)
-                .size(16.dp)
-                .clip(RoundedCornerShape(Tokens.Corner.pill))
-                .background(if (checked) Tokens.OnAccent else Tokens.TextDim)
-        )
-    }
-}
-
-@Composable
-private fun TvField(
+private fun SettingsField(
     label: String,
     value: String,
-    singleLine: Boolean = true,
-    onValueChange: (String) -> Unit
+    placeholder: String,
+    onValueChange: (String) -> Unit,
+    imeAction: ImeAction = ImeAction.Done,
+    onDone: () -> Unit = {}
 ) {
-    var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(Tokens.Corner.card)
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp)) {
-        Text(
-            text = label,
-            color = Tokens.TextFaint,
-            style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro)
+    Text(label, color = Tokens.TextDim, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(7.dp))
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        placeholder = { Text(placeholder, color = Tokens.TextGhost, fontSize = 14.sp) },
+        textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 15.sp),
+        shape = RoundedCornerShape(14.dp),
+        keyboardOptions = KeyboardOptions(imeAction = imeAction),
+        keyboardActions = KeyboardActions(onDone = { onDone() }),
+        colors = TextFieldDefaults.colors(
+            focusedContainerColor = Color(0x12FFFFFF),
+            unfocusedContainerColor = Color(0x0DFFFFFF),
+            focusedIndicatorColor = Tokens.Accent.copy(alpha = 0.75f),
+            unfocusedIndicatorColor = Tokens.Stroke,
+            cursorColor = Tokens.Accent
         )
-        Spacer(Modifier.height(5.dp))
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(shape)
-                .background(Tokens.Surface)
-                .border(if (focused) 2.dp else 1.dp, if (focused) Tokens.Accent else Tokens.Stroke, shape)
-                .padding(horizontal = 12.dp, vertical = 9.dp)
-        ) {
-            if (value.isEmpty()) {
-                Text("留空表示不使用", color = Tokens.TextFaint, style = MaterialTheme.typography.labelSmall)
-            }
-            BasicTextField(
-                value = value,
-                onValueChange = onValueChange,
-                singleLine = singleLine,
-                textStyle = TextStyle(color = Tokens.Text, fontSize = 13.sp),
-                cursorBrush = SolidColor(Tokens.Accent),
-                modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.hasFocus }
-            )
-        }
-    }
+    )
 }
 
-@Composable
-private fun OverviewGroup(
-    repo: AppRepository,
-    display: com.nextmovie.ui.theme.TvDisplayState,
-    dnsMode: String,
-    message: String,
-    versionName: String,
-    onGo: (Group) -> Unit
-) {
-    val site = repo.currentSite
-    val status = repo.configStatus()
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(end = 6.dp)) {
-        item { GroupHeader("常用项", "按遥控器方向键逐行调整") }
-        item {
-            SettingRow("当前数据源", site?.name ?: "未导入", control = {
-                Pill("切换", onClick = { onGo(Group.Sources) })
-            })
-        }
-        item {
-            SettingRow(
-                "配置地址",
-                repo.configUrl().ifBlank { "还没有导入配置" },
-                control = { Pill("管理", onClick = { onGo(Group.Sources) }) }
-            )
-        }
-        item {
-            SettingRow(
-                "站点 / 插件",
-                "${repo.sites.size} 个站点 · ${repo.sites.count { it.isSpider }} 个插件",
-                control = { Pill("查看", onClick = { onGo(Group.Sources) }) }
-            )
-        }
-        item { GroupHeader("大屏与解析") }
-        item {
-            SettingRow(
-                "大屏显示",
-                "整套排版等比放大，不改布局",
-                control = {
-                    Segment(
-                        listOf("1.0" to "标准", "1.125" to "大号", "1.25" to "超大"),
-                        display.scale.toString(),
-                        { display.select(it.toFloat()) }
-                    )
-                }
-            )
-        }
-        item {
-            SettingRow(
-                "DNS 解析",
-                dnsLabel(dnsMode),
-                control = { Pill("调整", onClick = { onGo(Group.Network) }) }
-            )
-        }
-        item {
-            SettingRow(
-                "配置状态",
-                status?.text ?: "尚未记录",
-                last = true,
-                control = {
-                    Text(
-                        text = if (status?.ok == true) "正常" else "待检查",
-                        color = if (status?.ok == true) Tokens.Accent else Tokens.TextFaint,
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                }
-            )
-        }
-        item { Spacer(Modifier.height(12.dp)) }
-        item {
-            InfoCard(
-                title = "零内置源",
-                body = "本应用不附带任何站点、插件或 API Key。所有内容来自你导入的配置，卸载后本地缓存一并清除。",
-                accent = "v$versionName"
-            )
-        }
-        if (message.isNotBlank()) item {
-            Spacer(Modifier.height(10.dp))
-            Text(message, color = Tokens.Accent, style = MaterialTheme.typography.labelSmall)
-        }
-    }
-}
+private fun versionLabel(context: Context): String = runCatching {
+    val info = context.packageManager.getPackageInfo(context.packageName, 0)
+    "v" + info.versionName
+}.getOrDefault("v0.0.0")
 
-@Composable
-private fun SourcesGroup(
-    repo: AppRepository,
-    config: String,
-    onConfig: (String) -> Unit,
-    busy: Boolean,
-    message: String,
-    onLoad: () -> Unit,
-    onPair: () -> Unit,
-    onAccount: (com.nextmovie.core.config.Site) -> Unit,
-    onSitePicked: (com.nextmovie.core.config.Site) -> Unit,
-    onGo: (Group) -> Unit
-) {
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(end = 6.dp)) {
-        item { GroupHeader("配置", "支持 JSON / JSONC · 会校验 md5") }
-        item { TvField("配置网址或 JSON", config, onValueChange = onConfig) }
-        item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(vertical = 8.dp)) {
-                Pill(if (busy) "加载中…" else "加载配置", primary = true, enabled = !busy, onClick = onLoad)
-                Pill("手机扫码导入", onClick = onPair)
-                Pill("网络设置", onClick = { onGo(Group.Network) })
-            }
-        }
-        item { GroupHeader("来源", "选中即切换，返回首页生效") }
-        items(repo.sites, key = { it.runtimeKey }) { site ->
-            val current = repo.currentSite?.runtimeKey == site.runtimeKey
-            SettingRow(
-                title = site.name,
-                desc = buildString {
-                    append(if (site.isSpider) "插件源" else "CMS")
-                    append(if (site.isPlayable) " · 可播" else " · 仅列表")
-                    if (site.searchable) append(" · 可搜索")
-                },
-                control = {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (current) ValueText("当前", Tokens.Accent)
-                        if (site.isSpider && site.isPlayable) Pill("账户 / 网盘", onClick = { onAccount(site) })
-                        Pill(if (current) "已选" else "切换", active = current, onClick = { onSitePicked(site) })
-                    }
-                }
-            )
-        }
-        item {
-            Spacer(Modifier.height(10.dp))
-            Text(
-                text = "网盘登录在来源自己的账户界面完成；本应用不保存任何账号。",
-                color = Tokens.TextFaint,
-                style = MaterialTheme.typography.labelSmall
-            )
-        }
-    }
-}
-
-@Composable
-private fun NetworkGroup(
-    repo: AppRepository,
-    dnsMode: String,
-    onDnsMode: (String) -> Unit,
-    dnsCustom: String,
-    onDnsCustom: (String) -> Unit,
-    routeMode: String,
-    onRouteMode: (String) -> Unit,
-    race: Boolean,
-    onRace: (Boolean) -> Unit,
-    probe: String,
-    onProbe: (String) -> Unit,
-    message: (String) -> Unit
-) {
-    val scope = rememberCoroutineScope()
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(end = 6.dp)) {
-        item { GroupHeader("DNS", "解析不通时优先换这里") }
-        item {
-            SettingRow("解析模式", dnsLabel(dnsMode), control = {
-                Segment(
-                    listOf("auto" to "自动", "system" to "系统"),
-                    dnsMode,
-                    { onDnsMode(it); repo.setDns(it); message("已切换 ${dnsLabel(it)}") }
-                )
-            })
-        }
-        item {
-            SettingRow("公共 DoH", "自动模式下的候选上游", control = {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf("cloudflare" to "CF", "google" to "Google", "aliyun" to "阿里").forEach { (v, label) ->
-                        Pill(label, active = dnsMode == v, onClick = {
-                            onDnsMode(v); repo.setDns(v); message("已切换 $label DNS")
-                        })
-                    }
-                }
-            })
-        }
-        item { TvField("自定义 DoH 模板（含 %s）", dnsCustom, onValueChange = onDnsCustom) }
-        item {
-            Row(modifier = Modifier.padding(bottom = 8.dp)) {
-                Pill("保存自定义 DNS", primary = true, onClick = {
-                    repo.setDns("custom", dnsCustom)
-                    onDnsMode("custom")
-                    message("已保存自定义 DNS")
-                })
-            }
-        }
-        item { GroupHeader("TMDB 线路", "海报与评分的取数通道") }
-        item {
-            SettingRow("线路选择", "无 Token 时自动跳过", control = {
-                Segment(
-                    listOf("auto" to "自动", "global" to "官方", "fast" to "备用"),
-                    routeMode,
-                    { onRouteMode(it); repo.setTmdbRoute(it); message("已切换线路：$it") }
-                )
-            })
-        }
-        item {
-            SettingRow("多线路竞速", "启动时并发测速，取最快", control = {
-                TvToggle(race, { onRace(it); repo.setTmdbRace(it); message("竞速已${if (it) "开启" else "关闭"}") })
-            })
-        }
-        item {
-            SettingRow("线路测速", probe.ifBlank { "还没测过" }, last = true, control = {
-                Pill("开始测速", onClick = {
-                    scope.launch {
-                        onProbe("正在测速…")
-                        onProbe(runCatching { repo.probeTmdb().joinToString("  ·  ") { it.first + " " + it.third } }.getOrDefault("测速失败"))
-                    }
-                })
-            })
-        }
-        if (probe.isNotBlank()) item {
-            Spacer(Modifier.height(10.dp))
-            Text(probe, color = Tokens.TextFaint, style = MaterialTheme.typography.labelSmall, maxLines = 3)
-        }
-    }
-}
-
-@Composable
-private fun PostersGroup(
-    repo: AppRepository,
-    token: String,
-    onToken: (String) -> Unit,
-    custom: String,
-    onCustom: (String) -> Unit,
-    mirror: Boolean,
-    onMirror: (Boolean) -> Unit,
-    images: Boolean,
-    onImages: (Boolean) -> Unit,
-    enhance: Boolean,
-    onEnhance: (Boolean) -> Unit,
-    cacheBytes: Long,
-    onCache: (Long) -> Unit,
-    message: (String) -> Unit
-) {
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(end = 6.dp)) {
-        item { GroupHeader("TMDB 凭据", "留空则只用源站海报") }
-        item { TvField("TMDB Token / API Key", token, onValueChange = onToken) }
-        item {
-            Row(modifier = Modifier.padding(bottom = 8.dp)) {
-                Pill("保存 Token", primary = true, onClick = {
-                    repo.configureTmdb(token)
-                    message("Token 已保存")
-                })
-            }
-        }
-        item { TvField("自定义镜像，每行一个", custom, singleLine = false, onValueChange = onCustom) }
-        item {
-            Row(modifier = Modifier.padding(bottom = 8.dp)) {
-                Pill("使用自定义镜像", onClick = {
-                    repo.setTmdbRoute("custom", custom)
-                    message("已保存镜像")
-                })
-            }
-        }
-        item { GroupHeader("取图策略", "源站为主，TMDB 只做增强") }
-        item {
-            SettingRow("公共反代", "官方域名不稳时走公共镜像", control = {
-                TvToggle(mirror, { onMirror(it); repo.setTmdbMirror(it) })
-            })
-        }
-        item {
-            SettingRow("图片中转", "海报经本机代理拉取，绕开防盗链", control = {
-                TvToggle(images, { onImages(it); repo.setTmdbImageProxy(it) })
-            })
-        }
-        item {
-            SettingRow("海报补全", "缺图时用 TMDB / 剧照补齐", last = true, control = {
-                TvToggle(enhance, { onEnhance(it); repo.setPosterEnhance(it) })
-            })
-        }
-        item { GroupHeader("缓存") }
-        item {
-            SettingRow("海报缓存", formatBytes(cacheBytes), last = true, control = {
-                Pill("清理", onClick = {
-                    repo.clearPosterCache()
-                    onCache(repo.posterCacheBytes())
-                    message("已清理海报缓存")
-                })
-            })
-        }
-    }
-}
-
-@Composable
-private fun DisplayGroup(display: com.nextmovie.ui.theme.TvDisplayState, versionName: String) {
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    val configuration = androidx.compose.ui.platform.LocalConfiguration.current
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(end = 6.dp)) {
-        item { GroupHeader("大屏", "整套排版等比放大，布局不变") }
-        item {
-            SettingRow("显示比例", "标准 100% / 大号 112.5% / 超大 125%", last = true, control = {
-                Segment(
-                    listOf("1.0" to "标准", "1.125" to "大号", "1.25" to "超大"),
-                    display.scale.toString(),
-                    { display.select(it.toFloat()) }
-                )
-            })
-        }
-        item { GroupHeader("设备") }
-        item {
-            SettingRow("分辨率", "${configuration.screenWidthDp} × ${configuration.screenHeightDp} dp", last = true, control = {
-                ValueText("density %.2f".format(density.density))
-            })
-        }
-        item { GroupHeader("键位") }
-        item {
-            SettingRow("返回 / 取消", "Esc 或鼠标右键", last = true, control = { ValueText("全局", Tokens.TextFaint) })
-        }
-        item {
-            SettingRow("菜单键 / 长按 OK", "直接打开设置", last = true, control = { ValueText("首页", Tokens.TextFaint) })
-        }
-        item {
-            SettingRow("播放器", "确认暂停 · 左右快进退 · 上下开控制栏", last = true, control = { ValueText("v$versionName", Tokens.TextFaint) })
-        }
-    }
-}
-
-@Composable
-private fun MaintenanceGroup(
-    repo: AppRepository,
-    cacheBytes: Long,
-    onCache: (Long) -> Unit,
-    message: (String) -> Unit
-) {
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(end = 6.dp)) {
-        item { GroupHeader("缓存与记录", "只影响本机，不动远端配置") }
-        item {
-            SettingRow("海报缓存", formatBytes(cacheBytes), control = {
-                Pill("清理", onClick = {
-                    repo.clearPosterCache(); onCache(repo.posterCacheBytes()); message("已清理海报缓存")
-                })
-            })
-        }
-        item {
-            SettingRow("观看历史", "首页「继续观看」与进度都来自这里", last = true, control = {
-                Pill("清空", danger = true, onClick = {
-                    repo.history.clear(); message("已清空观看历史")
-                })
-            })
-        }
-        item { GroupHeader("诊断") }
-        item {
-            SettingRow("配置状态", repo.configStatus()?.text ?: "尚未记录", last = true, control = {
-                ValueText(if (repo.configStatus()?.ok == true) "正常" else "待检查", Tokens.TextFaint)
-            })
-        }
-    }
-}
-
-@Composable
-private fun AboutGroup(versionName: String, versionCode: Int) {
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(end = 6.dp)) {
-        item { GroupHeader("版本") }
-        item {
-            SettingRow("当前版本", "versionCode $versionCode", control = { ValueText("v$versionName") })
-        }
-        item {
-            SettingRow("更新通道", "跟随仓库 Release 手动更新", last = true, control = { ValueText("手动", Tokens.TextFaint) })
-        }
-        item { GroupHeader("开源") }
-        item {
-            SettingRow("许可证", "允许自建分发，需保留同样义务", control = { ValueText("GPL-3.0") })
-        }
-        item {
-            SettingRow("项目地址", "github.com/Ringas/NextMovie", last = true, control = { ValueText("外部", Tokens.TextFaint) })
-        }
-        item { GroupHeader("原则") }
-        item {
-            SettingRow("内置源与 Key", "不附带、不代下载、不代理账号", last = true, control = { ValueText("0", Tokens.Accent) })
-        }
-    }
-}
-
-@Composable
-private fun InfoCard(title: String, body: String, accent: String? = null) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Tokens.Corner.panel))
-            .background(Tokens.Surface)
-            .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.panel))
-            .padding(horizontal = 16.dp, vertical = 14.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(title, color = Tokens.Accent, style = MaterialTheme.typography.labelLarge)
-            Spacer(Modifier.weight(1f))
-            if (accent != null) Text(accent, color = Tokens.TextFaint, style = MaterialTheme.typography.labelSmall)
-        }
-        Spacer(Modifier.height(6.dp))
-        Text(body, color = Tokens.TextDim, style = MaterialTheme.typography.labelSmall, lineHeight = 20.sp)
-    }
-}
-
-@Composable
-private fun ContextCard(
-    repo: AppRepository,
-    display: com.nextmovie.ui.theme.TvDisplayState,
-    message: String,
-    versionName: String,
-    cacheBytes: Long
-) {
-    val site = repo.currentSite
-    Column(
-        modifier = Modifier
-            .width(226.dp)
-            .fillMaxHeight()
-            .verticalScroll(rememberScrollState())
-            .padding(bottom = 6.dp)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(Tokens.Corner.panel))
-                .background(Tokens.Surface)
-                .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.panel))
-                .padding(horizontal = 14.dp, vertical = 12.dp)
-        ) {
-            Text(
-                text = "运行状态",
-                color = Tokens.Accent,
-                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.08.sp)
-            )
-            Spacer(Modifier.height(8.dp))
-            CtxLine("当前来源", site?.name ?: "未选择")
-            CtxLine("站点", "${repo.sites.size} 个")
-            CtxLine("插件源", "${repo.sites.count { it.isSpider }} 个")
-            CtxLine("可搜索", "${repo.sites.count { it.searchable }} 个")
-            CtxLine("显示比例", "%.2f×".format(display.scale))
-            CtxLine("版本", "v$versionName")
-            Spacer(Modifier.height(8.dp))
-            Box(Modifier.fillMaxWidth().height(1.dp).background(Tokens.Stroke))
-            Spacer(Modifier.height(8.dp))
-            Text("配置", color = Tokens.TextFaint, style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro))
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = repo.configStatus()?.text ?: "尚未记录",
-                color = if (repo.configStatus()?.ok == true) Tokens.TextDim else Tokens.TextFaint,
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        Spacer(Modifier.height(10.dp))
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(Tokens.Corner.panel))
-                .background(Tokens.Surface)
-                .border(1.dp, Tokens.Stroke, RoundedCornerShape(Tokens.Corner.panel))
-                .padding(horizontal = 14.dp, vertical = 12.dp)
-        ) {
-            Text("最近操作", color = Tokens.Accent, style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.08.sp))
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = message.ifBlank { "暂无操作。改动会即时写入本机。" },
-                color = Tokens.TextDim,
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 4,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(Modifier.height(10.dp))
-            Box(Modifier.fillMaxWidth().height(1.dp).background(Tokens.Stroke))
-            Spacer(Modifier.height(10.dp))
-            Text("海报缓存", color = Tokens.TextFaint, style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro))
-            Spacer(Modifier.height(3.dp))
-            Text(formatBytes(cacheBytes), color = Tokens.TextDim, style = MaterialTheme.typography.labelSmall)
-        }
-        Spacer(Modifier.height(12.dp))
-        Text(
-            text = "设置不弹二次确认 · 危险操作单独标红",
-            color = Tokens.TextFaint,
-            style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro),
-            lineHeight = 18.sp
-        )
-    }
-}
-
-@Composable
-private fun CtxLine(label: String, value: String) {
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = Tokens.TextFaint, style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro))
-        Spacer(Modifier.weight(1f))
-        Text(
-            text = value,
-            color = Tokens.TextDim,
-            style = MaterialTheme.typography.labelSmall,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.widthIn(max = 130.dp)
-        )
-    }
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1L shl 30 -> String.format("%.2f GB", bytes / (1L shl 30).toFloat())
+    bytes >= 1L shl 20 -> String.format("%.1f MB", bytes / (1L shl 20).toFloat())
+    bytes >= 1L shl 10 -> String.format("%.1f KB", bytes / (1L shl 10).toFloat())
+    else -> bytes.toString() + " B"
 }
 
 private fun dnsLabel(mode: String): String = when (mode) {
-    "system" -> "系统 DNS"
+    "auto" -> "自动（抗污染）"
+    "system" -> "跟随系统"
     "cloudflare" -> "Cloudflare"
-    "google" -> "Google"
     "aliyun" -> "阿里 DNS"
-    "custom" -> "自定义 DoH"
-    else -> "自动（SmartDns）"
+    "google" -> "Google DNS"
+    "custom" -> "自定义"
+    else -> mode
 }
 
-private fun formatBytes(bytes: Long): String = when {
-    bytes <= 0L -> "空"
-    bytes < 1024 * 1024 -> "${bytes / 1024} KB"
-    else -> "%.1f MB".format(bytes / 1024.0 / 1024.0)
-}
-
-/** 兼容旧调用（播放器控制栏 / 其它页面仍在使用）。 */
+/** 兼容旧调用点（插件页沿用同一枚按钮样式） */
 @Composable
 fun SettingsButton(text: String, modifier: Modifier = Modifier, enabled: Boolean = true, onClick: () -> Unit) {
-    Pill(text = text, enabled = enabled, modifier = modifier, onClick = onClick)
+    TvPill(
+        text = text,
+        modifier = modifier,
+        glass = true,
+        enabled = enabled,
+        horizontalPadding = 20.dp,
+        verticalPadding = 12.dp,
+        onClick = onClick
+    )
+}
+
+/** 扫码快传弹窗的全局开关（首页与设置页共用同一实现） */
+object Pairing {
+    var show by mutableStateOf(false)
 }
 
 @Composable
-fun SettingsField(label: String, value: String, onValueChange: (String) -> Unit) {
-    TvField(label, value, onValueChange = onValueChange)
+private fun PairingHost() {
+    if (Pairing.show) {
+        PairingDialog(onDismiss = { Pairing.show = false }, onReceived = { Pairing.show = false })
+    }
 }

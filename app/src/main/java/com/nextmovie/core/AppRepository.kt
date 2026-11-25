@@ -155,6 +155,15 @@ class AppRepository(private val context: Context) {
 
     fun configUrl(): String = prefs.getString(KEY_CONFIG_URL, "").orEmpty()
 
+    /** 播放器选项（对齐 Marco 播放偏好）：自动连播下一集 */
+    var autoNext: Boolean = prefs.getBoolean(KEY_AUTO_NEXT, true)
+        private set
+
+    fun setAutoNext(enabled: Boolean) {
+        autoNext = enabled
+        prefs.edit().putBoolean(KEY_AUTO_NEXT, enabled).apply()
+    }
+
     fun setPosterEnhance(enabled: Boolean) {
         posterEnhance = enabled
         prefs.edit().putBoolean(KEY_POSTER_ENHANCE, enabled).apply()
@@ -734,6 +743,7 @@ class AppRepository(private val context: Context) {
         private const val KEY_SITE_KEY = "site_key"
         private const val KEY_SITE_PLUGIN = "site_plugin"
         private const val KEY_POSTER_ENHANCE = "poster_enhance"
+        private const val KEY_AUTO_NEXT = "auto_next"
         private const val KEY_SITE_MANUAL = "site_manual"
         private const val KEY_TMDB_ROUTE = "tmdb_route"
         private const val KEY_TMDB_CUSTOM = "tmdb_custom_base"

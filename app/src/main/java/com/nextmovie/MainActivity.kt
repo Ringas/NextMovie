@@ -143,6 +143,18 @@ private fun AppRoot(repo: AppRepository) {
     var playJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     // 播放器回报的当前位置：换线路时从这里接着播，不丢进度
     var lastPositionMs by remember { mutableStateOf(0L) }
+    // 跨页面播放会话：Marco 的「退回详情页影片继续播」靠它把 ExoPlayer 留在进程里
+    val playbackSession = remember { com.nextmovie.ui.player.PlaybackSession(context) }
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { playbackSession.release() } }
+    // 离开播放/详情（回首页、搜索、设置）就把声音收掉，避免电视上「回桌面还在放」
+    androidx.compose.runtime.LaunchedEffect(route) {
+        val r = route
+        if (r is Route.Player) playbackSession.alive = true
+        if (r !is Route.Player && r !is Route.Detail) {
+            playbackSession.alive = false
+            runCatching { playbackSession.player.pause() }
+        }
+    }
 
     // 冷启动时把上次保存的配置自动载入，否则每次重启都会停在「还没有导入数据源」
     LaunchedEffect(Unit) {
@@ -392,7 +404,15 @@ private fun AppRoot(repo: AppRepository) {
                 val rest = if (idx >= 0) line.episodes.drop(idx + 1) else emptyList()
                 playEpisode(resolvedVod, line, episode, startMs, source, rest, slots)
             },
-            onBack = { route = Route.Home }
+            onBack = { route = Route.Home },
+            videoBackdrop = if (playbackSession.alive) {
+                {
+                    androidx.compose.ui.viewinterop.AndroidView(
+                        factory = { ctx -> playbackSession.view(ctx) },
+                        modifier = androidx.compose.ui.Modifier.fillMaxSize()
+                    )
+                }
+            } else null
         )
 
         is Route.Player -> PlayerScreen(
@@ -408,6 +428,7 @@ private fun AppRoot(repo: AppRepository) {
             slots = current.req.slots,
             currentSlot = current.req.slotIndex,
             onSwitchSlot = { index -> switchSlot(current.req, index) },
+            session = playbackSession,
             nextEpisodeName = current.req.queue.firstOrNull()?.name,
             onPlayNext = {
                 val next = current.req.queue.firstOrNull() ?: return@PlayerScreen
