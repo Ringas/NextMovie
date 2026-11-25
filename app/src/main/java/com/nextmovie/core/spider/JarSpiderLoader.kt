@@ -36,6 +36,10 @@ class JarSpiderLoader(
     private val jarDir = File(context.filesDir, "spiders").apply { mkdirs() }
     private val dexDir = File(context.codeCacheDir, "spider-dex").apply { mkdirs() }
     private val instances = java.util.concurrent.ConcurrentHashMap<String, Spider>()
+    // runtimeKey 是 origin+key+api+jar+ext+headers 的哈希，同一来源在不同调用里拿到的
+    // 配置字段可能略有差异（ext/headers 序列化顺序、超时值），会导致 key 漂移 →
+    // 每次请求都当成新站点重新 init（实测每次多花 6–8 秒）。按 api 再兜一层。
+    private val apiKeys = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val classLoaders = java.util.concurrent.ConcurrentHashMap<String, ClassLoader>()
     private val initialized = HashSet<String>()
     private val initializedProxies = java.util.concurrent.ConcurrentHashMap.newKeySet<Class<*>>()
@@ -50,12 +54,19 @@ class JarSpiderLoader(
         // Keep optimized dex across process restarts; it is disposable code cache, not runtime state.
     }
 
-    suspend fun obtain(site: Site): Spider = withContext(Dispatchers.IO) {
-        try {
-            lockFor(site).withLock { obtainInner(site) }
-        } catch (t: Throwable) {
-            PluginDiag.record(context, site.name, site.api, false, t.message)
-            throw t
+    private fun cached(site: Site): Spider? =
+        instances[site.runtimeKey] ?: apiKeys[site.api]?.let { instances[it] }
+
+    suspend fun obtain(site: Site): Spider {
+        // 命中缓存的常用路径不抢 jar 锁：初始化期间别的站点在 init，这里直接返回已建好的实例。
+        cached(site)?.let { return it }
+        return withContext(Dispatchers.IO) {
+            try {
+                lockFor(site).withLock { obtainInner(site) }
+            } catch (t: Throwable) {
+                PluginDiag.record(context, site.name, site.api, false, t.message)
+                throw t
+            }
         }
     }
 
@@ -64,7 +75,7 @@ class JarSpiderLoader(
         if (!api.startsWith("csp_")) {
             throw SpiderLoadException("v0 只支持 csp_ 前缀的 JAR 插件，当前是 $api")
         }
-        instances[site.runtimeKey]?.let { return@withContext it }
+        cached(site)?.let { return@withContext it }
 
         val lifecycleBefore = PluginLifecycle.snapshot(context)
         val jarUrl = site.jar.ifBlank { api }
@@ -226,6 +237,7 @@ class JarSpiderLoader(
 
         PluginLifecycle.catchUp(context, lifecycleBefore)
         instances[site.runtimeKey] = instance
+        apiKeys[site.api] = site.runtimeKey
         PluginDiag.record(context, site.name, site.api, true, "Init ok，实例已就绪")
         instance
     }

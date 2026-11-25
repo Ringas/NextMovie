@@ -117,6 +117,8 @@ fun HomeScreen(
     }
     LaunchedEffect(site.runtimeKey) {
         continueList = repo.history.list().take(12)
+        // 首页快照存在时说明来源已预热过，分类可以等；没有快照时分类与首页并行抓，
+        // 否则冷启动要多等一次插件往返。
         if (initialSnapshot.await() != null) backgroundReady.await()
         cats = try {
             repo.categories(site)
@@ -139,6 +141,10 @@ fun HomeScreen(
         warming = false
         try {
             val cat = cats.getOrNull(tab)
+            // 冷启动没有快照：首页与分类并行发起，别让两次插件往返串行叠成 16s
+            val coldHome = if (tab == 0 && reloadTick == 0 && initialSnapshot.await() == null) {
+                scope.async { runCatching { repo.home(site) }.getOrNull() }
+            } else null
             val list = if (cat == null || tab == 0) {
                 val cached = initialSnapshot.await()
                 if (cached != null && reloadTick == 0) {
@@ -153,7 +159,7 @@ fun HomeScreen(
                     }
                     return@LaunchedEffect
                 }
-                repo.home(site)
+                coldHome?.await() ?: repo.home(site)
             } else {
                 // 切 tab 先出磁盘快照，再后台刷新，避免每次点分类都等插件
                 val cachedCat = if (reloadTick == 0) repo.cachedCategory(site, cat.first) else null
@@ -334,7 +340,28 @@ fun HomeScreen(
         }
 
         when {
-            loading && display.isEmpty() -> LoadingStage(loadSecs, warming, warmTries, warmSince)
+            loading && display.isEmpty() -> Column {
+                // 冷启动也要先给点东西：继续观看来自本地历史，不依赖插件
+                if (continueVisible) {
+                    Text(
+                        "继续观看",
+                        color = Tokens.Text,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        contentPadding = PaddingValues(bottom = 8.dp),
+                    ) {
+                        items(continueList, key = { it.key }) { entry ->
+                            ContinueCard(entry = entry, onClick = { onResume(entry) })
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                }
+                LoadingStage(loadSecs, warming, warmTries, warmSince)
+            }
             error != null && display.isEmpty() -> ErrorStage(
                 message = error ?: "",
                 onRetry = { reloadTick += 1 },

@@ -43,6 +43,41 @@ import java.util.concurrent.Executors
  * 插件崩溃（native SIGSEGV、System.exit 等）只会杀掉本进程，主进程通过 Messenger 收到 binder 断开，
  * 显示「插件进程崩溃」而不是整个应用闪退。
  */
+
+/**
+ * 站点级排队：同一个来源同一时刻只跑一个插件调用（Guard 原生层不是线程安全的），
+ * 但「详情/播放/搜索」这类用户在等的高优先请求可以插到「首页/分类」这些后台刷新前面。
+ * 之前用普通 Mutex，冷启动时后台 home/category 把锁占满，详情要白等 8–18 秒才轮到。
+ */
+private class PriorityGate {
+    private val lock = Any()
+    private var busy = false
+    private val high = ArrayDeque<kotlinx.coroutines.CancellableContinuation<Unit>>()
+    private val low = ArrayDeque<kotlinx.coroutines.CancellableContinuation<Unit>>()
+
+    suspend fun acquire(priority: Boolean) = kotlinx.coroutines.suspendCancellableCoroutine<Unit> { cont ->
+        val granted = synchronized(lock) {
+            if (!busy) {
+                busy = true
+                true
+            } else {
+                if (priority) high.addLast(cont) else low.addLast(cont)
+                false
+            }
+        }
+        if (granted && cont.isActive) cont.resumeWith(Result.success(Unit))
+    }
+
+    fun release() {
+        val next = synchronized(lock) { high.removeFirstOrNull() ?: low.removeFirstOrNull() }
+        if (next == null) {
+            synchronized(lock) { busy = false }
+            return
+        }
+        if (next.isActive) next.resumeWith(Result.success(Unit)) else release()
+    }
+}
+
 class SpiderService : Service() {
 
     private lateinit var loader: JarSpiderLoader
@@ -51,7 +86,7 @@ class SpiderService : Service() {
     private val requests = mutableMapOf<RequestKey, Job>()
     private val proxies = ArrayDeque<SpiderProxyServer>()
     private val watchdog = Executors.newSingleThreadScheduledExecutor()
-    private val siteLocks = mutableMapOf<String, Mutex>()
+    private val siteGates = mutableMapOf<String, PriorityGate>()
     private val executor = Executors.newFixedThreadPool(4).asCoroutineDispatcher()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -123,11 +158,16 @@ class SpiderService : Service() {
         }
         val action = msg.what
         val args = msg.data?.let { Bundle(it) } ?: Bundle()
-        val gate = siteLocks.getOrPut(args.getString(KEY_SITE).orEmpty()) { Mutex() }
+        val gate = synchronized(siteGates) {
+            siteGates.getOrPut(args.getString(KEY_SITE).orEmpty()) { PriorityGate() }
+        }
+        // 详情/播放/搜索是用户在等的；首页与分类是后台刷新，要排在它们后面。
+        val priority = action == ACTION_DETAIL || action == ACTION_PLAY || action == ACTION_SEARCH
         val queuedAt = System.nanoTime()
         val job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             try {
-                val result = gate.withLock {
+                gate.acquire(priority)
+                val result = try {
                     withContext(executor) {
                         val delayMs = (System.nanoTime() - queuedAt) / 1_000_000
                         android.util.Log.i("NextMovieTiming", "plugin-queue action=$action ${delayMs}ms")
@@ -147,6 +187,8 @@ class SpiderService : Service() {
                             deadline.cancel(false)
                         }
                     }
+                } finally {
+                    gate.release()
                 }
                 runCatching { replyTo.send(Message.obtain().apply { what = SpiderProtocol.ACTION_REPLY; data = result }) }
             } finally {
@@ -169,7 +211,9 @@ class SpiderService : Service() {
         val spider = runBlocking { if (isJs) jsLoader.obtain(site) else loader.obtain(site) }
 
         android.util.Log.i("NextMovieTiming", "plugin-obtain action=$action ${(System.nanoTime() - loadStarted) / 1_000_000}ms")
-        if (!isJs) runCatching { loader.prepareProxy(site, pluginProxyPort()) }
+        // 只给「播放」挂本地 Go 代理：来源自己的接口（首页/详情/搜索）走直连，
+        // 否则冷启动时代理还没热，所有站点请求都被代理排队拖慢（Marco 只在取直链时用代理）。
+        if (!isJs && action == ACTION_PLAY) runCatching { loader.prepareProxy(site, pluginProxyPort()) }
             .onFailure { android.util.Log.w("NextMovieSpider", "prepareProxy 失败: " + it.message) }
 
         if (action == SpiderProtocol.ACTION_INIT) return okBundle(id, "ready")
@@ -241,6 +285,7 @@ class SpiderService : Service() {
                         .onFailure { android.util.Log.w("NextMovieSpider", "detailContent 失败: " + rootCause(it), it) }
                         .getOrNull().orEmpty()
                 }
+                android.util.Log.i("NextMovieDiag", "detail-raw id=$vodId len=${raw.length} head=" + raw.take(300))
                 if (raw.isBlank()) {
                     val bare = requestedId.substringAfter(':')
                     if (bare != requestedId) {

@@ -196,7 +196,7 @@ fun DetailScreen(
         loading = agg == null
         hint = "正在按片名在全部来源里找可播线路…"
         val result = runCatching {
-            repo.aggregateDetail(site, initial, crossSiteLimit = 6) { partial ->
+            repo.aggregateDetail(site, initial, crossSiteLimit = 6, skipCurrent = true) { partial ->
                 if (partial.sources.size > (agg?.sources?.size ?: 0)) {
                     android.util.Log.i("NextMovieTiming", "detail-partial ${(System.nanoTime() - screenStartedAt) / 1_000_000}ms sources=${partial.sources.size}")
                     agg = partial

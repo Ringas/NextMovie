@@ -466,7 +466,7 @@ class AppRepository(private val context: Context) {
 
     /** Display recent content immediately while the regular request refreshes it. Never used for play URLs. */
     suspend fun cachedHome(site: Site): List<Vod>? = withContext(kotlinx.coroutines.Dispatchers.IO) {
-        homeSnapshots.read(site.runtimeKey, maxAgeMs = 86_400_000)
+        homeSnapshots.read(site.runtimeKey, maxAgeMs = 7 * 86_400_000L)
     }
 
     /**
@@ -623,7 +623,22 @@ class AppRepository(private val context: Context) {
             throw e
         } catch (_: Exception) {
             null
-        }?.takeIf { it.lines.any { line -> line.episodes.isNotEmpty() } } ?: return null
+        }?.takeIf { it.lines.any { line -> line.episodes.isNotEmpty() } }
+            // 首页给的 id 有时候插件自己 detail 不出来（只返回空 JSON，几十毫秒就回来），
+            // 这时用片名在本站 search 一次拿真实 vod_id 再 detail —— 与 Marco 的「搜到再取详情」一致。
+            ?: run {
+                val keyword = vod.name.trim()
+                if (keyword.isBlank()) return@run null
+                val match = runCatching { matchingVideo(site, keyword, vod.displayYear) }.getOrNull()
+                if (match == null || match.id == vod.id) return@run null
+                val remaining = budgetMs - (System.nanoTime() - started) / 1_000_000
+                if (remaining < 2_000) return@run null
+                android.util.Log.i("NextMovieTiming", "detail-retry-by-search site=${site.name} id=${match.id}")
+                runCatching {
+                    withTimeoutOrNull(remaining) { detail(site, match.id, altId = match.name) }
+                }.getOrNull()?.takeIf { it.lines.any { line -> line.episodes.isNotEmpty() } }
+            }
+            ?: return null
         android.util.Log.i("NextMovieTiming", "detail-site-ready ${(System.nanoTime() - started) / 1_000_000}ms site=${site.name} lines=${resolved.lines.size}")
         val rank = com.nextmovie.core.match.SourceRanker.sourceScore(site, resolved, sourceSuccessRate(site.key), true)
         return AggregatedDetail(
@@ -777,10 +792,11 @@ class AppRepository(private val context: Context) {
         site: Site,
         vod: Vod,
         crossSiteLimit: Int = 4,
+        skipCurrent: Boolean = false,
         onPartial: (AggregatedDetail) -> Unit = {}
     ): AggregatedDetail? {
         val keyword = vod.name.trim()
-        val cacheKey = "agg|${site.runtimeKey}|${vod.id}|$keyword"
+        val cacheKey = "agg|${site.runtimeKey}|${vod.id}|$keyword|skip=$skipCurrent"
         // A second screen can join an aggregation whose first callback belonged to
         // a previous screen. Replay the already usable current-source detail first.
         details.peek("detail|${site.runtimeKey}|${vod.id}")?.takeIf { it.lines.isNotEmpty() }?.let { ready ->
@@ -788,7 +804,7 @@ class AppRepository(private val context: Context) {
             onPartial(AggregatedDetail(listOf(SourceDetail(site, ready, rank.score, rank.label,
                 com.nextmovie.core.match.SourceRanker.bestLineIndex(ready)))))
         }
-        return aggregations.get(cacheKey) { resolveAggregate(site, vod, keyword, crossSiteLimit, onPartial) }
+        return aggregations.get(cacheKey) { resolveAggregate(site, vod, keyword, crossSiteLimit, skipCurrent, onPartial) }
     }
 
     private suspend fun resolveAggregate(
@@ -796,6 +812,7 @@ class AppRepository(private val context: Context) {
         vod: Vod,
         keyword: String,
         crossSiteLimit: Int,
+        skipCurrent: Boolean,
         onPartial: (AggregatedDetail) -> Unit
     ): AggregatedDetail? = coroutineScope {
         // 「msearch:<id>」卡片本身没有可用的 detailContent（插件只会返回空），
@@ -803,7 +820,9 @@ class AppRepository(private val context: Context) {
         // 详情页一边出简介，一边在后台拿片名做全站搜索，谁先返回可播线路谁上屏。
         val searchRedirect = vod.id.startsWith("msearch:", true)
         val candidates = buildList {
-            if (!searchRedirect) add(site)
+            // 当前源刚才已经由 detailForSite 试过一次（拿不到线路才走到这里），
+            // 再把它塞回候选会让聚合白白多等一个 8–15s 超时。
+            if (!searchRedirect && !skipCurrent) add(site)
             addAll(
                 sites.filter { it.isPlayable && it.searchable && it.runtimeKey != site.runtimeKey }
                     .filterNot { isDiscoveryOnly(it) }
