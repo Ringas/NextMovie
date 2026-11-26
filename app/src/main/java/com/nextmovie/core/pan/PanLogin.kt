@@ -65,6 +65,20 @@ object PanLogin {
 
     fun providers(): List<Pair<String, String>> = providers.map { it.id to it.label }
 
+    /** 登录态是否已有 Cookie（夸克/UC 走宿主 prefs，插件会通过 HostCookies 读到）。 */
+    fun has(context: android.content.Context, id: String): Boolean =
+        context.getSharedPreferences("nextmovie", android.content.Context.MODE_PRIVATE)
+            .getString("pan_cookie_$id", "").orEmpty().isNotBlank()
+
+    /** 把扫码拿到的 Cookie 落到宿主存储：prefs（插件 HostCookies 实时读）+ files（兼容旧通道）。 */
+    fun persist(context: android.content.Context, id: String, cookie: String) {
+        if (cookie.isBlank()) return
+        context.getSharedPreferences("nextmovie", android.content.Context.MODE_PRIVATE)
+            .edit().putString("pan_cookie_$id", cookie).apply()
+        runCatching { java.io.File(context.filesDir, "cookie_$id.txt").writeText(cookie) }
+        Log.i(TAG, "persist cookie id=$id len=${cookie.length}")
+    }
+
     private val jarCookies = ConcurrentHashMap<String, MutableMap<String, String>>()
 
     private val client: OkHttpClient by lazy {
@@ -83,6 +97,35 @@ object PanLogin {
                 }
             })
             .build()
+    }
+
+    private val UA = "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
+
+    /**
+     * Cookie 是否真的「登录态」。WebView 里常常残留 `__puus` 之类的匿名 cookie（长度也能到 100），
+     * 只按 marker 判断会在没扫码时就误报登录成功、把扫码页直接关掉。
+     * 真登录时 account/info 的 data 里才会出现 nickname / member_type。
+     */
+    fun verify(id: String, cookie: String): Boolean {
+        if (cookie.isBlank()) return false
+        val url = when (id) {
+            "uc" -> "https://drive.uc.cn/account/info?fr=pc"
+            else -> "https://pan.quark.cn/account/info?fr=pc&platform=pc"
+        }
+        return runCatching {
+            val req = Request.Builder().url(url)
+                .header("User-Agent", UA)
+                .header("Cookie", cookie)
+                .build()
+            client.newCall(req).execute().use { r ->
+                val body = r.body?.string().orEmpty()
+                val data = runCatching { JSONObject(body).optJSONObject("data") }.getOrNull()
+                val ok = data != null && (data.has("nickname") || data.has("member_type") ||
+                    data.has("user_name") || data.has("puus"))
+                Log.i(TAG, "verify $id code=${r.code} ok=$ok keys=${data?.keys()?.asSequence()?.joinToString()}")
+                ok
+            }
+        }.getOrDefault(false)
     }
 
     private fun get(url: String, headers: Map<String, String> = emptyMap()): String {

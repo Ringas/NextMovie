@@ -9,7 +9,11 @@ class NextMovieApp : Application() {
         super.onCreate()
         com.github.catvod.Runtime.set(this)
         listOf("play-raw.txt", "detail-raw.txt").forEach { java.io.File(filesDir, it).delete() }
-        syncPanCookiesToWebView()
+        // CookieManager.getInstance() 会同步初始化整个 WebView 内核（冷启动 1.5–2s 的大头）。
+        // Marco 冷启动 0.9s，我们之前 3.4s，差距几乎全在这里：把 WebView 初始化推到首帧之后。
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            runCatching { syncPanCookiesToWebView() }
+        }, 1500L)
     }
 
     /**

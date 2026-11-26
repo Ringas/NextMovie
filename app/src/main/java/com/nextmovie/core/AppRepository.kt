@@ -49,6 +49,18 @@ class AppRepository(private val context: Context) {
     val tmdb = TmdbClient(http)
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
+    init {
+        // 线路优选：把「是否已登录网盘」和「这条线路真实播成功过几次」喂给排序器
+        com.nextmovie.core.match.SourceRanker.panLoggedIn = { pan ->
+            prefs.getString("pan_cookie_$pan", "").orEmpty().isNotBlank()
+        }
+        com.nextmovie.core.match.SourceRanker.lineStats = { siteKey, line ->
+            val ok = prefs.getInt("line_ok_${siteKey}_$line", 0)
+            val fail = prefs.getInt("line_fail_${siteKey}_$line", 0)
+            ok to fail
+        }
+    }
+
     private var parses: List<com.nextmovie.core.config.Parse> = emptyList()
 
     private val t4Extensions = com.nextmovie.core.cache.RequestCache<String, String>(300_000, 32)
@@ -608,7 +620,7 @@ class AppRepository(private val context: Context) {
         val ready = details.peekNow("detail|${site.runtimeKey}|$id")?.takeIf { it.lines.isNotEmpty() } ?: return null
         val rank = com.nextmovie.core.match.SourceRanker.sourceScore(site, ready, sourceSuccessRate(site.key), true)
         return AggregatedDetail(listOf(SourceDetail(site, ready, rank.score, rank.label,
-            com.nextmovie.core.match.SourceRanker.bestLineIndex(ready))))
+            com.nextmovie.core.match.SourceRanker.bestLineIndex(ready, site.key))))
     }
 
     /**
@@ -648,7 +660,7 @@ class AppRepository(private val context: Context) {
                     resolved,
                     rank.score,
                     rank.label,
-                    com.nextmovie.core.match.SourceRanker.bestLineIndex(resolved)
+                    com.nextmovie.core.match.SourceRanker.bestLineIndex(resolved, site.key)
                 )
             )
         )
@@ -802,7 +814,7 @@ class AppRepository(private val context: Context) {
         details.peek("detail|${site.runtimeKey}|${vod.id}")?.takeIf { it.lines.isNotEmpty() }?.let { ready ->
             val rank = com.nextmovie.core.match.SourceRanker.sourceScore(site, ready, sourceSuccessRate(site.key), true)
             onPartial(AggregatedDetail(listOf(SourceDetail(site, ready, rank.score, rank.label,
-                com.nextmovie.core.match.SourceRanker.bestLineIndex(ready)))))
+                com.nextmovie.core.match.SourceRanker.bestLineIndex(ready, site.key)))))
         }
         return aggregations.get(cacheKey) { resolveAggregate(site, vod, keyword, crossSiteLimit, skipCurrent, onPartial) }
     }
@@ -864,7 +876,7 @@ class AppRepository(private val context: Context) {
                                     sourceSuccessRate(candidate.key),
                                     candidate.runtimeKey == site.runtimeKey
                                 )
-                                val bestIndex = com.nextmovie.core.match.SourceRanker.bestLineIndex(resolvedDetail)
+                                val bestIndex = com.nextmovie.core.match.SourceRanker.bestLineIndex(resolvedDetail, site.key)
                                 // Read known quality without putting a CDN request on the detail path.
                                 val probeUrl = resolvedDetail.lines.getOrNull(bestIndex)
                                     ?.episodes?.firstOrNull()?.url.orEmpty()
@@ -1013,10 +1025,15 @@ class AppRepository(private val context: Context) {
     }
 
     /** 起播成功/失败都要回写：聚合排序靠这个逐步收敛到"哪个源真的能播"。 */
-    fun recordPlayOutcome(siteKey: String, ok: Boolean) {
+    fun recordPlayOutcome(siteKey: String, ok: Boolean, lineName: String = "") {
         if (siteKey.isBlank()) return
         val k = (if (ok) "stat_ok_" else "stat_fail_") + siteKey
-        prefs.edit().putInt(k, prefs.getInt(k, 0) + 1).apply()
+        val edit = prefs.edit().putInt(k, prefs.getInt(k, 0) + 1)
+        if (lineName.isNotBlank()) {
+            val lk = (if (ok) "line_ok_" else "line_fail_") + siteKey + "_" + lineName
+            edit.putInt(lk, prefs.getInt(lk, 0) + 1)
+        }
+        edit.apply()
     }
 
     fun searchableSites(limit: Int = 12): List<Site> {

@@ -321,11 +321,16 @@ fun DetailScreen(
                 )
             }
         }
-        // 直链优先，云盘垫底（同分时保持聚合顺序）
-        return out.sortedBy { slot ->
-            val pan = listOf("云盘", "网盘", "阿里", "夸克", "115", "UC", "百度", "天翼")
-                .any { slot.lineName.contains(it, ignoreCase = true) }
-            if (pan) 1 else 0
+        // 线路优选：按「画质 + 网盘登录态 + 该线路真实成功率」排序。
+        // 同分保持聚合顺序；任何线路都仍可手动选，这里只决定默认与自动换线的顺序。
+        return out.sortedByDescending { slot ->
+            com.nextmovie.core.match.SourceRanker.score(
+                slot.siteKey,
+                com.nextmovie.core.model.PlayLine(
+                    slot.lineName,
+                    listOf(com.nextmovie.core.model.Episode(slot.episodeName, slot.episodeUrl))
+                )
+            )
         }
     }
 
@@ -661,18 +666,25 @@ fun DetailScreen(
                             Text("播放线路", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                             Spacer(Modifier.width(16.dp))
                             val lineState = rememberLazyListState()
+                            // 线路优选排序：按优质分从高到低展示（默认选中项已由 bestLineIndex 决定）
+                            val lineOrder = remember(lines, active.key) {
+                                lines.indices.sortedByDescending { idx ->
+                                    com.nextmovie.core.match.SourceRanker.score(active.key, lines[idx])
+                                }
+                            }
                             LazyRow(
                                 state = lineState,
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                                 modifier = Modifier.weight(1f).mouseWheel(lineState, horizontal = true)
                             ) {
-                                itemsIndexed(lines) { index, item ->
+                                itemsIndexed(lineOrder) { pos, index ->
+                                    val item = lines[index]
                                     LinePill(
                                         name = item.name,
                                         count = item.episodes.size,
                                         drive = detectDrive(item.name),
                                         selected = index == lineIndex,
-                                        modifier = if (index == 0) Modifier
+                                        modifier = if (pos == 0) Modifier
                                             .focusRequester(lineFocus)
                                             .focusProperties {
                                                 up = playFocus

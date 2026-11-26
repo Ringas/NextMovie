@@ -2,6 +2,7 @@ package com.nextmovie.core.match
 
 import com.nextmovie.core.config.Site
 import com.nextmovie.core.model.PlayLine
+import com.nextmovie.core.model.isPanLine
 import com.nextmovie.core.model.VodDetail
 
 /**
@@ -78,13 +79,46 @@ object SourceRanker {
         return LineQuality(score, bestQuality.label)
     }
 
-    fun bestLineIndex(detail: VodDetail): Int {
+    /** 网盘是否已登录（由宿主持久化 Cookie 决定，未登录的云盘线路会先弹扫码）。 */
+    var panLoggedIn: (String) -> Boolean = { false }
+
+    /** 单条线路的历史成功率（ok, fail）：真播出来的结果权重最高。 */
+    var lineStats: (String, String) -> Pair<Int, Int> = { _, _ -> 0 to 0 }
+
+    private fun panIdOf(line: PlayLine): String? {
+        val n = line.name.lowercase()
+        val u = line.episodes.firstOrNull()?.url.orEmpty().lowercase()
+        return when {
+            n.contains("quark") || n.contains("夸克") || u.contains("quark.cn") -> "quark"
+            n.contains("uc") || u.contains("uc.cn") -> "uc"
+            n.contains("ali") || n.contains("阿里") || u.contains("alipan") -> "ali"
+            n.contains("baidu") || n.contains("百度") || n.contains("嘟嘟") -> "baidu"
+            else -> null
+        }
+    }
+
+    /**
+     * 线路优选分（用于「默认选中哪条」和「失败后按什么顺序自动换线」）：
+     *  画质词 + 容器 + 完整度（lineQuality）
+     *  + 云盘线路的可用性（已登录 +4 / 未登录 -4，未登录会先弹扫码）
+     *  + 该线路真实播放成功率（-4..+4）
+     */
+    fun score(siteKey: String, line: PlayLine): Int {
+        var score = lineQuality(line).score
+        val pan = panIdOf(line)
+        if (pan != null && line.isPanLine) score += if (panLoggedIn(pan)) 4 else -4
+        val (ok, fail) = lineStats(siteKey, line.name)
+        if (ok + fail > 0) score += (((ok + 1.0) / (ok + fail + 2.0)) * 8).toInt() - 4
+        return score
+    }
+
+    fun bestLineIndex(detail: VodDetail, siteKey: String = ""): Int {
         if (detail.lines.isEmpty()) return 0
         var best = 0
         var bestScore = Int.MIN_VALUE
         detail.lines.forEachIndexed { index, line ->
-            val score = lineQuality(line).score
-            if (score > bestScore) { bestScore = score; best = index }
+            val value = score(siteKey, line)
+            if (value > bestScore) { bestScore = value; best = index }
         }
         return best
     }

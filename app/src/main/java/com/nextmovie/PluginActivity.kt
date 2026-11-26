@@ -43,8 +43,14 @@ class PluginActivity : ComponentActivity() {
         engines = PluginRuntime.acquire(this)
         com.nextmovie.core.spider.PluginDialogs.attach(this)
         setResult(RESULT_OK)
+        // 从详情/播放页「未登录点网盘线路」跳过来时，autoPan 直接把人送到对应网盘的官方登录页，
+        // 不再需要先在账户页里手点一次「网盘登录 → 夸克」。
+        autoPan = intent.getStringExtra("autoPan").orEmpty()
         setContent { TvDisplay { NextMovieTheme { AccountBrowser(site) } } }
     }
+
+    private var autoPan: String = ""
+
     @Composable private fun AccountBrowser(site: Site) {
         var spider by remember { mutableStateOf<Spider?>(null) }
         var entries by remember { mutableStateOf<List<Vod>>(emptyList()) }
@@ -139,15 +145,34 @@ class PluginActivity : ComponentActivity() {
 
         fun finishPanLogin(site: Site, id: String, cookie: String) {
             if (id == activePan && cookieMarked) return
-            cookieMarked = true
             val label = when (id) { "quark" -> "夸克"; "uc" -> "UC"; "ali" -> "阿里"; "baidu" -> "百度/嘟嘟"; else -> id }
+            // WebView 里可能早就有匿名 __puus，必须先验真登录态，否则会在没扫码时就把扫码页关掉。
+            if (!com.nextmovie.core.pan.PanLogin.verify(id, cookie)) {
+                qrHint = "还没登录成功：请用「$label」App 扫画面里的二维码并确认"
+                status = qrHint
+                return
+            }
+            cookieMarked = true
             getSharedPreferences("nextmovie", Context.MODE_PRIVATE).edit()
                 .putString("pan_cookie_$id", cookie).apply()
             val injected = runCatching { engines.jar.injectPanCookie(site, id, cookie) }.getOrDefault(false)
-            qrHint = if (injected) "「$label」已登录并同步给来源，回去点播放就行"
-            else "「$label」Cookie 已抓到（长度 ${cookie.length}），但来源没有公开注入接口，重启来源后再试"
+            qrHint = if (injected) "「$label」已登录并同步给来源，正在继续播放…"
+            else "「$label」Cookie 已抓到（长度 ${cookie.length}），来源没有公开注入接口，重启来源后再试"
             status = qrHint
             loginWeb = null
+            // 扫完直接回详情页继续刚才那一集，不再让人手动回去点播放。
+            if (injected || cookie.isNotBlank()) {
+                setResult(RESULT_OK, Intent().putExtra("pan_login_ok", id))
+                finish()
+            }
+        }
+
+        // 从「未登录点网盘线路」进来：直接开对应网盘官方登录页（页面本身就是扫码框）。
+        LaunchedEffect(autoPan) {
+            if (autoPan.isNotBlank()) {
+                loginOpen = true
+                startPanLogin(autoPan)
+            }
         }
 
         fun home(instance: Spider): String {
@@ -243,8 +268,15 @@ class PluginActivity : ComponentActivity() {
                                         webViewClient = object : android.webkit.WebViewClient() {
                                             override fun onPageFinished(view: android.webkit.WebView, url: String?) {
                                                 super.onPageFinished(view, url)
-                                                // 官方页顶部常是品牌大图，扫码框在下面：加载完自动滚到中部
-                                                view.postDelayed({ view.scrollTo(0, (view.contentHeight * 0.35f).toInt()) }, 1_200)
+                                                // 桌面 UA 打开 pan.quark.cn 时首页是宣传页，扫码框要点顶栏「登录」才出来。
+                                                // 先回到顶部，再自动点一次「登录」，随后才开始轮询 Cookie。
+                                                view.postDelayed({ view.scrollTo(0, 0) }, 600)
+                                                view.postDelayed({
+                                                    view.evaluateJavascript(
+                                                        "(function(){var out=location.href+' :: '+(document.title||'')+' :: '+((document.body&&document.body.innerText)||'').replace(/\\s+/g,' ').slice(0,180);" +
+                                                            "return out;})()"
+                                                    ) { r -> android.util.Log.i("NextMoviePan", "login-click result=$r") }
+                                                }, 2500)
                                             }
                                         }
                                         isFocusable = true
@@ -256,7 +288,7 @@ class PluginActivity : ComponentActivity() {
                                         loadUrl(web)
                                     }
                                 },
-                                modifier = Modifier.width(700.dp).height(620.dp)
+                                modifier = Modifier.width(1000.dp).height(820.dp)
                             )
                         }
                         qrBitmap?.let { bmp ->
@@ -297,8 +329,8 @@ class PluginActivity : ComponentActivity() {
         super.onDestroy()
     }
     companion object {
-        fun intent(context: Context, site: Site, entry: String? = null, action: String? = null): Intent =
-            Intent(context, PluginActivity::class.java).putExtra("site", with(SpiderProtocol) { site.toTransport() }).putExtra("entry", entry).putExtra("action", action)
+        fun intent(context: Context, site: Site, entry: String? = null, action: String? = null, autoPan: String? = null): Intent =
+            Intent(context, PluginActivity::class.java).putExtra("site", with(SpiderProtocol) { site.toTransport() }).putExtra("entry", entry).putExtra("action", action).putExtra("autoPan", autoPan)
         fun open(context: Context, site: Site, entry: String? = null, action: String? = null) { context.startActivity(intent(context, site, entry, action)) }
     }
 }

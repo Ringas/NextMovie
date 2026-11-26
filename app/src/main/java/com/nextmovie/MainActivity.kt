@@ -1,6 +1,7 @@
 package com.nextmovie
 
 import android.os.Bundle
+import com.nextmovie.core.model.isPanLine
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.widget.Toast
@@ -232,8 +233,16 @@ private fun AppRoot(repo: AppRepository) {
     }
 
     var accountGeneration by remember { mutableStateOf(0) }
-    val accountLauncher = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) {
+    val accountLauncher = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { res ->
         scope.launch { repo.invalidateContent(); accountGeneration++ }
+        // 从「未登录点网盘线路」跳去扫码，扫完带着 pan_login_ok 回来：直接续播刚才那一集。
+        val loginOk = res.data?.getStringExtra("pan_login_ok").orEmpty()
+        val retry = panQrRetry
+        if (loginOk.isNotBlank() && retry != null) {
+            panQrRetry = null
+            android.util.Log.i("NextMoviePan", "login-ok pan=$loginOk -> auto resume")
+            retry()
+        }
     }
 
     val site = repo.currentSite
@@ -268,13 +277,40 @@ private fun AppRoot(repo: AppRepository) {
         }
     }
 
-    /** 未登录网盘时一律走账户页的官方网页登录：二维码由官方页面渲染，Cookie 回来再回灌插件。 */
+    /** 未登录网盘时：直接在电视上弹官方扫码二维码，扫完把 Cookie 落库并自动续播。 */
     fun askPanLogin(activeSite: Site, panId: String, retry: (() -> Unit)?) {
         val label = when (panId) { "quark" -> "夸克"; "uc" -> "UC"; "ali" -> "阿里"; else -> "百度·嘟嘟" }
-        android.util.Log.i("NextMoviePan", "auto-pop web-login pan=$panId site=${activeSite.key}")
-        Toast.makeText(context, "「$label」未登录，已打开账户页，登录后回来点播放", Toast.LENGTH_LONG).show()
-        accountLauncher.launch(PluginActivity.intent(context, activeSite, "", null))
+        android.util.Log.i("NextMoviePan", "auto-pop qr-login pan=$panId site=${activeSite.key}")
         panQrRetry = retry
+        panQrLabel = label
+        panQrBitmap = null
+        panQrMsg = "正在获取「$label」登录二维码…"
+        panQrId = panId
+        com.nextmovie.core.pan.PanLogin.start(panId) { snap ->
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                if (panQrId != panId) return@post
+                panQrMsg = snap.message
+                if (snap.qr != null) panQrBitmap = snap.qr
+                when (snap.state) {
+                    com.nextmovie.core.pan.PanLogin.State.SUCCESS -> {
+                        com.nextmovie.core.pan.PanLogin.persist(context, panId, snap.cookie)
+                        android.util.Log.i("NextMoviePan", "qr-login-ok pan=$panId cookieLen=${snap.cookie.length}")
+                        Toast.makeText(context, "「$label」登录成功，继续播放", Toast.LENGTH_SHORT).show()
+                        panQrId = ""
+                        val next = panQrRetry
+                        panQrRetry = null
+                        scope.launch {
+                            repo.invalidateContent()
+                            kotlinx.coroutines.delay(250)
+                            next?.invoke()
+                        }
+                    }
+                    com.nextmovie.core.pan.PanLogin.State.FAILED ->
+                        android.util.Log.i("NextMoviePan", "qr-login-fail pan=$panId ${snap.message}")
+                    else -> Unit
+                }
+            }
+        }
     }
 
     /** 把插件异常翻成人话，别再让用户对着「解析失败」猜。 */
@@ -312,6 +348,16 @@ private fun AppRoot(repo: AppRepository) {
             Toast.makeText(context, "还没有选择数据源", Toast.LENGTH_SHORT).show()
             return
         }
+        // 云盘线路 + 本机还没有该网盘 Cookie：不再白等 15s 解析，直接弹官方扫码，
+        // 扫完自动回到这一集续播（闭环）。
+        val panId = panOf(line.name).takeIf { line.isPanLine }
+        if (panId != null && !com.nextmovie.core.pan.PanLogin.has(context, panId)) {
+            android.util.Log.i("NextMoviePan", "pan-line needs login line=${line.name} pan=$panId")
+            askPanLogin(activeSite, panId) {
+                playEpisode(vod, line, episode, startMs, source, queue, slots, slotIndex, attemptedSlots, onResolveFailure)
+            }
+            return
+        }
         playJob?.cancel()
         val resolveStarted = System.nanoTime()
         playJob = scope.launch {
@@ -329,7 +375,7 @@ private fun AppRoot(repo: AppRepository) {
                 }
                 catch (e: TimeoutCancellationException) {
                     // 超时也走同一条失败路径：换线 / 给人话提示
-                    repo.recordPlayOutcome(activeSite.key, false)
+                    repo.recordPlayOutcome(activeSite.key, false, line.name)
                     android.util.Log.i("NextMovieTiming", "line-play-timeout site=${activeSite.key} line=${line.name}")
                     if (onResolveFailure != null) { retry = true; return@launch }
                     Toast.makeText(context, "「${line.name}」15 秒没拿到地址，已换下一条线路", Toast.LENGTH_LONG).show()
@@ -337,7 +383,7 @@ private fun AppRoot(repo: AppRepository) {
                 }
                 catch (e: kotlinx.coroutines.CancellationException) { repo.cancelPlayback(activeSite); throw e }
                 catch (e: Exception) {
-                    repo.recordPlayOutcome(activeSite.key, false)
+                    repo.recordPlayOutcome(activeSite.key, false, line.name)
                     val reason = "line-play-fail site=${activeSite.key} line=${line.name} " +
                         "${e.javaClass.simpleName}: ${e.message.orEmpty().take(120)}"
                     android.util.Log.i("NextMovieTiming", reason)
@@ -365,13 +411,13 @@ private fun AppRoot(repo: AppRepository) {
             android.util.Log.i("NextMovieTiming", "play-resolve ${(System.nanoTime() - resolveStarted) / 1_000_000}ms")
             when {
                 result == null -> {
-                    repo.recordPlayOutcome(activeSite.key, false)
+                    repo.recordPlayOutcome(activeSite.key, false, line.name)
                     if (onResolveFailure != null) retry = true
                     else Toast.makeText(context, "解析失败，换个线路试试", Toast.LENGTH_SHORT).show()
                 }
 
                 result.parse != 0 -> {
-                    repo.recordPlayOutcome(activeSite.key, false)
+                    repo.recordPlayOutcome(activeSite.key, false, line.name)
                     if (onResolveFailure != null) retry = true
                     else Toast.makeText(context, "该线路未能取得直链，请换一条线路", Toast.LENGTH_LONG).show()
                 }
@@ -486,11 +532,11 @@ private fun AppRoot(repo: AppRepository) {
                     Image(
                         bitmap = bmp.asImageBitmap(),
                         contentDescription = "登录二维码",
-                        modifier = Modifier.width(115.dp).height(115.dp).background(androidx.compose.ui.graphics.Color.White)
+                        modifier = Modifier.width(230.dp).height(230.dp).background(androidx.compose.ui.graphics.Color.White)
                     )
                 } else {
                     Box(
-                        modifier = Modifier.width(115.dp).height(115.dp).background(Tokens.Surface),
+                        modifier = Modifier.width(230.dp).height(230.dp).background(Tokens.Surface),
                         contentAlignment = Alignment.Center
                     ) { Text("生成二维码…", color = Tokens.TextDim, style = MaterialTheme.typography.bodyMedium) }
                 }
