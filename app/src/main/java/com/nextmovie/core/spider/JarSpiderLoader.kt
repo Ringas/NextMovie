@@ -41,6 +41,12 @@ class JarSpiderLoader(
     // 每次请求都当成新站点重新 init（实测每次多花 6–8 秒）。按 api 再兜一层。
     private val apiKeys = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val classLoaders = java.util.concurrent.ConcurrentHashMap<String, ClassLoader>()
+    // Init.init 已完成的 jar：静态 `spider.Proxy` 只能在这之后调用。
+    // 之前直接遍历 classLoaders，会在 Init 跑一半时并发调进插件，
+    // 真机表现为 :spider 进程被 native abort（staticProxy 帧在崩溃栈里）。
+    private val readyLoaders = java.util.concurrent.ConcurrentHashMap<String, ClassLoader>()
+    // runtimeKey → Site，供全局 /proxy 路由（插件的 do=pan&action=config 配置页）反查站点
+    private val sitesByKey = java.util.concurrent.ConcurrentHashMap<String, Site>()
     private val initialized = HashSet<String>()
     private val initializedProxies = java.util.concurrent.ConcurrentHashMap.newKeySet<Class<*>>()
 
@@ -48,8 +54,10 @@ class JarSpiderLoader(
     fun release() {
         instances.values.forEach { runCatching { it.destroy() } }
         instances.clear()
+        sitesByKey.clear()
         initialized.clear()
         initializedProxies.clear()
+        readyLoaders.clear()
         classLoaders.clear()
         // Keep optimized dex across process restarts; it is disposable code cache, not runtime state.
     }
@@ -193,6 +201,7 @@ class JarSpiderLoader(
         // Initialization belongs to the JAR class loader, once only. Re-running arbitrary
         // load/prepare methods may mutate or destroy a working plugin runtime.
         if (initError != null) throw SpiderLoadException("插件初始化失败：" + rootCause(initError), initError)
+        if (needsInit) readyLoaders[jarFile.absolutePath] = loader
 
         val className = "com.github.catvod.spider." + api.removePrefix("csp_").substringBefore('?')
         val instance = try {
@@ -247,6 +256,7 @@ class JarSpiderLoader(
         PluginLifecycle.catchUp(context, lifecycleBefore)
         instances[site.runtimeKey] = instance
         apiKeys[site.api] = site.runtimeKey
+        sitesByKey[site.runtimeKey] = site
         PluginDiag.record(context, site.name, site.api, true, "Init ok，实例已就绪")
         // 方案A探针：枚举插件暴露的登录/Cookie 钩子，并试调一次 action("login")
         runCatching {
@@ -291,6 +301,72 @@ class JarSpiderLoader(
             )
         }
         instance
+    }
+
+    /**
+     * Marco `CspEngine.syncAllPluginActivities` + `bindActivityFields` 的等价实现。
+     *
+     * 为什么必须做：PluginActivity 运行在 `:spider` 进程，主进程的 MainActivity 传不过来，
+     * 插件进程里 `Spider.getActivity()` 一直是 null；Guard 插件要弹登录框/扫码框时
+     * 先看 Activity，为空就直接返回 `{}`——这正是 33 个 flag 全部空串的根因。
+     * 而且只绑 `Init` 静态字段不够：Guard 会把 activity 缓存在自己的内部对象里，
+     * 所以这里按对象图（实例 → 内部 Guard 对象）递归绑 Activity / Application / WeakReference。
+     */
+    fun bindHostActivity(activity: android.app.Activity, site: Site? = null) {
+        val loaders = LinkedHashSet<ClassLoader>()
+        loaders.addAll(classLoaders.values)
+        site?.let { s -> instances[s.runtimeKey]?.javaClass?.classLoader?.let { loaders.add(it) } }
+        instances.values.forEach { loaders.add(it.javaClass.classLoader) }
+        val seeds = LinkedHashSet<Any>()
+        site?.let { s -> instances[s.runtimeKey]?.let { seeds.add(it) } }
+        if (seeds.isEmpty()) seeds.addAll(instances.values)
+        val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Any, Boolean>())
+        val done = java.util.concurrent.CountDownLatch(1)
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            try {
+                for (loader in loaders) for (name in listOf("Init", "InitOrigin", "AwInit")) runCatching {
+                    val cls = Class.forName("com.github.catvod.spider.$name", false, loader)
+                    val inst = runCatching {
+                        cls.getDeclaredMethod("get").apply { isAccessible = true }.invoke(null)
+                    }.getOrNull()
+                    bindObjectGraph(cls, inst, activity, 0, seen)
+                }
+                seeds.forEach { bindObjectGraph(it.javaClass, it, activity, 0, seen) }
+                android.util.Log.i("NextMoviePan", "bind-activity site=${site?.name ?: "-"} seeds=${seeds.size} loaders=${loaders.size}")
+            } finally { done.countDown() }
+        }
+        done.await(3, java.util.concurrent.TimeUnit.SECONDS)
+    }
+
+    private fun bindObjectGraph(cls: Class<*>, owner: Any?, activity: android.app.Activity, depth: Int, seen: MutableSet<Any>) {
+        if (depth > 3) return
+        if (owner != null && !seen.add(owner)) return
+        var c: Class<*>? = cls
+        var level = 0
+        while (c != null && level < 5) {
+            for (field in c.declaredFields) runCatching {
+                field.isAccessible = true
+                val target = if (java.lang.reflect.Modifier.isStatic(field.modifiers)) null else owner
+                when {
+                    android.app.Activity::class.java.isAssignableFrom(field.type) -> field.set(target, activity)
+                    android.app.Application::class.java.isAssignableFrom(field.type) -> field.set(target, activity.application)
+                    field.type == java.lang.ref.WeakReference::class.java -> {
+                        val old = (field.get(target) as? java.lang.ref.WeakReference<*>)?.get()
+                        if (old is android.app.Activity || field.name.contains("activity", true)) {
+                            field.set(target, java.lang.ref.WeakReference(activity))
+                        }
+                    }
+                    depth < 2 && !field.type.isPrimitive && !field.type.isArray -> {
+                        val value = runCatching { field.get(target) }.getOrNull()
+                        val name = value?.javaClass?.name.orEmpty()
+                        if (name.startsWith("com.github.catvod") || field.name.contains("spider", true) ||
+                            field.name.contains("guard", true) || field.name.contains("impl", true)
+                        ) bindObjectGraph(value!!.javaClass, value, activity, depth + 1, seen)
+                    }
+                }
+            }
+            c = c.superclass; level++
+        }
     }
 
     /** Older plugins keep their own Init singleton instead of consulting Spider.getActivity(). */
@@ -400,7 +476,11 @@ class JarSpiderLoader(
     fun injectPanCookie(site: Site, panId: String, cookie: String): Boolean {
         if (cookie.isBlank()) return false
         // 先走官方通道（插件自己的 Net CookieStore），失败再退回各家 setCookie / Pref。
-        runCatching { if (injectViaNet(site, panId, cookie)) return true }
+        // 官方 Net 通道写成功**不能短路**：真机实测该通道写入 1012 字符后，
+        // 插件解析仍报「还没有配置夸克 Cookie」，说明它读的不是 Net.CookieStore。
+        // 因此 Net / api setCookie / Pref 三级全写一遍（幂等、成本极低）。
+        var netOk = false
+        runCatching { netOk = injectViaNet(site, panId, cookie) }
             .onFailure { android.util.Log.i("NextMoviePan", "inject Net 异常: ${it.message}") }
         val apiNames = when (panId.lowercase()) {
             "quark" -> listOf("Quark")
@@ -433,7 +513,7 @@ class JarSpiderLoader(
                 val pref = Class.forName("com.github.catvod.utils.Pref", false, loader)
                 val put = pref.methods.firstOrNull { it.name == "putString" && it.parameterTypes.size == 2 }
                 if (put != null) {
-                    for (key in listOf("cookie_$panId", "cookie_${panId.lowercase()}", panId)) {
+                    for (key in listOf("cookie_$panId", "cookie_${panId.lowercase()}", panId, "${panId.lowercase()}_cookie", "api_${panId.lowercase()}")) {
                         runCatching { put.invoke(null, key, cookie) }
                     }
                     done = true
@@ -443,7 +523,18 @@ class JarSpiderLoader(
                 android.util.Log.i("NextMoviePan", "inject fail Pref: ${it.cause?.message ?: it.message}")
             }
         }
-        return done
+        android.util.Log.i("NextMoviePan", "inject all pan=$panId net=$netOk reflect=$done len=${cookie.length}")
+        return done || netOk
+    }
+
+    /** 播放前把本地已落库的网盘 Cookie 全量灌给当前插件实例（quark/uc/ali/baidu）。 */
+    fun injectAllPanCookies(site: Site) {
+        for (id in listOf("quark", "uc", "ali", "baidu")) {
+            val c = runCatching { com.nextmovie.core.pan.PanLogin.cookieFor(context, id) }.getOrNull().orEmpty()
+            if (c.isBlank()) continue
+            runCatching { injectPanCookie(site, id, c) }
+                .onFailure { android.util.Log.w("NextMoviePan", "injectAll $id 失败: " + it.message) }
+        }
     }
 
     fun proxy(site: Site, params: Map<String, String>): Array<*>? {
@@ -460,6 +551,61 @@ class JarSpiderLoader(
             failure = response.exceptionOrNull() ?: failure
         }
         if (failure != null) throw IllegalStateException("来源代理调用失败", failure)
+        return null
+    }
+
+    /**
+     * 全局 /proxy 路由：插件的 `do=pan&action=config` 配置页请求不带 site 参数，
+     * 必须由宿主反查「配置中心」那个插件实例去处理。优先命中有 PanConfig/配置中心 的站点。
+     */
+    fun proxyAny(params: Map<String, String>): Array<*>? {
+        // FongMi 的 /proxy 真相：Server 把请求交给 BaseLoader.proxy(params)，
+        // 后者默认走 JarLoader.proxy -> 插件里 `com.github.catvod.spider.Proxy` 的**静态** proxy(Map)。
+        // 这个静态方法在「加载 jar」阶段就被缓存，与站点是否已实例化无关，
+        // 所以配置页 /proxy?do=pan&action=config 不依赖「配置中心站点有没有被打开过」。
+        // 我们此前只在实例站点上找，必然 502。
+        val direct = runCatching { staticProxy(params) }.getOrNull()
+        if (direct != null) return direct
+
+        val candidates = sitesByKey.entries.mapNotNull { (key, site) -> instances[key]?.let { site } }
+            .sortedByDescending { site ->
+                site.api.contains("PanConfig", true) || site.name.contains("配置", true)
+            }
+        for (site in candidates) {
+            val response = runCatching { proxy(site, params) }.getOrNull()
+            if (response != null) {
+                android.util.Log.i("NextMovieProxyReq", "proxyAny hit site=${site.name}")
+                return response
+            }
+        }
+        android.util.Log.w(
+            "NextMovieProxyReq",
+            "proxyAny miss loaders=${classLoaders.size} instances=${candidates.size} do=" +
+                params["do"] + " action=" + params["action"]
+        )
+        return null
+    }
+
+    /** 顺序遍历所有已加载 jar 的 `com.github.catvod.spider.Proxy#proxy(Map)`（静态），返回首个非空。 */
+    @Synchronized
+    fun staticProxy(params: Map<String, String>): Array<*>? {
+        var lastError: Throwable? = null
+        for ((key, loader) in readyLoaders) {
+            val r = runCatching {
+                val cls = Class.forName("com.github.catvod.spider.Proxy", true, loader)
+                val m = cls.getMethod("proxy", Map::class.java)
+                m.invoke(null, HashMap(params)) as? Array<*>
+            }
+            val value = r.getOrNull()
+            if (value != null) {
+                android.util.Log.i("NextMovieProxyReq", "static proxy hit jar=$key len=${value.size} do=" + params["do"])
+                return value
+            }
+            r.exceptionOrNull()?.let { lastError = it }
+        }
+        if (lastError != null) {
+            android.util.Log.i("NextMovieProxyReq", "static proxy null, last=" + (lastError?.cause?.message ?: lastError?.message))
+        }
         return null
     }
 

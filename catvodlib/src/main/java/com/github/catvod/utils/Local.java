@@ -18,10 +18,13 @@ public final class Local {
     }
 
     public String get(String key) {
-        return getPrefs().getString(key(key), null);
+        String v = getPrefs().getString(key(key), null);
+        android.util.Log.i("NextMovieCanary", "Local.get key=" + key + " -> " + (v == null ? "null" : "len=" + v.length()));
+        return v;
     }
 
     public void set(String key, String value) {
+        android.util.Log.i("NextMovieCanary", "Local.set key=" + key + " len=" + (value == null ? 0 : value.length()));
         Json.strict(value);
         getPrefs().edit().putString(key(key), value).apply();
     }

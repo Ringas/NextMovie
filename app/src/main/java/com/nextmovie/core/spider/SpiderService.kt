@@ -116,6 +116,10 @@ class SpiderService : Service() {
         val engines = PluginRuntime.acquire(applicationContext)
         loader = engines.jar
         jsLoader = engines.js
+        // 9978 上的宿主代理要常驻一个「通用路由」：插件的配置中心页面是
+        // http://<lan>:9978/proxy?do=pan&action=config，由配置中心插件返回 HTML。
+        // 之前路由只在播放时临时激活，所以这个地址一直 502。
+        pluginProxy?.activate { params -> runCatching { loader.proxyAny(params) }.getOrNull() }
         android.util.Log.i("NextMovieTiming", "plugin-service-ready ${(System.nanoTime() - created) / 1_000_000}ms")
     }
 
@@ -202,6 +206,29 @@ class SpiderService : Service() {
         job.start()
     }
 
+
+    /** 调试用：插件解密段是运行时 defineClass 出来的，只有枚举已加载类才能看到它们的真实方法。 */
+    private fun dumpLoadedGuardClasses() {
+        val all = runCatching {
+            val m = android.os.Debug::class.java.getDeclaredMethod("getLoadedClasses")
+            m.isAccessible = true
+            m.invoke(null) as Array<*>
+        }.getOrNull().orEmpty()
+        android.util.Log.i("NextMovieCanary", "loaded-all=" + all.size)
+        val names = all.mapNotNull { (it as? Class<*>)?.name }
+        val interesting = names.filter { it.startsWith("com.github.catvod") || it.contains("Guard") || it.contains("wex") || it.contains("spider") }.sorted()
+        android.util.Log.i("NextMovieCanary", "loaded catvod classes=" + interesting.size)
+        for (n in interesting.take(120)) android.util.Log.i("NextMovieCanary", "cls " + n)
+        for (n in interesting) {
+            val cls = runCatching { Class.forName(n, false, javaClass.classLoader) }.getOrNull() ?: continue
+            val cookie = runCatching {
+                cls.declaredMethods.filter { it.name.contains("ookie", true) || it.name.contains("auth", true) }
+                    .map { it.name + "/" + it.parameterCount + "->" + it.returnType.simpleName }
+            }.getOrNull().orEmpty()
+            if (cookie.isNotEmpty()) android.util.Log.i("NextMovieCanary", "cookie-methods " + n + " " + cookie.joinToString())
+        }
+    }
+
     private fun handle(action: Int, args: Bundle, id: Int): Bundle {
         if (action == ACTION_PING) return okBundle(id, "pong")
         val siteJson = args.getString(KEY_SITE) ?: return errorBundle(id, "缺少站点信息")
@@ -214,8 +241,14 @@ class SpiderService : Service() {
         val spider = runBlocking { if (isJs) jsLoader.obtain(site) else loader.obtain(site) }
 
         android.util.Log.i("NextMovieTiming", "plugin-obtain action=$action ${(System.nanoTime() - loadStarted) / 1_000_000}ms")
+        if (action == ACTION_PLAY) runCatching { dumpLoadedGuardClasses() }
+            .onFailure { android.util.Log.w("NextMovieCanary", "dump classes failed: " + it) }
         // 只给「播放」挂本地 Go 代理：来源自己的接口（首页/详情/搜索）走直连，
         // 否则冷启动时代理还没热，所有站点请求都被代理排队拖慢（Marco 只在取直链时用代理）。
+        // 解析前先把落库的网盘 Cookie 灌进插件（Net/api/Pref 三级），否则夸克原画会直接抛
+        // 「还没有配置夸克 Cookie」。放在 prepareProxy 之前，保证代理启动时也拿得到。
+        if (!isJs && (action == ACTION_PLAY || action == ACTION_DETAIL)) runCatching { loader.injectAllPanCookies(site) }
+            .onFailure { android.util.Log.w("NextMoviePan", "injectAllPanCookies 失败: " + it.message) }
         if (!isJs && action == ACTION_PLAY) runCatching { loader.prepareProxy(site, pluginProxyPort()) }
             .onFailure { android.util.Log.w("NextMovieSpider", "prepareProxy 失败: " + it.message) }
 

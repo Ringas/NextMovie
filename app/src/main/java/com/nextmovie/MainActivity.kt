@@ -50,6 +50,8 @@ import com.nextmovie.ui.settings.SettingsScreen
 import com.nextmovie.ui.theme.NextMovieTheme
 import com.nextmovie.ui.theme.Tokens
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -171,6 +173,7 @@ private fun AppRoot(repo: AppRepository) {
     var panQrMsg by remember { mutableStateOf("") }
     var panQrBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var panQrRetry by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var panLoginJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     // 跨页面播放会话：Marco 的「退回详情页影片继续播」靠它把 ExoPlayer 留在进程里
     val playbackSession = remember { com.nextmovie.ui.player.PlaybackSession(context) }
     androidx.compose.runtime.DisposableEffect(Unit) { onDispose { playbackSession.release() } }
@@ -186,6 +189,11 @@ private fun AppRoot(repo: AppRepository) {
 
     // 冷启动时把上次保存的配置自动载入，否则每次重启都会停在「还没有导入数据源」
     LaunchedEffect(Unit) {
+        // 预热网盘登录态，但**不能等**：这是网络调用（要等 :spider 的 9978 起来），
+        // 放在启动路径上会白白拖慢冷启动（实测多 1–2 秒）。
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            runCatching { com.nextmovie.core.pan.PanBridge.refresh() }
+        }
         if (repo.currentSite == null && repo.configUrl().isNotBlank()) {
             val savedUrl = repo.configUrl()
             val configStarted = System.nanoTime()
@@ -240,9 +248,24 @@ private fun AppRoot(repo: AppRepository) {
         val retry = panQrRetry
         if (loginOk.isNotBlank() && retry != null) {
             panQrRetry = null
-            android.util.Log.i("NextMoviePan", "login-ok pan=$loginOk -> auto resume")
+            // 登录发生在 PluginActivity 进程，这里把磁盘上的新 Cookie 拉回本进程，否则 has() 仍是旧的
+            val fresh = com.nextmovie.core.pan.PanLogin.cookieFor(context, loginOk)
+            if (fresh.isNotBlank()) com.nextmovie.core.pan.PanLogin.persist(context, loginOk, fresh)
+            android.util.Log.i("NextMoviePan", "login-ok pan=$loginOk -> auto resume len=${fresh.length}")
             retry()
         }
+    }
+
+    // 调试入口：adb shell am start -n com.nextmovie/.MainActivity --es dbg_site 花卷 --es dbg_action quark
+    LaunchedEffect(Unit) {
+        val dbgAct = (context as? android.app.Activity)?.intent?.getStringExtra("dbg_site") ?: return@LaunchedEffect
+        val dbgAction = (context as? android.app.Activity)?.intent?.getStringExtra("dbg_action").orEmpty()
+        val dbgEntry = (context as? android.app.Activity)?.intent?.getStringExtra("dbg_entry")
+        android.util.Log.i("NextMoviePan", "dbg-launch site=$dbgAct action=$dbgAction")
+        kotlinx.coroutines.delay(1500)
+        val target = repo.sites.firstOrNull { it.name.equals(dbgAct, true) || it.key.equals(dbgAct, true) }
+        if (target == null) { android.util.Log.i("NextMoviePan", "dbg-site-missing $dbgAct"); return@LaunchedEffect }
+        accountLauncher.launch(PluginActivity.intent(context, target, entry = dbgEntry, action = dbgAction))
     }
 
     val site = repo.currentSite
@@ -284,33 +307,71 @@ private fun AppRoot(repo: AppRepository) {
         panQrRetry = retry
         panQrLabel = label
         panQrBitmap = null
-        panQrMsg = "正在获取「$label」登录二维码…"
+        panQrMsg = "正在向来源申请登录二维码…"
         panQrId = panId
-        com.nextmovie.core.pan.PanLogin.start(panId) { snap ->
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                if (panQrId != panId) return@post
-                panQrMsg = snap.message
-                if (snap.qr != null) panQrBitmap = snap.qr
-                when (snap.state) {
-                    com.nextmovie.core.pan.PanLogin.State.SUCCESS -> {
-                        com.nextmovie.core.pan.PanLogin.persist(context, panId, snap.cookie)
-                        android.util.Log.i("NextMoviePan", "qr-login-ok pan=$panId cookieLen=${snap.cookie.length}")
-                        Toast.makeText(context, "「$label」登录成功，继续播放", Toast.LENGTH_SHORT).show()
-                        panQrId = ""
-                        val next = panQrRetry
-                        panQrRetry = null
-                        scope.launch {
-                            repo.invalidateContent()
-                            kotlinx.coroutines.delay(250)
-                            next?.invoke()
-                        }
+        panLoginJob?.cancel()
+        // FongMi / Marco 同一套：二维码由插件自己的 pan 接口出（loginStart），登录态也由插件落库，
+        // 宿主只负责展示 + 轮询 + 扫完自动续播，不再自建 CAS token 码。
+        panLoginJob = scope.launch(Dispatchers.IO) {
+            var attempt = 0
+            while (isActive && panQrId == panId && attempt < 8) {
+                attempt++
+                val start = com.nextmovie.core.pan.PanBridge.loginStart(panId)
+                val qrUrl = start?.optString("qrUrl").orEmpty()
+                val taskId = start?.optString("taskId").orEmpty()
+                if (qrUrl.isBlank() || taskId.isBlank()) {
+                    panQrMsg = start?.optString("msg").orEmpty().ifBlank { "来源没有返回登录二维码" }
+                    delay(2500)
+                    continue
+                }
+                panQrBitmap = qrBitmap(qrUrl, 720)
+                panQrMsg = "打开「$label」App 扫一扫"
+                android.util.Log.i("NextMoviePan", "qr-start pan=$panId task=$taskId urllen=${qrUrl.length}")
+                var done = false
+                val deadline = System.currentTimeMillis() + 95_000
+                while (isActive && panQrId == panId && System.currentTimeMillis() < deadline) {
+                    delay(2_000)
+                    val poll = com.nextmovie.core.pan.PanBridge.loginPoll(panId, taskId)
+                    val st = poll?.optString("status").orEmpty()
+                    if (st == "success" || poll?.optBoolean("success") == true) { done = true; break }
+                    if (st == "error" || poll?.optBoolean("terminal") == true) {
+                        panQrMsg = poll?.optString("msg").orEmpty().ifBlank { "二维码已过期，正在刷新…" }
+                        android.util.Log.i("NextMoviePan", "qr-poll terminal pan=$panId $st")
+                        break
                     }
-                    com.nextmovie.core.pan.PanLogin.State.FAILED ->
-                        android.util.Log.i("NextMoviePan", "qr-login-fail pan=$panId ${snap.message}")
-                    else -> Unit
+                    if (st == "scanned" || st == "confirm") panQrMsg = "已扫码，请在手机上确认"
+                    // 兜底：来源自己落库后 status 会变成已配置，不只信 poll 文案
+                    if (com.nextmovie.core.pan.PanBridge.refresh()?.let { com.nextmovie.core.pan.PanBridge.has(panId) } == true) {
+                        done = true; break
+                    }
+                }
+                if (done || com.nextmovie.core.pan.PanBridge.has(panId)) {
+                    android.util.Log.i("NextMoviePan", "qr-login-ok pan=$panId")
+                    panQrMsg = "登录成功，正在续播…"
+                    delay(500)
+                    panQrId = ""
+                    val next = panQrRetry
+                    panQrRetry = null
+                    scope.launch {
+                        repo.invalidateContent()
+                        kotlinx.coroutines.delay(200)
+                        next?.invoke()
+                    }
+                    return@launch
                 }
             }
+            if (panQrId == panId) panQrMsg = "二维码没拿到或已过期，点「重新出码」再试"
         }
+    }
+
+    // 调试入口：直接走「未登录 → 弹码 → 轮询 → 续播」这条链，不用手动翻详情页
+    LaunchedEffect(Unit) {
+        val intent = (context as? android.app.Activity)?.intent ?: return@LaunchedEffect
+        val pan = intent.getStringExtra("dbg_panlogin") ?: return@LaunchedEffect
+        delay(1_200)
+        val target = repo.currentSite ?: repo.sites.firstOrNull() ?: return@LaunchedEffect
+        android.util.Log.i("NextMoviePan", "dbg-panlogin pan=$pan site=${target.key}")
+        askPanLogin(target, pan, null)
     }
 
     /** 把插件异常翻成人话，别再让用户对着「解析失败」猜。 */
@@ -351,7 +412,7 @@ private fun AppRoot(repo: AppRepository) {
         // 云盘线路 + 本机还没有该网盘 Cookie：不再白等 15s 解析，直接弹官方扫码，
         // 扫完自动回到这一集续播（闭环）。
         val panId = panOf(line.name).takeIf { line.isPanLine }
-        if (panId != null && !com.nextmovie.core.pan.PanLogin.has(context, panId)) {
+        if (panId != null && !com.nextmovie.core.pan.PanBridge.has(panId)) {
             android.util.Log.i("NextMoviePan", "pan-line needs login line=${line.name} pan=$panId")
             askPanLogin(activeSite, panId) {
                 playEpisode(vod, line, episode, startMs, source, queue, slots, slotIndex, attemptedSlots, onResolveFailure)
@@ -368,6 +429,7 @@ private fun AppRoot(repo: AppRepository) {
                 val result = try {
                     repo.preparePlayback(activeSite)
                     // 单条线路最多给 15s：插件连不上自己的网盘代理（ECONNREFUSED）时不要拖到用户以为死机
+                    android.util.Log.i("NextMovieDiag", "play-episode line=${line.name} url=${episode.url.take(300)}")
                     withTimeout(15_000) {
                         if (activeSite.isCms || activeSite.isJavaScript) repo.resolvePlay(activeSite, line.name, episode.url) { resolveStage = it }
                         else PluginPlaybackWindow.resolve(context) { repo.resolvePlay(activeSite, line.name, episode.url) { resolveStage = it } }
@@ -387,6 +449,7 @@ private fun AppRoot(repo: AppRepository) {
                     val reason = "line-play-fail site=${activeSite.key} line=${line.name} " +
                         "${e.javaClass.simpleName}: ${e.message.orEmpty().take(120)}"
                     android.util.Log.i("NextMovieTiming", reason)
+                    android.util.Log.i("NextMoviePlayTrace", "throwable", e)
                     val needsLogin = listOf("cookie", "登录", "auth", "网盘").any {
                         (e.message.orEmpty()).contains(it, ignoreCase = true)
                     }
@@ -564,7 +627,11 @@ private fun AppRoot(repo: AppRepository) {
                             .background(Tokens.Surface)
                             .tvClickable(onClick = {
                                 panQrId = ""
-                                site?.let { accountLauncher.launch(PluginActivity.intent(context, it, "", null)) }
+                                site?.let {
+                                    // 现在 /proxy?do=pan&action=config 由插件静态 proxy 真实提供（200），
+                                    // 网页登录就是插件自带的配置中心，扫不了码时可以进去手动登。
+                                    accountLauncher.launch(PluginActivity.intent(context, it, "", "panconfig"))
+                                }
                             }, corner = Tokens.Corner.pill)
                             .padding(horizontal = 14.dp, vertical = 8.dp)
                     ) { Text("网页登录", color = Tokens.Text, style = MaterialTheme.typography.labelMedium) }
@@ -795,4 +862,16 @@ private fun SetupHint(onOpenSettings: () -> Unit) {
             )
         }
     }
+}
+/** 把登录短链编成二维码位图（登录页是官方 su.quark.cn 短链，App 扫了才会认）。 */
+private fun qrBitmap(content: String, size: Int): android.graphics.Bitmap {
+    val matrix = com.google.zxing.qrcode.QRCodeWriter()
+        .encode(content, com.google.zxing.BarcodeFormat.QR_CODE, size, size)
+    val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+    val black = android.graphics.Color.BLACK
+    val white = android.graphics.Color.WHITE
+    for (x in 0 until size) for (y in 0 until size) {
+        bmp.setPixel(x, y, if (matrix.get(x, y)) black else white)
+    }
+    return bmp
 }

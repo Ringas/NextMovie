@@ -65,10 +65,58 @@ object PanLogin {
 
     fun providers(): List<Pair<String, String>> = providers.map { it.id to it.label }
 
-    /** 登录态是否已有 Cookie（夸克/UC 走宿主 prefs，插件会通过 HostCookies 读到）。 */
+    /** 登录态是否已有 Cookie（夸克/UC 走宿主 prefs，插件会通过 HostCookies 读到）。
+     *  注意：WebView 里的匿名态会给出 `__puus=AAAABBBBCCCC` 这类占位值，
+     *  它长得像 Cookie 但不是登录态，必须过滤，否则会误判"已登录"。 */
     fun has(context: android.content.Context, id: String): Boolean =
-        context.getSharedPreferences("nextmovie", android.content.Context.MODE_PRIVATE)
-            .getString("pan_cookie_$id", "").orEmpty().isNotBlank()
+        looksLoggedIn(id, cookieFor(context, id))
+
+    /**
+     * PluginActivity 跑在独立进程里，它写的 SharedPreferences 主进程读不到（进程内缓存）。
+     * 所以登录态以 files/cookie_<id>.txt 为准，prefs 只是给本进程用的副本。
+     */
+    fun cookieFor(context: android.content.Context, id: String): String {
+        val fromPrefs = context.getSharedPreferences("nextmovie", android.content.Context.MODE_PRIVATE)
+            .getString("pan_cookie_$id", "").orEmpty()
+        val fromFile = runCatching {
+            java.io.File(context.filesDir, "cookie_$id.txt").takeIf { it.exists() }?.readText().orEmpty()
+        }.getOrDefault("")
+        return when {
+            looksLoggedIn(id, fromFile) -> fromFile
+            looksLoggedIn(id, fromPrefs) -> fromPrefs
+            fromFile.isNotBlank() -> fromFile
+            else -> fromPrefs
+        }
+    }
+
+    /** 真登录态的 __puus/__pus 都很长；匿名占位值只有十来个字符。 */
+    fun looksLoggedIn(id: String, cookie: String): Boolean {
+        if (cookie.isBlank()) return false
+        if (id == "quark" || id == "uc") {
+            val puus = cookie.split(';').map { it.trim() }
+                .firstOrNull { it.startsWith("__puus=") }?.substringAfter('=').orEmpty()
+            return puus.length >= 40
+        }
+        return true
+    }
+
+    /** 把多份 Cookie 合并且丢掉占位 __puus：同名键保留更长的那份。 */
+    fun mergeCookies(vararg raws: String): String {
+        val map = LinkedHashMap<String, String>()
+        raws.filter { it.isNotBlank() }.forEach { raw ->
+            raw.split(';').forEach { part ->
+                val kv = part.trim()
+                if (kv.isBlank() || !kv.contains('=')) return@forEach
+                val key = kv.substringBefore('=')
+                val value = kv.substringAfter('=')
+                if (key == "__puus" && value.length < 40) return@forEach
+                val old = map[key]
+                if (old == null || value.length > old.length) map[key] = value
+            }
+        }
+        return map.entries.joinToString("; ") { "${it.key}=${it.value}" }
+    }
+
 
     /** 把扫码拿到的 Cookie 落到宿主存储：prefs（插件 HostCookies 实时读）+ files（兼容旧通道）。 */
     fun persist(context: android.content.Context, id: String, cookie: String) {

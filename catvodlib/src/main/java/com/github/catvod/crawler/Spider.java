@@ -43,10 +43,12 @@ public abstract class Spider implements AutoCloseable {
     }
 
     public String getToken() {
+        android.util.Log.i("NextMovieCanary", "Spider.getToken len=" + token.length());
         return token;
     }
 
     public void setToken(String token) {
+        android.util.Log.i("NextMovieCanary", "Spider.setToken len=" + (token == null ? 0 : token.length()));
         this.token = token == null ? "" : token;
     }
 
