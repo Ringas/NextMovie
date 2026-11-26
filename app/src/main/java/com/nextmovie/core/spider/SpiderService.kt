@@ -110,6 +110,9 @@ class SpiderService : Service() {
         super.onCreate()
         val created = System.nanoTime()
         android.util.Log.i("NextMovieTiming", "plugin-service-create")
+        // 宿主本地代理必须先于插件 init 就位：Guard 在 init 阶段就会探测代理端口，
+        // 探测失败会退回硬编码 9978 并把后续请求发到错误地址。
+        android.util.Log.i("NextMovieTiming", "plugin-proxy-port " + pluginProxyPort())
         val engines = PluginRuntime.acquire(applicationContext)
         loader = engines.jar
         jsLoader = engines.js

@@ -30,6 +30,64 @@ public abstract class Spider implements AutoCloseable {
     public Local local;
     public final Js js = new Js();
     private final Dialog dialog = new Dialog();
+    /** Marco 形态宿主会通过 initApi 注入 HTTP/代理出入口；插件侧按此拿 127.0.0.1:<port>。 */
+    private SpiderApi api;
+    private String token = "";
+
+    public void initApi(SpiderApi api) {
+        this.api = api;
+    }
+
+    public SpiderApi api() {
+        return api;
+    }
+
+    public String getToken() {
+        return token;
+    }
+
+    public void setToken(String token) {
+        this.token = token == null ? "" : token;
+    }
+
+    /**
+     * Marco 的 Spider.client()：共享客户端 + TLS 兼容 + DoH。Guard 类插件按这个入口发网盘请求，
+     * 缺失时会退回自带客户端（无 DoH / 严格证书链），在部分网络下直接卡到解析超时。
+     */
+    public static okhttp3.OkHttpClient client() {
+        return SharedClient.INSTANCE;
+    }
+
+    private static final class SharedClient {
+        static final okhttp3.OkHttpClient INSTANCE = build();
+
+        private static okhttp3.OkHttpClient build() {
+            okhttp3.OkHttpClient.Builder builder = com.github.catvod.net.OkHttp.client().newBuilder()
+                    .dns(com.github.catvod.net.OkHttp.dns())
+                    .followRedirects(true)
+                    .followSslRedirects(true)
+                    .retryOnConnectionFailure(true);
+            try {
+                javax.net.ssl.X509TrustManager trustAll = new javax.net.ssl.X509TrustManager() {
+                    public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType) {
+                    }
+
+                    public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String authType) {
+                    }
+
+                    public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+                        return new java.security.cert.X509Certificate[0];
+                    }
+                };
+                javax.net.ssl.SSLContext context = javax.net.ssl.SSLContext.getInstance("TLS");
+                context.init(null, new javax.net.ssl.TrustManager[]{trustAll}, new java.security.SecureRandom());
+                builder.sslSocketFactory(context.getSocketFactory(), trustAll)
+                        .hostnameVerifier((hostname, session) -> hostname != null && !hostname.isEmpty());
+            } catch (Exception ignored) {
+            }
+            return builder.build();
+        }
+    }
 
     public JSONObject dialog(JSONObject options) throws Exception {
         return dialog(options, null);
@@ -48,7 +106,9 @@ public abstract class Spider implements AutoCloseable {
     }
 
     public Activity getActivity() {
-        return Runtime.activity();
+        Activity activity = Runtime.activity();
+        if (activity == null) android.util.Log.w("NextMoviePan", "getActivity -> null (host Runtime empty)");
+        return activity;
     }
 
     public String proxyUrl() {
@@ -132,6 +192,13 @@ public abstract class Spider implements AutoCloseable {
 
     public Object[] proxy(Map<String, String> params) throws Exception {
         return new Object[]{404, "text/plain", new ByteArrayInputStream(new byte[0])};
+    }
+
+    public Object[] proxyLocal(Map<String, String> params) throws Exception {
+        return proxy(params);
+    }
+
+    public void cancelByTag() {
     }
 
     public String action(String action) throws Exception {

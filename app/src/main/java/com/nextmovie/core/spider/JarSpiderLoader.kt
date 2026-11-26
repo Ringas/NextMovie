@@ -230,6 +230,12 @@ class JarSpiderLoader(
         android.util.Log.i("NextMoviePlugin", "class=" + instance.javaClass.name + " init2=" + instance.javaClass.getMethod("init", Context::class.java, String::class.java).declaringClass.name + " init1=" + instance.javaClass.getMethod("init", Context::class.java).declaringClass.name)
         instance.siteKey = site.key
         instance.net = com.github.catvod.net.Net(com.nextmovie.core.pan.HostCookies(context), site.name)
+        // Marco 形态宿主：把 SpiderApi（本地代理地址 + 批量 HTTP）注入插件。
+        // 缺这层时 Guard 的网盘解析会探不到宿主端口、并退回无 DoH 的自带客户端。
+        runCatching {
+            instance.initApi(com.github.catvod.crawler.SpiderApi())
+            android.util.Log.i("NextMoviePan", "init-api port=" + com.github.catvod.Proxy.getPort())
+        }.onFailure { android.util.Log.w("NextMoviePan", "init-api failed: $it") }
         runCatching { syncCookiesToWebView(context) }
         runCatching { dumpDexPaths(site, instance.javaClass.classLoader) }
         try {

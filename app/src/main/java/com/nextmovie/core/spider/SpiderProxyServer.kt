@@ -18,7 +18,19 @@ import java.util.concurrent.Executors
  * - rewrite 仍只改写 legacy 9978–9999 的 `/proxy` 查询接口，不碰插件自有 `/proxy/play` 端口
  */
 class SpiderProxyServer : java.io.Closeable {
-    private val server = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
+    // Guard 插件在内部把「宿主本地代理」写死为 9978（FongMi / Marco 的宿主端口），
+    // 只有真正监听 9978 时它才会把分片请求发到宿主；否则插件自带的回环请求全部落空。
+    private val server: ServerSocket = run {
+        val addr = InetAddress.getByName("127.0.0.1")
+        val fixed = runCatching { ServerSocket(9978, 16, addr) }.getOrNull()
+        if (fixed != null) {
+            android.util.Log.i("NextMovieTiming", "proxy-fixed-port 9978")
+            fixed
+        } else {
+            android.util.Log.w("NextMovieTiming", "proxy-fixed-port 9978 busy, fallback random")
+            ServerSocket(0, 16, addr)
+        }
+    }
     private val pool = Executors.newFixedThreadPool(4)
     private val sockets = java.util.concurrent.ConcurrentHashMap.newKeySet<Socket>()
     @Volatile private var route: ((Map<String, String>) -> Array<*>?)? = null
@@ -132,6 +144,10 @@ class SpiderProxyServer : java.io.Closeable {
         val first = line().split(' ')
         if (first.size < 2) return
         val method = first[0]
+        runCatching {
+            android.util.Log.i("NextMovieProxyReq", "in $method path=" + first[1].substringBefore('?').take(80) +
+                " qlen=" + first[1].length + " route=" + (route != null))
+        }
         val params = LinkedHashMap<String, String>()
         val uri = runCatching { URI(first[1]) }.getOrNull() ?: return
         uri.rawQuery?.split('&')?.forEach { pair ->
