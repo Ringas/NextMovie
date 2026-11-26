@@ -59,6 +59,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var repo: AppRepository
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        com.github.catvod.Runtime.setActivity { this }
         super.onCreate(savedInstanceState)
         repo = AppRepository(applicationContext)
         // Android can start the isolated process while Compose and the configuration load.

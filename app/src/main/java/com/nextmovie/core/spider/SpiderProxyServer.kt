@@ -24,6 +24,11 @@ class SpiderProxyServer : java.io.Closeable {
     @Volatile private var route: ((Map<String, String>) -> Array<*>?)? = null
 
     init {
+        // 让 ported catvod 宿主层的 Spider.proxyUrl() / Proxy.getUrl() 指向本服务，
+        // 否则插件拿到 http://127.0.0.1:-1/proxy 这类无效地址，网盘解析会整段超时。
+        runCatching { com.github.catvod.Proxy.set(server.localPort) }
+            .onFailure { android.util.Log.w("NextMovieTiming", "Proxy.set failed: $it") }
+        android.util.Log.i("NextMovieTiming", "proxy-port ${server.localPort}")
         Thread({
             while (!server.isClosed) {
                 val socket = runCatching { server.accept() }.getOrNull() ?: break

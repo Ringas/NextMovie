@@ -229,7 +229,7 @@ class JarSpiderLoader(
         initialized.add(jarFile.absolutePath)
         android.util.Log.i("NextMoviePlugin", "class=" + instance.javaClass.name + " init2=" + instance.javaClass.getMethod("init", Context::class.java, String::class.java).declaringClass.name + " init1=" + instance.javaClass.getMethod("init", Context::class.java).declaringClass.name)
         instance.siteKey = site.key
-        instance.net = com.github.catvod.net.Net(com.github.catvod.net.HostCookies(context), site.name)
+        instance.net = com.github.catvod.net.Net(com.nextmovie.core.pan.HostCookies(context), site.name)
         runCatching { syncCookiesToWebView(context) }
         runCatching { dumpDexPaths(site, instance.javaClass.classLoader) }
         try {

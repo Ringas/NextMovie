@@ -7,6 +7,7 @@ import android.webkit.CookieManager
 class NextMovieApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        com.github.catvod.Runtime.set(this)
         listOf("play-raw.txt", "detail-raw.txt").forEach { java.io.File(filesDir, it).delete() }
         syncPanCookiesToWebView()
     }

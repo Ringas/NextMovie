@@ -92,6 +92,7 @@ dependencies {
     implementation(libs.androidx.media3.exoplayer.dash)
     implementation(libs.androidx.media3.datasource.okhttp)
     implementation(libs.okhttp)
+    implementation(project(":catvodlib"))
     implementation("com.google.zxing:core:3.5.3")
     // `.js` 站点宿主：TVBox 生态里约 10% 的站点是 JS 脚本，需要在本地跑 JS
     implementation("io.github.taoweiji.quickjs:quickjs-android:1.4.6")
