@@ -1,0 +1,7 @@
+{
+  "versionCode": 42,
+  "versionName": "0.6.26-dev",
+  "notes": "顶栏改为 D+B 融合（NEXT 字标 / 文字导航 / 站点·换源·设置）；首页去掉重复站点行",
+  "apk": "https://github.com/Ringas/NextMovie/releases",
+  "page": "https://github.com/Ringas/NextMovie/releases"
+}

@@ -28,8 +28,15 @@ import java.util.concurrent.TimeUnit
  */
 object AppUpdate {
 
-    /** 默认清单地址：与订阅同域，方便一起托管。 */
-    const val DEFAULT_MANIFEST = "https://9280.kstore.vip/nextmovie-version.json"
+    /**
+     * 清单地址（按顺序尝试）：
+     * 1) jsDelivr 镜像的 GitHub 仓库文件——仓库公开，推送即发布，国内可直连；
+     * 2) 9280 订阅同域路径——留作自有托管位，后台上传后自动生效。
+     */
+    val DEFAULT_MANIFESTS = listOf(
+        "https://cdn.jsdelivr.net/gh/Ringas/NextMovie@main/docs/update/nextmovie-version.json",
+        "https://9280.kstore.vip/nextmovie-version.json",
+    )
 
     data class Info(
         val versionCode: Int,
@@ -53,7 +60,21 @@ object AppUpdate {
             .build()
     }
 
-    suspend fun check(currentVersionCode: Int, manifestUrl: String = DEFAULT_MANIFEST): Result =
+    suspend fun check(
+        currentVersionCode: Int,
+        manifestUrl: String? = null,
+    ): Result = withContext(Dispatchers.IO) {
+        val candidates = listOfNotNull(manifestUrl) + DEFAULT_MANIFESTS
+        var last: Result = Result.Failed("检查失败：没有可用清单地址")
+        for (url in candidates.distinct()) {
+            val r = fetchOne(currentVersionCode, url)
+            if (r !is Result.Failed) return@withContext r
+            last = r
+        }
+        last
+    }
+
+    private suspend fun fetchOne(currentVersionCode: Int, manifestUrl: String): Result =
         withContext(Dispatchers.IO) {
             try {
                 val request = Request.Builder()
