@@ -7,6 +7,16 @@ import android.webkit.CookieManager
 class NextMovieApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        android.util.Log.i("NextMovieTiming", "app-oncreate")
+        runCatching {
+            val info = packageManager.getPackageInfo(packageName, 0)
+            com.nextmovie.core.log.AppLog.record(
+                "app",
+                "启动 ${info.versionName}(${androidx.core.content.pm.PackageInfoCompat.getLongVersionCode(info)}) " +
+                    "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · Android ${android.os.Build.VERSION.RELEASE} · " +
+                    android.os.Build.SUPPORTED_ABIS.firstOrNull()
+            )
+        }
         com.github.catvod.Runtime.set(this)
         // 插件扫码登录走 Runtime.dialog(options, callback)（FongMi 的 SpiderDialog）：
         // 宿主不装这个 handler，插件弹框直接失败，action 只回 "{}"。

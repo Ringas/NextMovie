@@ -110,9 +110,12 @@ fun HomeScreen(
     val initialSnapshot = remember(site.runtimeKey) { kotlinx.coroutines.CompletableDeferred<List<Vod>?>() }
     LaunchedEffect(site.runtimeKey) { initialSnapshot.complete(repo.cachedHome(site)) }
     val backgroundReady = remember(site.runtimeKey) { kotlinx.coroutines.CompletableDeferred<Unit>() }
+    // 只负责「把插件连上」，不占首页渲染：原来这里 delay(800) 再 await 绑定，
+    // 冷启动白白多等近 1 秒。绑服务放后台，首页立刻先用快照出图。
     LaunchedEffect(site.runtimeKey) {
-        repo.connectPluginHost(site)
-        if (initialSnapshot.await() != null) delay(800)
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            runCatching { repo.connectPluginHost(site) }
+        }
         backgroundReady.complete(Unit)
     }
     LaunchedEffect(site.runtimeKey) {
@@ -265,7 +268,7 @@ fun HomeScreen(
     Column(
         Modifier
             .fillMaxSize()
-            .padding(start = 20.dp, end = 32.dp, top = 20.dp, bottom = 16.dp),
+            .padding(start = 20.dp, end = 32.dp, top = 12.dp, bottom = 12.dp),
     ) {
         // —— 顶栏：站点名 + 快捷操作 ——
         Row(
@@ -275,9 +278,10 @@ fun HomeScreen(
         ) {
             Column(Modifier.weight(1f)) {
                 Text(
-                    text = site.name.ifBlank { "NextMovie" },
+                    text = site.name.filter { it.code in 0x4E00..0x9FFF }.take(4)
+                        .ifBlank { site.name.ifBlank { "NextMovie" } },
                     color = Tokens.Text,
-                    fontSize = 26.sp,
+                    fontSize = 23.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -287,7 +291,7 @@ fun HomeScreen(
                         loading -> "加载中… ${loadSecs}s"
                         error != null -> "加载失败"
                         display.isEmpty() -> "暂无内容"
-                        else -> "${display.size} 部 · 遥控器确认打开"
+                        else -> "${display.size} 部影片"
                     },
                     color = Tokens.TextFaint,
                     fontSize = 13.sp,
@@ -297,22 +301,14 @@ fun HomeScreen(
                 text = "换源",
                 glass = true,
                 horizontalPadding = 16.dp,
-                verticalPadding = 10.dp,
+                verticalPadding = 9.dp,
                 onClick = {
                     if (android.os.SystemClock.elapsedRealtime() - pickerClosedAt > 250L) sitePicker = true
                 }
             )
-            TvPill(text = "搜索", glass = true, horizontalPadding = 16.dp, verticalPadding = 10.dp, onClick = onSearch)
-            TvPill(
-                text = "刷新",
-                glass = true,
-                horizontalPadding = 16.dp,
-                verticalPadding = 10.dp,
-                onClick = { reloadTick += 1 }
-            )
         }
 
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(9.dp))
 
         // —— 分类条 ——
         if (cats.isNotEmpty()) {
@@ -326,9 +322,10 @@ fun HomeScreen(
                     TvPill(
                         text = name,
                         selected = selected,
+                        quietSelected = true,
                         glass = !selected,
-                        horizontalPadding = 18.dp,
-                        verticalPadding = 10.dp,
+                        horizontalPadding = 16.dp,
+                        verticalPadding = 8.dp,
                         onClick = {
                             tab = index
                             onTabChanged(index)
@@ -483,6 +480,10 @@ private fun EmptyStage(siteReason: String?, onOpenSettings: () -> Unit) {
     }
 }
 
+/** 站点名普遍是「🐮【免费分享】🐮」这类装饰串，弹窗里只留 2–6 个汉字才认得出 */
+private fun siteLabel(name: String): String =
+    name.filter { it.code in 0x4E00..0x9FFF }.take(6).ifBlank { name.take(8) }
+
 @Composable
 private fun SitePickerDialog(
     sites: List<Site>,
@@ -493,8 +494,8 @@ private fun SitePickerDialog(
     Dialog(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
-                .width(720.dp)
-                .height(520.dp)
+                .width(940.dp)
+                .height(530.dp)
                 .clip(RoundedCornerShape(20.dp))
                 .background(Tokens.PanelSolid)
                 .border(1.dp, Tokens.StrokeStrong, RoundedCornerShape(20.dp))
@@ -517,20 +518,28 @@ private fun SitePickerDialog(
             LazyVerticalGrid(
                 columns = GridCells.Fixed(3),
                 state = gridState,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier.fillMaxSize().mouseWheel(gridState),
             ) {
                 itemsIndexed(sites, key = { _, s -> s.key }) { _, s ->
                     TvPill(
-                        text = s.name,
                         glass = true,
                         selected = s.key == currentKey,
+                        quietSelected = true,
                         enabled = s.isPlayable,
-                        horizontalPadding = 18.dp,
-                        verticalPadding = 14.dp,
+                        horizontalPadding = 10.dp,
+                        verticalPadding = 10.dp,
                         onClick = { onPick(s) },
-                    )
+                    ) {
+                        // 站名普遍很长，小一号字才放得下 5–6 个汉字而不被省略号吃掉
+                        androidx.compose.material3.Text(
+                            text = siteLabel(s.name),
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         }

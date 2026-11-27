@@ -1,9 +1,11 @@
 package com.nextmovie.ui.settings
 
 import android.content.Context
+import android.os.Build
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -44,6 +47,9 @@ import androidx.compose.ui.Modifier
 import com.nextmovie.ui.common.TvAction
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
+import com.nextmovie.ui.common.tvClickable
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -54,6 +60,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nextmovie.core.AppRepository
+import com.nextmovie.core.log.AppLog
+import com.nextmovie.core.update.AppUpdate
 import com.nextmovie.ui.player.engine.DecodeMode
 import com.nextmovie.ui.player.engine.DecoderProbe
 import com.nextmovie.ui.player.engine.NmRenderersFactory
@@ -61,6 +69,7 @@ import com.nextmovie.ui.player.engine.PlayerEngineType
 import com.nextmovie.ui.player.engine.PlayerPrefs
 import com.nextmovie.ui.player.PlaybackSession
 import com.nextmovie.core.config.Site
+import com.nextmovie.ui.common.AutoFocusOnEnter
 import com.nextmovie.ui.common.BrandLogo
 import com.nextmovie.ui.common.GlassCard
 import com.nextmovie.ui.common.TvPill
@@ -87,124 +96,282 @@ private enum class Section(val title: String, val caption: String, val icon: Ima
     Version("关于", "版本与快捷键", Icons.Filled.Info)
 }
 
+/**
+ * 设置首页 = 一屏列表（Apple TV 式），只保留会改变观看体验的开关；
+ * 订阅地址、海报解析、网络、备份这类「低频且读盘」的项收进二级页。
+ *
+ * 相对上一版的取舍：
+ *  - 删掉整组「外观（柔光主题 / 强度 / 取色联动）」：装饰性参数对观影无收益，还掉帧；
+ *  - 删掉「网盘入口」这类只陈述状态的死信息（网盘页已经有）；
+ *  - 「备份 / WebDAV」从主列表降到二级页，主列表只看四项数字；
+ *  - 「关于」从独立分组变成列表末尾，版本与开源声明直接一行显示。
+ */
+private enum class SettingsPage(val title: String) {
+    Home("设置"),
+    Sources("订阅与备份"),
+    Posters("海报与解析"),
+    Network("网络"),
+    Data("数据与缓存"),
+    About("关于"),
+    Logs("运行日志")
+}
+
 @Composable
 fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -> Unit) {
-    var section by remember { mutableStateOf(Section.Sources) }
     val context = LocalContext.current
+    var page by remember { mutableStateOf(SettingsPage.Home) }
 
-    Row(
+    Column(
         Modifier
             .fillMaxSize()
             .onPreviewKeyEvent { e ->
-                val digit = TvKeys.sectionDigit(e)
-                if (digit != null && digit in Section.entries.indices) {
-                    section = Section.entries[digit]
+                if (TvKeys.isBackUp(e)) {
+                    if (page != SettingsPage.Home) {
+                        page = SettingsPage.Home
+                    } else {
+                        onBack()
+                    }
                     true
-                } else if (TvKeys.isBackUp(e)) {
-                    onBack(); true
                 } else false
             }
+            .padding(start = 56.dp, end = 56.dp, top = 34.dp)
     ) {
+        if (page == SettingsPage.Home) {
+            SettingsHome(repo) { page = it }
+        } else {            Row(verticalAlignment = Alignment.CenterVertically) {
+                TvPill("‹ 设置", glass = true, autofocus = true, autofocusKey = page, onClick = { page = SettingsPage.Home })
+                Spacer(Modifier.width(18.dp))
+                Text(page.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(16.dp))
             Column(
                 Modifier
-                    .width(328.dp)
                     .fillMaxSize()
-                    .padding(start = 56.dp, top = 44.dp, bottom = 40.dp, end = 24.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(bottom = 44.dp)
             ) {
-                Text("系统设置", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(6.dp))
-                Text("方向键切换 · 确认进入 · 键盘 1–6 跳段 · Esc 返回", color = Tokens.TextFaint, fontSize = 13.sp)
-                Spacer(Modifier.height(18.dp))
-                val first = remember { FocusRequester() }
-                Column(
-                    Modifier
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState())
-                ) {
-                Section.entries.forEachIndexed { index, item ->
-                    TvPill(
-                        modifier = if (index == 0) Modifier.focusRequester(first) else Modifier,
-                        selected = section == item,
-                        autofocus = index == 0,
-                        borderRadius = 14.dp,
-                        horizontalPadding = 18.dp,
-                        verticalPadding = 14.dp,
-                        onClick = { section = item }
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                "${index + 1}",
-                                color = if (section == item) Tokens.Accent else Tokens.TextGhost,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.width(18.dp)
-                            )
-                            Icon(
-                                item.icon,
-                                null,
-                                tint = if (section == item) Color.White else Tokens.TextDim,
-                                modifier = Modifier.size(17.dp)
-                            )
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text(
-                                    item.title,
-                                    color = if (section == item) Color.White else Tokens.TextDim,
-                                    fontSize = 17.sp,
-                                    fontWeight = if (section == item) FontWeight.SemiBold else FontWeight.Medium
-                                )
-                                Text(
-                                    item.caption,
-                                    color = Tokens.TextGhost,
-                                    fontSize = 11.sp,
-                                    maxLines = 1
-                                )
-                            }
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                }
-                }
-                Spacer(Modifier.height(14.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    BrandLogo(iconSize = 30.dp, fontSize = 17f)
-                    Spacer(Modifier.width(12.dp))
-                    Text(versionLabel(context), color = Tokens.TextFaint, fontSize = 12.5.sp)
+                when (page) {
+                    SettingsPage.Sources -> SourcesCard(repo, onConfigLoaded)
+                    SettingsPage.Posters -> PostersCard(repo)
+                    SettingsPage.Network -> NetworkCard(repo)
+                    SettingsPage.Data -> StorageCard(repo)
+                    SettingsPage.About -> AboutCard(context, repo, onOpenLogs = { page = SettingsPage.Logs })
+                    SettingsPage.Logs -> LogsPage()
+                    SettingsPage.Home -> Unit
                 }
             }
+        }
+    }
+}
 
-            Column(
-                Modifier
-                    .weight(1f)
-                    .fillMaxSize()
-                    .padding(end = 56.dp, top = 44.dp)
-            ) {
-                Column(
-                    Modifier
-                        .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
-                        .padding(bottom = 44.dp)
-                ) {
-                    when (section) {
-                        Section.Sources -> {
-                            SourcesCard(repo, onConfigLoaded)
-                            Spacer(Modifier.height(16.dp))
-                            PostersCard(repo)
-                            Spacer(Modifier.height(16.dp))
-                            NetworkCard(repo)
-                        }
-                        Section.Playback -> PlaybackCard(repo)
-                        Section.Appearance -> AppearanceCard()
-                        Section.Connect -> {
-                            NetdiskCard(repo)
-                            Spacer(Modifier.height(16.dp))
-                            WebdavCard(repo)
-                        }
-                        Section.Backup -> StorageCard(repo)
-                        Section.Version -> VersionCard(context, repo)
+@Composable
+private fun SettingsHome(repo: AppRepository, onOpen: (SettingsPage) -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var autoNext by remember { mutableStateOf(repo.autoNext) }
+    var decodeMode by remember { mutableStateOf(PlayerPrefs.decodeMode(context)) }
+    var autoSoft by remember { mutableStateOf(PlayerPrefs.autoSoftOnDecodeError(context)) }
+    var autoLine by remember { mutableStateOf(PlayerPrefs.autoLineOnError(context)) }
+    var favCount by remember { mutableStateOf(repo.favorites.list().size) }
+    var hisCount by remember { mutableStateOf(repo.history.list().size) }
+    var cacheBytes by remember { mutableStateOf(repo.posterCacheBytes()) }
+    val site = repo.currentSite
+    val firstRowFocus = remember { FocusRequester() }
+    var firstRowFocused by remember { mutableStateOf(false) }
+    // 顶栏会先把焦点揽走，单次 requestFocus 会被覆盖；AutoFocusOnEnter 按时间点重试到真的落地
+    AutoFocusOnEnter(firstRowFocus) { firstRowFocused }
+    val siteName = site?.name?.filter { it.code in 0x4E00..0x9FFF }?.take(4)?.ifBlank { site.name } ?: "未选择"
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(bottom = 44.dp)
+    ) {
+        Text("设置", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(6.dp))
+        Text("只留下会改变观影体验的开关；其余收进二级页", color = Tokens.TextFaint, fontSize = 13.sp)
+        Spacer(Modifier.height(22.dp))
+
+        // —— 播放 ——
+        SettingsGroup("播放") {
+            SettingsRow(
+                title = "自动连播下一集",
+                subtitle = "播完 5 秒倒计时后自动进下一集",
+                value = if (autoNext) "开" else "关",
+                focusRequester = firstRowFocus,
+                onFocusUpdate = { firstRowFocused = it },
+                onClick = { autoNext = !autoNext; repo.setAutoNext(autoNext) }
+            )
+            SettingsRow(
+                title = "解码方式",
+                subtitle = "片源花屏、黑屏时再动它",
+                value = decodeMode.label,
+                onClick = {
+                    val next = when (decodeMode) {
+                        DecodeMode.AUTO -> DecodeMode.HARD
+                        DecodeMode.HARD -> DecodeMode.SOFT
+                        DecodeMode.SOFT -> DecodeMode.AUTO
                     }
+                    decodeMode = next
+                    PlayerPrefs.setDecodeMode(context, next)
+                }
+            )
+            SettingsRow(
+                title = "解码失败自动切软解",
+                subtitle = "硬解失败时重建播放器重试",
+                value = if (autoSoft) "开" else "关",
+                onClick = { autoSoft = !autoSoft; PlayerPrefs.setAutoSoftOnDecodeError(context, autoSoft) }
+            )
+            SettingsRow(
+                title = "失败自动换线路",
+                subtitle = "取流失败时切到下一条聚合线路",
+                value = if (autoLine) "开" else "关",
+                onClick = { autoLine = !autoLine; PlayerPrefs.setAutoLineOnError(context, autoLine) }
+            )
+        }
+
+        // —— 片源 ——
+        SettingsGroup("片源") {
+            SettingsRow(
+                title = "当前站点",
+                subtitle = "换源后首页即刻按新站点聚合",
+                value = siteName,
+                chevron = true,
+                onClick = { onOpen(SettingsPage.Sources) }
+            )
+            SettingsRow(
+                title = "订阅与备份",
+                subtitle = "载入 TVBox / CatVod 配置，导出或恢复备份",
+                value = "管理",
+                chevron = true,
+                onClick = { onOpen(SettingsPage.Sources) }
+            )
+            SettingsRow(
+                title = "海报与解析",
+                subtitle = "源图缺失时用 B站 / TMDB 兜底补图",
+                value = "3 项",
+                chevron = true,
+                onClick = { onOpen(SettingsPage.Posters) }
+            )
+            SettingsRow(
+                title = "网络与 DNS",
+                subtitle = "默认智能解析，某些源需要改这里",
+                value = "自动",
+                chevron = true,
+                onClick = { onOpen(SettingsPage.Network) }
+            )
+        }
+
+        // —— 数据 ——
+        SettingsGroup("数据") {
+            SettingsRow(
+                title = "播放记录",
+                subtitle = "按片名去重，换线路不会重复记账",
+                value = "$hisCount 条",
+                chevron = true,
+                onClick = { onOpen(SettingsPage.Data) }
+            )
+            SettingsRow(
+                title = "收藏",
+                subtitle = "长按 OK 可加入收藏",
+                value = "$favCount 部",
+                chevron = true,
+                onClick = { onOpen(SettingsPage.Data) }
+            )
+            SettingsRow(
+                title = "海报缓存",
+                subtitle = "占空间时清一次即可，会自动重建",
+                value = formatBytes(cacheBytes),
+                chevron = true,
+                onClick = {
+                    scope.launch { repo.clearPosterCache(); cacheBytes = repo.posterCacheBytes() }
+                }
+            )
+        }
+
+        // —— 关于 ——
+        SettingsGroup("关于") {
+            SettingsRow(
+                title = "版本",
+                subtitle = "只做播放器，不内置任何源与解析规则",
+                value = versionLabel(context),
+                chevron = true,
+                onClick = { onOpen(SettingsPage.About) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsGroup(title: String, content: @Composable () -> Unit) {
+    Text(
+        title,
+        color = Color(0x8AFFFFFF),
+        fontSize = 12.5.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.padding(start = 4.dp, top = 6.dp, bottom = 6.dp)
+    )
+    Column(Modifier.widthIn(max = 760.dp).fillMaxWidth()) { content() }
+    Spacer(Modifier.height(18.dp))
+}
+
+@Composable
+private fun SettingsRow(
+    title: String,
+    subtitle: String,
+    value: String,
+    chevron: Boolean = false,
+    focusRequester: FocusRequester? = null,
+    onFocusUpdate: ((Boolean) -> Unit)? = null,
+    onClick: () -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (focused) Color(0x26FFFFFF) else Color.Transparent)
+            .border(if (focused) 1.dp else 0.dp, if (focused) Color(0x66FFFFFF) else Color.Transparent, RoundedCornerShape(12.dp))
+            .onFocusChanged { focused = it.isFocused; onFocusUpdate?.invoke(it.isFocused) }
+            // 设置列表不放大：聚焦靠底色+描边足够，1.04 倍缩放会把行尾的值挤出裁切边界
+            .tvClickable(showRing = false, scaleOnFocus = 1f, corner = 12.dp, onClick = onClick)
+            .heightIn(min = 54.dp)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+    ) {
+        Box(Modifier.weight(1f)) {
+            Column(Modifier.padding(bottom = 6.dp)) {
+                Text(title, color = Color.White, fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold)
+                // 说明只在聚焦时出现：一屏能排下 4 组 12 行，扫视更快
+                if (focused) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(subtitle, color = Color(0x8AFFFFFF), fontSize = 11.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
+            // 行尾发丝线：一屏 4 组 12 行也能看清分组与边界
+            Box(
+                Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(Color(0x12FFFFFF))
+            )
+        }
+        if (value.isNotBlank()) {
+            Spacer(Modifier.width(12.dp))
+            Text(
+                value,
+                color = if (focused) Color.White else Color(0xB3FFFFFF),
+                fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                maxLines = 1
+            )
+        }
+        if (chevron) {
+            Spacer(Modifier.width(10.dp))
+            Text("›", color = Color(0x66FFFFFF), fontSize = 18.sp)
+        }
     }
 }
 
@@ -373,7 +540,8 @@ private fun SourcesCard(repo: AppRepository, onConfigLoaded: () -> Unit) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     val active = address == repo.configUrl()
                     val label = if (address.startsWith("{")) "内嵌 JSON" else address.take(64)
-                    TvPill(label, selected = active, enabled = !busy && !active, onClick = {
+                    // 已生效的那条只用「✓ + 淡描边」表示，不再整颗蓝底胶囊（那会让它看着像按钮）
+                    TvPill((if (active) "✓ " else "") + label, glass = true, enabled = !busy && !active, onClick = {
                         url = address
                         load(address)
                     })
@@ -394,7 +562,10 @@ private fun SourcesCard(repo: AppRepository, onConfigLoaded: () -> Unit) {
         Text("当前站点", color = Tokens.TextDim, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(10.dp))
         Text(
-            repo.currentSite?.let { it.name + (if (it.isSpider) " · 插件" else " · 接口") } ?: "未选择",
+            repo.currentSite?.let {
+                val clean = it.name.filter { ch -> ch.code in 0x4E00..0x9FFF }.take(6).ifBlank { it.name.take(8) }
+                "$clean · " + (if (it.isSpider) "插件来源" else "接口来源")
+            } ?: "未选择",
             color = Color.White,
             fontSize = 16.sp
         )
@@ -587,7 +758,7 @@ private fun NetdiskCard(repo: AppRepository) {
         title = "4K 网盘",
         subtitle = "网盘账号与直链都由来源插件托管，本机不保存任何凭据"
     ) {
-        InfoRow("当前来源", site?.name ?: "未选择")
+        InfoRow("当前来源", site?.name?.filter { it.code in 0x4E00..0x9FFF }?.take(4)?.ifBlank { site?.name ?: "未选择" } ?: "未选择")
         Spacer(Modifier.height(10.dp))
         InfoRow("网盘入口", if (site?.isSpider == true) "可用（插件账户页面）" else "当前来源不提供")
         Spacer(Modifier.height(16.dp))
@@ -781,33 +952,6 @@ private fun PlaybackCard(repo: AppRepository) {
             PlayerPrefs.setAutoLineOnError(context, it)
         }
         Spacer(Modifier.height(18.dp))
-        HLine()
-        Spacer(Modifier.height(16.dp))
-        DecodeProbeBlock()
-        Spacer(Modifier.height(18.dp))
-        HLine()
-        Spacer(Modifier.height(16.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("源预热", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    if (warmed) "已在后台预热当前站点，点开详情更快" else "提前下载插件 jar 并跑 Init，减少详情等待",
-                    color = Tokens.TextFaint,
-                    fontSize = 13.sp
-                )
-            }
-            TvPill(
-                text = if (warmed) "已预热" else "立即预热",
-                glass = true,
-                enabled = !warmed,
-                onClick = {
-                    repo.prewarmCurrentSite("manual")
-                    warmed = true
-                }
-            )
-        }
-        Spacer(Modifier.height(18.dp))
         Text(
             "线路聚合：详情页按连通性与分辨率排序多线路；播放器内可换源。格式支持 HLS / DASH / 直链。",
             color = Tokens.TextFaint,
@@ -856,18 +1000,30 @@ private fun StorageCard(repo: AppRepository) {
     }
 }
 
-/* ---------------- 版本与更新 ---------------- */
+/* ---------------- 关于 / 更新 / 日志 ---------------- */
 
+/**
+ * 关于页：电视端的「关于我」不该只有一行版本号。
+ *
+ * 这里回答四件用户真的会问的事：
+ *  1. 装的是哪一版、在什么设备上跑（排障第一句话）；
+ *  2. 有没有新版本（我们不发商店，只能自查）；
+ *  3. 出问题了怎么看日志（不用连 adb）；
+ *  4. 用了谁的开源代码（GPL 要求可查）。
+ */
 @Composable
-private fun VersionCard(context: Context, repo: AppRepository) {
+private fun AboutCard(context: Context, repo: AppRepository, onOpenLogs: () -> Unit) {
     val scope = rememberCoroutineScope()
     var snapshotFresh by remember { mutableStateOf<Boolean?>(null) }
-    GlassCard(
-        title = "关于",
-        subtitle = "版本、开源说明与快捷键"
-    ) {
-        InfoRow("版本", versionLabel(context))
-        Spacer(Modifier.height(12.dp))
+    var checking by remember { mutableStateOf(false) }
+    var update by remember { mutableStateOf<AppUpdate.Result?>(null) }
+    var showLicenses by remember { mutableStateOf(false) }
+    var logCount by remember { mutableStateOf(AppLog.count()) }
+
+    GlassCard(title = "关于", subtitle = "版本、更新、日志与许可") {
+        InfoRow("版本", versionLabel(context) + " · code " + versionCode(context))
+        InfoRow("设备", Build.MANUFACTURER.trim() + " " + Build.MODEL + " · Android " + Build.VERSION.RELEASE)
+        InfoRow("架构", Build.SUPPORTED_ABIS.take(2).joinToString(" / "))
         InfoRow(
             "订阅快照",
             when (snapshotFresh) {
@@ -876,37 +1032,167 @@ private fun VersionCard(context: Context, repo: AppRepository) {
                 null -> "检测中…"
             }
         )
+
         Spacer(Modifier.height(20.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            TvPill("项目主页", prominent = true, onClick = {
-                runCatching {
-                    context.startActivity(
-                        Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Ringas/NextMovie"))
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    )
+            TvPill(
+                text = if (checking) "检查中…" else "检查更新",
+                prominent = true,
+                onClick = {
+                    if (!checking) {
+                        checking = true
+                        scope.launch {
+                            update = AppUpdate.check(versionCode(context))
+                            checking = false
+                            logCount = AppLog.count()
+                        }
+                    }
                 }
-            })
-            TvPill("刷新快照状态", glass = true, onClick = {
-                scope.launch { snapshotFresh = repo.configSnapshotIsFresh() }
-            })
+            )
+            TvPill("运行日志（$logCount）", glass = true, onClick = onOpenLogs)
+            TvPill("开源许可", glass = true, onClick = { showLicenses = true })
+            TvPill("项目主页", glass = true, onClick = { openUrl(context, "https://github.com/Ringas/NextMovie") })
         }
+
+        Spacer(Modifier.height(14.dp))
+        when (val u = update) {
+            null -> Text(
+                "更新来自公开 JSON 清单（版本号 + 下载地址），不经过任何应用商店；检查失败不影响看片。",
+                color = Tokens.TextFaint, fontSize = 13.sp
+            )
+            is AppUpdate.Result.Failed -> Text(u.reason, color = Color(0xFFE9A06C), fontSize = 13.sp)
+            is AppUpdate.Result.UpToDate -> Text(
+                "已是最新（远端 ${u.remoteName}）", color = Color(0xFF8FD49A), fontSize = 13.sp
+            )
+            is AppUpdate.Result.Newer -> Column {
+                Text(
+                    "发现新版本 ${u.info.versionName}（当前 ${versionLabel(context)}）",
+                    color = Tokens.Accent, fontSize = 14.sp, fontWeight = FontWeight.SemiBold
+                )
+                if (u.info.notes.isNotBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(u.info.notes, color = Tokens.TextDim, fontSize = 12.5.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (u.info.apkUrl.isNotBlank()) {
+                        TvPill("下载 APK", prominent = true, onClick = { openUrl(context, u.info.apkUrl) })
+                    }
+                    if (u.info.pageUrl.isNotBlank()) {
+                        TvPill("打开更新页", glass = true, onClick = { openUrl(context, u.info.pageUrl) })
+                    }
+                }
+            }
+        }
+
         Spacer(Modifier.height(20.dp))
         Text(
-            "NextMovie 只做 Android TV 播放器，不内置任何源、Key 或解析规则；GPL-3.0 开源。",
-            color = Tokens.TextFaint,
-            fontSize = 13.sp
+            "NextMovie 只做 Android TV 播放器：不内置任何源、Key 或解析规则，所有内容来自你自填的订阅。GPL-3.0 开源。",
+            color = Tokens.TextFaint, fontSize = 13.sp
         )
-        Spacer(Modifier.height(22.dp))
-        Text("快捷键", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(8.dp))
-        Text("遥控：方向移动 · OK 确认 · 返回键退出 · 菜单键打开线路/菜单", color = Tokens.TextFaint, fontSize = 13.sp)
-        Spacer(Modifier.height(4.dp))
-        Text("键盘：↑↓←→ · Enter/空格确认 · Esc 返回 · Tab 菜单 · 设置内 1–6 跳段", color = Tokens.TextFaint, fontSize = 13.sp)
-        Spacer(Modifier.height(4.dp))
-        Text("播放页：空格/媒体键暂停 · ←→ 快退快进 · 菜单切换线路", color = Tokens.TextFaint, fontSize = 13.sp)
     }
-    LaunchedEffect(Unit) { snapshotFresh = repo.configSnapshotIsFresh() }
+    if (showLicenses) LicenseDialog(onDismiss = { showLicenses = false })
+    LaunchedEffect(Unit) {
+        snapshotFresh = repo.configSnapshotIsFresh()
+        logCount = AppLog.count()
+    }
 }
+
+@Composable
+private fun LogsPage() {
+    val context = LocalContext.current
+    var tick by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    val entries = remember(tick) { AppLog.snapshot().takeLast(80).reversed() }
+
+    GlassCard(title = "运行日志", subtitle = "最近 ${entries.size} 条；报问题时把这段复制给我就够了") {
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            TvPill("复制全部", prominent = true, onClick = {
+                runCatching {
+                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("NextMovie log", AppLog.dump()))
+                }
+            })
+            TvPill("清空", glass = true, onClick = { AppLog.clear(); tick++ })
+            TvPill("刷新", glass = true, onClick = { tick++ })
+        }
+        Spacer(Modifier.height(16.dp))
+        if (entries.isEmpty()) {
+            Text("暂无日志：先复现一次问题再回来刷新。", color = Tokens.TextFaint, fontSize = 13.sp)
+        } else {
+            entries.forEach { e ->
+                Row(Modifier.padding(vertical = 3.dp)) {
+                    Text(
+                        java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(e.at)),
+                        color = Tokens.TextGhost, fontSize = 12.sp,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "[${e.tag}]",
+                        color = Tokens.Accent, fontSize = 12.sp,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        modifier = Modifier.width(78.dp)
+                    )
+                    Text(
+                        e.message,
+                        color = Color(0xCCFFFFFF), fontSize = 12.sp,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LicenseDialog(onDismiss: () -> Unit) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .widthIn(max = 620.dp)
+                .heightIn(max = 452.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(Color(0xF00A0E15))
+                .border(1.dp, Color(0x2EFFFFFF), RoundedCornerShape(20.dp))
+                .verticalScroll(rememberScrollState())
+                .padding(22.dp)
+        ) {
+            Text("开源许可", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            Text("NextMovie 以 GPL-3.0 发布，以下组件的许可证可在线查阅。", color = Tokens.TextFaint, fontSize = 13.sp)
+            Spacer(Modifier.height(16.dp))
+            listOf(
+                "AndroidX Media3 / ExoPlayer" to "Apache-2.0",
+                "Jetpack Compose" to "Apache-2.0",
+                "OkHttp / Okio" to "Apache-2.0",
+                "Kotlin · kotlinx.coroutines" to "Apache-2.0",
+                "Coil · 图片加载" to "Apache-2.0",
+                "CatVod / TVBox 插件运行时" to "源仓库许可",
+                "FFmpeg / libass（如已打包）" to "LGPL / GPL",
+            ).forEach { (name, lic) ->
+                Row(Modifier.padding(vertical = 3.dp)) {
+                    Text(name, color = Color(0xE6FFFFFF), fontSize = 12.5.sp, modifier = Modifier.weight(1f))
+                    Text(lic, color = Tokens.TextDim, fontSize = 12.5.sp)
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            TvPill("关闭", prominent = true, autofocus = true, onClick = onDismiss)
+        }
+    }
+}
+
+private fun openUrl(context: Context, url: String) {
+    runCatching {
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
+}
+
+private fun versionCode(context: Context): Int = runCatching {
+    val info = context.packageManager.getPackageInfo(context.packageName, 0)
+    androidx.core.content.pm.PackageInfoCompat.getLongVersionCode(info).toInt()
+}.getOrDefault(0)
 
 /* ---------------- 通用小部件 ---------------- */
 
@@ -928,6 +1214,7 @@ private fun ToggleRow(title: String, caption: String, checked: Boolean, onChange
             text = if (checked) "开" else "关",
             selected = checked,
             glass = !checked,
+            quietSelected = checked,
             onClick = { onChange(!checked) }
         )
     }

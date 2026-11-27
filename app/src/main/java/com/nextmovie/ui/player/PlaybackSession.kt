@@ -24,10 +24,23 @@ class PlaybackSession(context: Context) {
     private val appContext = context.applicationContext
     private var decodeMode: DecodeMode = PlayerPrefs.decodeMode(appContext)
 
-    private val engine = ExoPlayerEngine(appContext, decodeMode)
+    // 冷启动时不建播放器：ExoPlayer 构造实测要 ~350ms，放到真正开播那一刻再做
+    private var engineOrNull: ExoPlayerEngine? = null
+
+    private val engine: ExoPlayerEngine
+        get() = engineOrNull ?: ExoPlayerEngine(appContext, decodeMode).also { engineOrNull = it }
+
+    /** 引擎是否已真的创建（用于「回到首页就静音」这类操作不触发建播放器） */
+    val playerReady: Boolean
+        get() = engineOrNull != null
 
     val player: ExoPlayer
         get() = engine.player
+
+    /** 只有已经建过播放器才暂停，避免启动路径上被迫创建 ExoPlayer */
+    fun pauseQuietly() {
+        engineOrNull?.let { runCatching { it.player.pause() } }
+    }
 
     private var playerView: PlayerView? = null
 
@@ -71,12 +84,13 @@ class PlaybackSession(context: Context) {
         triedLines = 0
         playerView?.let { (it.parent as? ViewGroup)?.removeView(it) }
         playerView = null
-        engine.release()
+        engineOrNull?.release()
+        engineOrNull = null
     }
 
     companion object {
         fun ffmpegNote(): String =
             if (NmRenderersFactory.ffmpegAvailable()) "FFmpeg 软解已就绪"
-            else "未检测到 FFmpeg AAR（仅 MediaCodec）；可将 media3-decoder-ffmpeg 放入 app/libs"
+            else "使用系统解码（MediaCodec）· 遇到花屏或黑屏可切「软解优先」"
     }
 }

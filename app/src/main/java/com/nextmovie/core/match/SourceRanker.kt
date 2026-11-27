@@ -86,15 +86,10 @@ object SourceRanker {
     var lineStats: (String, String) -> Pair<Int, Int> = { _, _ -> 0 to 0 }
 
     private fun panIdOf(line: PlayLine): String? {
-        val n = line.name.lowercase()
-        val u = line.episodes.firstOrNull()?.url.orEmpty().lowercase()
-        return when {
-            n.contains("quark") || n.contains("夸克") || u.contains("quark.cn") -> "quark"
-            n.contains("uc") || u.contains("uc.cn") -> "uc"
-            n.contains("ali") || n.contains("阿里") || u.contains("alipan") -> "ali"
-            n.contains("baidu") || n.contains("百度") || n.contains("嘟嘟") -> "baidu"
-            else -> null
-        }
+        val u = line.episodes.firstOrNull()?.url.orEmpty()
+        // 先看线路名，再看首集地址；认哪些网盘统一由 PanProviders 决定
+        return com.nextmovie.core.pan.PanProviders.idOf(line.name)
+            ?: com.nextmovie.core.pan.PanProviders.idOf(u)
     }
 
     /**

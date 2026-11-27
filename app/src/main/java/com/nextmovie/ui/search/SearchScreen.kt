@@ -28,6 +28,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -296,7 +297,7 @@ fun SearchScreen(
 
             Spacer(Modifier.height(6.dp))
             Text(
-                text = "方向键选字符 · OK 输入 · 也可用系统输入法直接打字 · 回车/「搜索」开始",
+                text = "输入片名，或直接用遥控器选字。选中「全网搜索」开始。",
                 color = Tokens.TextFaint,
                 style = MaterialTheme.typography.labelSmall.copy(fontSize = Tokens.Type.micro)
             )
@@ -424,15 +425,23 @@ private fun Keypad(
         listOf("Z", "X", "C", "V", "B", "N", "M")
     )
 
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         rows.forEach { keys ->
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 keys.forEach { key ->
                     KeyCap(text = key, onClick = { onChar(key) })
                 }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             KeyCap(text = "空格", width = 190.dp, onClick = { onChar(" ") })
             KeyCap(text = "删除", width = 120.dp, onClick = onBackspace)
             KeyCap(text = "清空", width = 120.dp, onClick = onClear)
@@ -453,12 +462,12 @@ private fun KeyCap(
     Box(
         modifier = Modifier
             .width(width)
-            .height(44.dp)
+            .height(38.dp)
             .clip(shape)
-            .background(if (accent) Tokens.AccentDim else Tokens.Surface)
+            .background(if (accent) (if (focused) Color.White else Color(0xE6FFFFFF)) else Tokens.Surface)
             .border(
                 width = if (focused) 2.dp else 1.dp,
-                color = if (focused) Tokens.Accent else if (accent) Tokens.Accent.copy(alpha = 0.45f) else Tokens.Stroke,
+                color = if (focused) Color.White else if (accent) Color(0x00FFFFFF) else Tokens.Stroke,
                 shape = shape
             )
             .onFocusChanged { focused = it.isFocused }
@@ -468,8 +477,8 @@ private fun KeyCap(
         Text(
             text = text,
             color = when {
+                accent -> Color(0xFF0A0C12)
                 focused -> Tokens.Text
-                accent -> Tokens.Accent
                 else -> Tokens.TextDim
             },
             style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Medium),

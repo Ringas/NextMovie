@@ -62,14 +62,30 @@ class MainActivity : ComponentActivity() {
     private lateinit var repo: AppRepository
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        android.util.Log.i("NextMovieTiming", "activity-oncreate")
         com.github.catvod.Runtime.setActivity { this }
         super.onCreate(savedInstanceState)
         repo = AppRepository(applicationContext)
         // Android can start the isolated process while Compose and the configuration load.
         repo.startConfiguredPluginHost()
         setContent {
-            com.nextmovie.ui.theme.TvDisplay {
-                NextMovieTheme { AppRoot(repo) }
+            // 首帧骨架：先画一帧纯色底，AppRoot 的重组合放到它后面。
+            // 实测冷启动 3.20s → 2.62s（原生 View 换帧反而更慢，已回退）。
+            var warm by remember { mutableStateOf(false) }
+            LaunchedEffect(Unit) {
+                androidx.compose.runtime.withFrameNanos { }
+                warm = true
+            }
+            if (!warm) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(androidx.compose.ui.graphics.Color(0xFF070A12))
+                )
+            } else {
+                com.nextmovie.ui.theme.TvDisplay {
+                    NextMovieTheme { AppRoot(repo) }
+                }
             }
         }
     }
@@ -171,9 +187,24 @@ private fun AppRoot(repo: AppRepository) {
     var panQrId by remember { mutableStateOf("") }
     var panQrLabel by remember { mutableStateOf("") }
     var panQrMsg by remember { mutableStateOf("") }
+    /** 该网盘插件没有扫码接口（如移动/123/迅雷），只显示账号登录入口，不出假码 */
+    var panQrManual by remember { mutableStateOf(false) }
     var panQrBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var panQrRetry by remember { mutableStateOf<(() -> Unit)?>(null) }
     var panLoginJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    // 扫码卡片的阶段：加载 / 等待 / 已扫 / 成功 / 账号登录
+    var panPhase by remember { mutableStateOf(com.nextmovie.ui.pan.PanPhase.LOADING) }
+    /** 当前这张码是不是「手机扫码填单」型 */
+    var panQrPhone by remember { mutableStateOf(false) }
+    var panSeconds by remember { mutableStateOf(60) }
+    // 卡内输入态：短信登录全部在这张卡里完成，登录成功直接续播，不跳配置中心
+    var panInput by remember { mutableStateOf<com.nextmovie.ui.pan.PanInputUi?>(null) }
+    var panInputBusy by remember { mutableStateOf(false) }
+    var panTick by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    // 插件没有扫码接口的网盘，用宿主自己的离屏 WebView 网关出官方码
+    var panWeb by remember { mutableStateOf<com.nextmovie.core.pan.PanWebLogin?>(null) }
+    // 「手机扫码填单」通道的局域网服务，卡片一关就关，别常驻
+    var panPhoneServer by remember { mutableStateOf<java.net.ServerSocket?>(null) }
     // 跨页面播放会话：Marco 的「退回详情页影片继续播」靠它把 ExoPlayer 留在进程里
     val playbackSession = remember { com.nextmovie.ui.player.PlaybackSession(context) }
     androidx.compose.runtime.DisposableEffect(Unit) { onDispose { playbackSession.release() } }
@@ -183,7 +214,7 @@ private fun AppRoot(repo: AppRepository) {
         if (r is Route.Player) playbackSession.alive = true
         if (r !is Route.Player && r !is Route.Detail) {
             playbackSession.alive = false
-            runCatching { playbackSession.player.pause() }
+            runCatching { playbackSession.pauseQuietly() }
         }
     }
 
@@ -289,29 +320,338 @@ private fun AppRoot(repo: AppRepository) {
     }
 
     /** 把异常/线路名里的网盘线索认出来：夸克 / UC / 阿里 / 百度。 */
-    fun panOf(text: String): String? {
-        val t = text.lowercase()
-        return when {
-            t.contains("quark") || text.contains("夸克") -> "quark"
-            t.contains("uc") || text.contains("UC") -> "uc"
-            t.contains("ali") || text.contains("阿里") -> "ali"
-            t.contains("baidu") || text.contains("百度") || text.contains("嘟嘟") -> "baidu"
-            else -> null
+    fun panOf(text: String): String? = com.nextmovie.core.pan.PanProviders.idOf(text)
+
+    /** 账号/短信类网盘的统一入口：打开插件配置中心（锚点由 PanProviders 决定）。 */
+    fun openPluginPanConfig(panId: String, site: Site? = null) {
+        val s = site ?: repo.currentSite ?: return
+        runCatching {
+            context.startActivity(PluginActivity.intent(context, s, "", "panconfig", autoPan = panId))
         }
     }
 
-    /** 未登录网盘时：直接在电视上弹官方扫码二维码，扫完把 Cookie 落库并自动续播。 */
+    fun closePanLogin() {
+        runCatching { panWeb?.close() }
+        panWeb = null
+        runCatching { panPhoneServer?.close() }
+        panPhoneServer = null
+        panQrId = ""
+        panQrBitmap = null
+        panInput = null
+        panInputBusy = false
+        panTick?.cancel()
+        panTick = null
+        panQrPhone = false
+        panPhase = com.nextmovie.ui.pan.PanPhase.LOADING
+    }
+
+    /** 验证码倒计时：单条协程，重复点发送先取消旧的，避免多条同时在跑。 */
+    fun startPanCountdown(seconds: Int) {
+        panTick?.cancel()
+        panTick = scope.launch {
+            var left = seconds
+            while (isActive && left > 0) {
+                delay(1000)
+                left--
+                panInput = panInput?.copy(countdown = left)
+            }
+        }
+    }
+
+    /** 登录成功统一收口：关卡片 → 让来源重算 → 回到原来的重试点继续播。 */
+    fun finishPanLoginAndReplay() {
+        panQrMsg = "登录成功，正在续播…"
+        panPhase = com.nextmovie.ui.pan.PanPhase.OK
+        panSeconds = 0
+        val next = panQrRetry
+        scope.launch {
+            delay(900)
+            closePanLogin()
+            panQrRetry = null
+            repo.invalidateContent()
+            delay(150)
+            next?.invoke()
+        }
+    }
+
+    /** 走「卡内短信验证码」形态：保持同一张卡、同一个重试点，登录完直接续播。 */
+    fun openPanSmsCard(panId: String) {
+        panInput = com.nextmovie.ui.pan.PanInputUi(
+            title = "短信验证码登录",
+            hint = "验证码会发到你填的手机号；登录成功后自动续播当前线路",
+            field = com.nextmovie.ui.pan.PanField.PHONE,
+        )
+        panInputBusy = false
+        panPhase = com.nextmovie.ui.pan.PanPhase.INPUT
+        panQrMsg = ""
+    }
+
     fun askPanLogin(activeSite: Site, panId: String, retry: (() -> Unit)?) {
-        val label = when (panId) { "quark" -> "夸克"; "uc" -> "UC"; "ali" -> "阿里"; else -> "百度·嘟嘟" }
-        android.util.Log.i("NextMoviePan", "auto-pop qr-login pan=$panId site=${activeSite.key}")
+        val provider = com.nextmovie.core.pan.PanProviders.of(panId)
+        val label = provider?.label ?: "网盘"
+        android.util.Log.i("NextMoviePan", "auto-pop login pan=$panId label=$label site=${activeSite.key}")
         panQrRetry = retry
         panQrLabel = label
         panQrBitmap = null
-        panQrMsg = "正在向来源申请登录二维码…"
+        panSeconds = 60
+        panQrManual = com.nextmovie.core.pan.PanProviders.needsConfigPage(panId)
         panQrId = panId
         panLoginJob?.cancel()
-        // FongMi / Marco 同一套：二维码由插件自己的 pan 接口出（loginStart），登录态也由插件落库，
-        // 宿主只负责展示 + 轮询 + 扫完自动续播，不再自建 CAS token 码。
+        runCatching { panWeb?.close() }
+        panWeb = null
+
+        // 统一按 route 分派：插件出码 / 宿主抓官方码 / 手机扫码填单 / 非登录型
+        val route = provider?.route ?: com.nextmovie.core.pan.PanProviders.Route.PLUGIN
+        panQrPhone = route == com.nextmovie.core.pan.PanProviders.Route.PHONE
+
+        // ⓪ 非登录型（AList / WebDAV / VodDIY）：保留填地址入口，不是扫码
+        if (route == com.nextmovie.core.pan.PanProviders.Route.URL) {
+            panQrManual = true
+            panPhase = com.nextmovie.ui.pan.PanPhase.MANUAL
+            panQrMsg = "这一项是服务地址，不是账号登录，请在配置中心填写"
+            return
+        }
+
+        // ① 阿里云盘：插件完全没有阿里能力，扫码、换 token、存会话、取直链全部宿主自助
+        if (route == com.nextmovie.core.pan.PanProviders.Route.NATIVE && panId == "ali") {
+            panPhase = com.nextmovie.ui.pan.PanPhase.LOADING
+            panQrMsg = "正在向「阿里云盘」官方申请二维码…"
+            panSeconds = 240
+            panLoginJob = scope.launch(Dispatchers.IO) {
+                val session = com.nextmovie.core.pan.AliQrLogin.start()
+                if (session == null) {
+                    panQrManual = true
+                    panPhase = com.nextmovie.ui.pan.PanPhase.FAIL
+                    panQrMsg = "阿里官方二维码申请失败，点「重新出码」再试"
+                    return@launch
+                }
+                panQrBitmap = qrBitmap(session.content, 720)
+                panPhase = com.nextmovie.ui.pan.PanPhase.WAIT
+                panQrMsg = "打开「阿里云盘」App 扫一扫，扫完自动续播"
+                var left = 240
+                while (isActive && panQrId == panId && left > 0) {
+                    delay(2000)
+                    left -= 2
+                    panSeconds = left
+                    val poll = com.nextmovie.core.pan.AliQrLogin.poll(session)
+                    when (poll.state) {
+                        com.nextmovie.core.pan.AliQrLogin.State.CONFIRMED -> {
+                            panPhase = com.nextmovie.ui.pan.PanPhase.SCANNED
+                            panQrMsg = "已确认，正在换取阿里会话…"
+                            val refresh = com.nextmovie.core.pan.AliQrLogin
+                                .refreshTokenFromBizExt(poll.bizExt)
+                            val cred = refresh?.let { com.nextmovie.core.pan.AliQrLogin.exchange(it) }
+                            if (cred != null) {
+                                com.nextmovie.core.pan.AliQrLogin.store(context, cred)
+                                val files = com.nextmovie.core.pan.AliApi.list(cred)
+                                android.util.Log.i(
+                                    "NextMovieAli",
+                                    "ali-login ok files=" + files.size + " refreshLen=" + cred.refreshToken.length
+                                )
+                                finishPanLoginAndReplay()
+                                return@launch
+                            }
+                            panPhase = com.nextmovie.ui.pan.PanPhase.FAIL
+                            panQrMsg = "阿里扫码成功但换取 token 失败，点「重新出码」再试"
+                            return@launch
+                        }
+                        com.nextmovie.core.pan.AliQrLogin.State.SCANNED -> {
+                            panPhase = com.nextmovie.ui.pan.PanPhase.SCANNED
+                            panQrMsg = "已扫码，请在手机上确认登录"
+                        }
+                        com.nextmovie.core.pan.AliQrLogin.State.EXPIRED -> {
+                            panPhase = com.nextmovie.ui.pan.PanPhase.FAIL
+                            panQrMsg = "二维码已过期，点「重新出码」再试"
+                            return@launch
+                        }
+                        else -> Unit
+                    }
+                }
+                if (panQrId == panId) {
+                    panPhase = com.nextmovie.ui.pan.PanPhase.FAIL
+                    panQrMsg = "阿里扫码未完成，点「重新出码」再试"
+                }
+            }
+            return
+        }
+
+        // ① UC：官方 CAS 扫码由宿主原生完成（UC浏览器 App 扫，扫完换 __pus 写回插件）
+        if (route == com.nextmovie.core.pan.PanProviders.Route.NATIVE) {
+            panPhase = com.nextmovie.ui.pan.PanPhase.LOADING
+            panQrMsg = "正在向「$label」官方申请二维码…"
+            panSeconds = 240
+            panLoginJob = scope.launch(Dispatchers.IO) {
+                val session = com.nextmovie.core.pan.UcQrLogin.start()
+                if (session == null) {
+                    panQrManual = true
+                    panPhase = com.nextmovie.ui.pan.PanPhase.FAIL
+                    panQrMsg = "UC 官方二维码申请失败，点「重新出码」再试"
+                    return@launch
+                }
+                panQrBitmap = qrBitmap(session.content, 720)
+                panPhase = com.nextmovie.ui.pan.PanPhase.WAIT
+                panQrMsg = "打开「UC浏览器」App 扫一扫，扫完自动续播"
+                android.util.Log.i("NextMovieUc", "uc-qr card token=" + session.token.take(8))
+                var left = 240
+                while (isActive && panQrId == panId && left > 0) {
+                    delay(2000)
+                    left -= 2
+                    panSeconds = left
+                    val poll = com.nextmovie.core.pan.UcQrLogin.poll(session.token)
+                    when (poll.state) {
+                        com.nextmovie.core.pan.UcQrLogin.State.OK -> {
+                            panPhase = com.nextmovie.ui.pan.PanPhase.SCANNED
+                            panQrMsg = "已确认，正在换取 UC 会话…"
+                            val cookie = com.nextmovie.core.pan.UcQrLogin.exchange(poll.ticket)
+                            if (!cookie.isNullOrBlank()) {
+                                val ok = com.nextmovie.core.pan.PanBridge.setCookie(panId, cookie)
+                                android.util.Log.i("NextMovieUc", "uc-qr setCookie ok=$ok")
+                                if (ok) {
+                                    finishPanLoginAndReplay()
+                                    return@launch
+                                }
+                                panQrMsg = "已拿到 UC 会话，但插件没接收这个 cookie"
+                            } else {
+                                panQrMsg = "UC 会话交换失败，点「重新出码」再试"
+                            }
+                            panPhase = com.nextmovie.ui.pan.PanPhase.FAIL
+                            return@launch
+                        }
+                        com.nextmovie.core.pan.UcQrLogin.State.SCANNED -> {
+                            panPhase = com.nextmovie.ui.pan.PanPhase.SCANNED
+                            panQrMsg = "已扫码，请在手机上确认登录"
+                        }
+                        com.nextmovie.core.pan.UcQrLogin.State.EXPIRED -> {
+                            panPhase = com.nextmovie.ui.pan.PanPhase.FAIL
+                            panQrMsg = "二维码已过期，点「重新出码」再试"
+                            return@launch
+                        }
+                        else -> Unit
+                    }
+                }
+                if (panQrId == panId) {
+                    panPhase = com.nextmovie.ui.pan.PanPhase.FAIL
+                    panQrMsg = "UC 扫码未完成，点「重新出码」再试"
+                }
+            }
+            return
+        }
+
+        // ① 插件既没有官方码、宿主也抓不到码的网盘：局域网起一次性填单页，手机扫码后在手机上填
+        if (route == com.nextmovie.core.pan.PanProviders.Route.PHONE) {
+            panPhase = com.nextmovie.ui.pan.PanPhase.LOADING
+            panQrMsg = "正在准备「$label」手机填写页…"
+            val (url, srv) = com.nextmovie.core.pan.PanPhoneLogin.serve(context, panId, label)
+            if (url.isBlank()) {
+                panQrManual = true
+                panPhase = com.nextmovie.ui.pan.PanPhase.MANUAL
+                panQrMsg = "没拿到局域网地址（电视是否连了 Wi-Fi？），可改用配置中心完成一次"
+                return
+            }
+            panPhoneServer = srv
+            panQrBitmap = qrBitmap(url, 720)
+            panPhase = com.nextmovie.ui.pan.PanPhase.WAIT
+            panQrMsg = "手机扫码打开填写页，填完电视这边自动续播"
+            panSeconds = 240
+            android.util.Log.i("NextMoviePan", "phone-qr pan=$panId url=${url.take(40)}")
+            panLoginJob = scope.launch {
+                var left = 240
+                while (isActive && panQrId == panId && left > 0) {
+                    delay(1000)
+                    left--
+                    panSeconds = left
+                    if (com.nextmovie.core.pan.PanPhoneLogin.lastOk) {
+                        android.util.Log.i("NextMoviePan", "phone-login-ok pan=$panId")
+                        finishPanLoginAndReplay()
+                        return@launch
+                    }
+                }
+                if (panQrId == panId) {
+                    panPhase = com.nextmovie.ui.pan.PanPhase.FAIL
+                    panQrMsg = "手机那边没填完，点「重新出码」再试"
+                }
+            }
+            return
+        }
+
+        // ② 插件没有扫码接口但官方有码的网盘（移动 139）：宿主离屏 WebView 打开官方登录页，抓官方二维码
+        val webSpec = if (route == com.nextmovie.core.pan.PanProviders.Route.HOST)
+            com.nextmovie.core.pan.PanWebLogin.specOf(provider?.id ?: panId) else null
+        if (webSpec != null) {
+            val act = context as? android.app.Activity
+            panPhase = com.nextmovie.ui.pan.PanPhase.LOADING
+            panQrMsg = "正在向「$label」官方页面申请二维码…"
+            if (act == null) {
+                panQrManual = true
+                panPhase = com.nextmovie.ui.pan.PanPhase.MANUAL
+                panQrMsg = "登录页启动失败，可改用账号登录"
+                return
+            }
+            panWeb = com.nextmovie.core.pan.PanWebLogin(
+                activity = act,
+                spec = webSpec,
+                label = label,
+                onQr = { bmp, msg -> panQrBitmap = bmp; if (msg.isNotBlank()) panQrMsg = msg },
+                onPhase = { phase, msg ->
+                    panPhase = when (phase) {
+                        com.nextmovie.core.pan.PanWebLogin.Phase.LOADING -> com.nextmovie.ui.pan.PanPhase.LOADING
+                        com.nextmovie.core.pan.PanWebLogin.Phase.WAIT -> com.nextmovie.ui.pan.PanPhase.WAIT
+                        com.nextmovie.core.pan.PanWebLogin.Phase.SCANNED -> com.nextmovie.ui.pan.PanPhase.SCANNED
+                        com.nextmovie.core.pan.PanWebLogin.Phase.OK -> com.nextmovie.ui.pan.PanPhase.OK
+                        com.nextmovie.core.pan.PanWebLogin.Phase.FAIL -> com.nextmovie.ui.pan.PanPhase.FAIL
+                    }
+                    if (msg.isNotBlank()) panQrMsg = msg
+                },
+                onLogin = { cookie ->
+                    // 139 插件没有写入通道，凭据由宿主自己收下、自己直连官方接口：
+                    // 宿主会话存下来就算登录成功，不要再拿插件状态判断
+                    if (panId == "pan139") {
+                        runCatching { com.nextmovie.core.pan.Yun139Api.storeSession(context, cookie) }
+                        if (com.nextmovie.core.pan.Yun139Api.hasSession(context)) {
+                            android.util.Log.i("NextMovie139", "host-session ok len=${cookie.length}")
+                            finishPanLoginAndReplay()
+                        } else {
+                            panQrManual = true
+                            panPhase = com.nextmovie.ui.pan.PanPhase.MANUAL
+                            panQrMsg = "官方页面登录成功但没抓到 139 凭据，可点「重新出码」再试"
+                        }
+                    }
+                    if (panId != "pan139") {
+                    val accepted = runCatching { com.nextmovie.core.pan.PanBridge.setCookie(panId, cookie) }.getOrDefault(false)
+                    val visible = runCatching {
+                        com.nextmovie.core.pan.PanBridge.refresh()?.let { com.nextmovie.core.pan.PanBridge.has(panId) }
+                    }.getOrNull() == true
+                    if (accepted || visible) {
+                        finishPanLoginAndReplay()
+                    } else {
+                        // 插件对这家网盘没有 writeAction：别假装成功，直接给账号登录入口
+                        panQrManual = true
+                        panPhase = com.nextmovie.ui.pan.PanPhase.MANUAL
+                        panQrMsg = "已在官方页面登录「$label」，但插件没有这个网盘的凭据写入接口，请在配置中心完成账号登录"
+                        runCatching { panWeb?.close() }
+                        panWeb = null
+                    }
+                    }
+                },
+                onFail = { msg ->
+                    panQrManual = true
+                    panPhase = com.nextmovie.ui.pan.PanPhase.FAIL
+                    if (msg.isNotBlank()) panQrMsg = msg
+                }
+            )
+            panWeb?.start()
+            scope.launch {
+                while (isActive && panQrId == panId && panPhase != com.nextmovie.ui.pan.PanPhase.OK && panSeconds > 0) {
+                    delay(1000)
+                    panSeconds--
+                }
+            }
+            return
+        }
+
+        // ② 插件自带扫码接口：向来源要码 → 展示 → 轮询 → 扫完续播
+        panPhase = com.nextmovie.ui.pan.PanPhase.LOADING
+        panQrMsg = "正在向来源申请登录二维码…"
         panLoginJob = scope.launch(Dispatchers.IO) {
             var attempt = 0
             while (isActive && panQrId == panId && attempt < 8) {
@@ -320,11 +660,21 @@ private fun AppRoot(repo: AppRepository) {
                 val qrUrl = start?.optString("qrUrl").orEmpty()
                 val taskId = start?.optString("taskId").orEmpty()
                 if (qrUrl.isBlank() || taskId.isBlank()) {
-                    panQrMsg = start?.optString("msg").orEmpty().ifBlank { "来源没有返回登录二维码" }
+                    val why = start?.optString("msg").orEmpty()
+                    if (why.contains("Unsupported", true) || attempt >= 2) {
+                        panQrManual = true
+                        panPhase = com.nextmovie.ui.pan.PanPhase.MANUAL
+                        panQrMsg = if (why.contains("Unsupported", true))
+                            "该网盘在插件里只支持账号/短信登录，没有扫码接口"
+                        else why.ifBlank { "没拿到二维码，可重试或改用配置中心" }
+                        return@launch
+                    }
+                    panQrMsg = why.ifBlank { "来源没有返回登录二维码" }
                     delay(2500)
                     continue
                 }
                 panQrBitmap = qrBitmap(qrUrl, 720)
+                panPhase = com.nextmovie.ui.pan.PanPhase.WAIT
                 panQrMsg = "打开「$label」App 扫一扫"
                 android.util.Log.i("NextMoviePan", "qr-start pan=$panId task=$taskId urllen=${qrUrl.length}")
                 var done = false
@@ -339,29 +689,75 @@ private fun AppRoot(repo: AppRepository) {
                         android.util.Log.i("NextMoviePan", "qr-poll terminal pan=$panId $st")
                         break
                     }
-                    if (st == "scanned" || st == "confirm") panQrMsg = "已扫码，请在手机上确认"
-                    // 兜底：来源自己落库后 status 会变成已配置，不只信 poll 文案
+                    if (st == "scanned" || st == "confirm") {
+                        panPhase = com.nextmovie.ui.pan.PanPhase.SCANNED
+                        panQrMsg = "已扫码，请在手机上确认"
+                    }
                     if (com.nextmovie.core.pan.PanBridge.refresh()?.let { com.nextmovie.core.pan.PanBridge.has(panId) } == true) {
                         done = true; break
                     }
                 }
                 if (done || com.nextmovie.core.pan.PanBridge.has(panId)) {
                     android.util.Log.i("NextMoviePan", "qr-login-ok pan=$panId")
-                    panQrMsg = "登录成功，正在续播…"
-                    delay(500)
-                    panQrId = ""
-                    val next = panQrRetry
-                    panQrRetry = null
-                    scope.launch {
-                        repo.invalidateContent()
-                        kotlinx.coroutines.delay(200)
-                        next?.invoke()
-                    }
+                    finishPanLoginAndReplay()
                     return@launch
                 }
             }
-            if (panQrId == panId) panQrMsg = "二维码没拿到或已过期，点「重新出码」再试"
+            if (panQrId == panId) {
+                panPhase = com.nextmovie.ui.pan.PanPhase.FAIL
+                panQrMsg = "二维码没拿到或已过期，点「重新出码」再试"
+            }
         }
+    }
+
+    // 调试入口：验证宿主 139 客户端（签名 → 文件列表 → 直链）
+    LaunchedEffect(Unit) {
+        val intent = (context as? android.app.Activity)?.intent ?: return@LaunchedEffect
+        if (intent.getStringExtra("dbg_139") == null) return@LaunchedEffect
+        delay(800)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        runCatching {
+            if (!com.nextmovie.core.pan.Yun139Api.hasSession(context)) {
+                val f = java.io.File(context.filesDir, "panweb-cookie.txt")
+                if (f.exists()) com.nextmovie.core.pan.Yun139Api.storeSession(context, f.readText())
+            }
+            val list = com.nextmovie.core.pan.Yun139Api.list(context)
+            android.util.Log.i("NextMovie139", "dbg-list n=${list.size} " + list.joinToString("|") { "${it.name}:${it.size}:${it.extension}" })
+            val vid = list.firstOrNull { !it.isFolder && (it.extension == "mp4" || it.extension == "mkv") }
+            if (vid != null) {
+                val url = com.nextmovie.core.pan.Yun139Api.downloadUrl(context, vid.fileId)
+                android.util.Log.i("NextMovie139", "dbg-url ${vid.name} len=${url.length} head=${url.take(90)}")
+            } else {
+                android.util.Log.i("NextMovie139", "dbg-url 没有可播放文件")
+            }
+        }.onFailure { android.util.Log.w("NextMovie139", "dbg-139 失败: ${it}") }
+        }
+    }
+
+    // 调试入口：起一个保活的离屏 139 WebView，在页面上下文里跑任意 JS（探真实接口用）
+    LaunchedEffect(Unit) {
+        val intent = (context as? android.app.Activity)?.intent ?: return@LaunchedEffect
+        val rawJs = intent.getStringExtra("dbg_panjs") ?: return@LaunchedEffect
+        val js = if (rawJs.startsWith("b64:")) {
+            String(android.util.Base64.decode(rawJs.removePrefix("b64:"), android.util.Base64.DEFAULT))
+        } else rawJs
+        val act = context as? android.app.Activity ?: return@LaunchedEffect
+        val spec = com.nextmovie.core.pan.PanWebLogin.specOf("pan139") ?: return@LaunchedEffect
+        val probe = com.nextmovie.core.pan.PanWebLogin(
+            activity = act,
+            spec = spec,
+            label = "移动网盘",
+            onQr = { _, _ -> },
+            onPhase = { _, _ -> },
+            onLogin = { _ -> },
+            onFail = { _ -> },
+            keepAfterLogin = true,
+        )
+        probe.start()
+        delay(11_000)
+        probe.evalJs(js, "dbg1")
+        delay(5_000)
+        probe.evalJs(js, "dbg2")
     }
 
     // 调试入口：直接走「未登录 → 弹码 → 轮询 → 续播」这条链，不用手动翻详情页
@@ -372,6 +768,46 @@ private fun AppRoot(repo: AppRepository) {
         val target = repo.currentSite ?: repo.sites.firstOrNull() ?: return@LaunchedEffect
         android.util.Log.i("NextMoviePan", "dbg-panlogin pan=$pan site=${target.key}")
         askPanLogin(target, pan, null)
+    }
+
+    // 调试入口：阿里会话自检（列目录 + 取直链 + Range 探针），不需要重新扫码
+    LaunchedEffect(Unit) {
+        val intent = (context as? android.app.Activity)?.intent ?: return@LaunchedEffect
+        if (intent.getStringExtra("dbg_alicheck") == null) return@LaunchedEffect
+        delay(1_200)
+        scope.launch(Dispatchers.IO) {
+            val result = runCatching { com.nextmovie.core.pan.AliApi.selfCheck(context) }
+                .getOrElse { "异常 " + it.javaClass.simpleName + " " + it.message }
+            android.util.Log.i("NextMovieAli", "alicheck => " + result)
+        }
+    }
+
+    // 调试入口：阿里直链双客户端探针（定位 403 是客户端还是链路）
+    LaunchedEffect(Unit) {
+        val intent = (context as? android.app.Activity)?.intent ?: return@LaunchedEffect
+        if (intent.getStringExtra("dbg_aliprobe") == null) return@LaunchedEffect
+        delay(1_200)
+        scope.launch(Dispatchers.IO) {
+            val r = runCatching { com.nextmovie.core.pan.AliApi.probeVariants(context) }
+                .getOrElse { "异常 " + it.javaClass.simpleName + " " + it.message }
+            android.util.Log.i("NextMovieAli", "aliprobe => " + r)
+        }
+    }
+
+    // 调试入口：验证「写 prefs → 重启 :spider → 插件重读」这条凭据写入通道
+    LaunchedEffect(Unit) {
+        val intent = (context as? android.app.Activity)?.intent ?: return@LaunchedEffect
+        val raw = intent.getStringExtra("dbg_panwrite") ?: return@LaunchedEffect
+        val bar = raw.indexOf('|')
+        if (bar <= 0) return@LaunchedEffect
+        val keys = raw.substring(0, bar).split(',').filter { it.isNotBlank() }
+        val value = raw.substring(bar + 1)
+        val ok = com.nextmovie.core.pan.PanPrefs.writeStrings(context, keys.associateWith { value })
+        android.util.Log.i("NextMoviePan", "dbg-panwrite keys=$keys ok=$ok read=" +
+            keys.joinToString(",") { "${it}=${com.nextmovie.core.pan.PanPrefs.readString(context, it)?.length}" })
+        com.nextmovie.core.pan.PanPrefs.restartPlugin(context)
+        delay(600)
+        repo.invalidateContent()
     }
 
     /** 把插件异常翻成人话，别再让用户对着「解析失败」猜。 */
@@ -495,7 +931,8 @@ private fun AppRoot(repo: AppRepository) {
                         url = result.url,
                         headers = result.headers,
                         parse = result.parse,
-                        title = vod.name + " · " + episode.name,
+                        title = vod.name + " · " + com.nextmovie.ui.common.HistoryText
+                            .episodeLabel(episode.name, vod.name).ifBlank { "正片" },
                         siteKey = activeSite.key,
                         vodId = vod.id,
                         vodName = vod.name,
@@ -579,70 +1016,143 @@ private fun AppRoot(repo: AppRepository) {
     }
 
     if (panQrId.isNotBlank()) {
-        androidx.compose.ui.window.Dialog(onDismissRequest = { }) {
-            Column(
-                modifier = Modifier
-                    .width(560.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(androidx.compose.ui.graphics.Color(0xFF11151C))
-                    .padding(horizontal = 24.dp, vertical = 18.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text("登录「$panQrLabel」网盘", color = Tokens.Text, style = MaterialTheme.typography.labelLarge)
-                Spacer(Modifier.height(10.dp))
-                val bmp = panQrBitmap
-                if (bmp != null) {
-                    Image(
-                        bitmap = bmp.asImageBitmap(),
-                        contentDescription = "登录二维码",
-                        modifier = Modifier.width(230.dp).height(230.dp).background(androidx.compose.ui.graphics.Color.White)
-                    )
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { closePanLogin() },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        com.nextmovie.ui.pan.PanLoginDialog(
+            label = panQrLabel,
+            phase = panPhase,
+            phoneQr = panQrPhone,
+            qr = panQrBitmap,
+            message = panQrMsg,
+            secondsLeft = panSeconds,
+            onRetry = {
+                val s = repo.currentSite
+                if (s != null) askPanLogin(s, panQrId, panQrRetry) else closePanLogin()
+            },
+            secondaryLabel = if (com.nextmovie.core.pan.PanProviders.of(panQrId)?.kind == com.nextmovie.core.pan.PanProviders.Kind.SMS)
+                "短信登录" else "账号登录",
+            onAccount = {
+                val id = panQrId
+                val pv = com.nextmovie.core.pan.PanProviders.of(id)
+                if (pv != null && pv.kind == com.nextmovie.core.pan.PanProviders.Kind.SMS) {
+                    openPanSmsCard(id)
                 } else {
-                    Box(
-                        modifier = Modifier.width(230.dp).height(230.dp).background(Tokens.Surface),
-                        contentAlignment = Alignment.Center
-                    ) { Text("生成二维码…", color = Tokens.TextDim, style = MaterialTheme.typography.bodyMedium) }
+                    val s = repo.currentSite
+                    closePanLogin()
+                    if (s != null) accountLauncher.launch(PluginActivity.intent(context, s, "", "panconfig"))
                 }
-                Spacer(Modifier.height(10.dp))
-                Text(panQrMsg, color = Tokens.TextDim, style = MaterialTheme.typography.bodySmall)
-                Spacer(Modifier.height(2.dp))
-                Text("扫码成功后自动继续播放", color = Tokens.TextFaint, style = MaterialTheme.typography.labelSmall)
-                Spacer(Modifier.height(12.dp))
-                androidx.compose.foundation.layout.Row(
-                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp)
-                ) {
-                    val first = remember { FocusRequester() }
-                    LaunchedEffect(panQrId) { kotlinx.coroutines.delay(120); runCatching { first.requestFocus() } }
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(Tokens.Corner.pill))
-                            .background(Tokens.Accent)
-                            .focusRequester(first)
-                            .tvClickable(onClick = { val s = site; if (s != null) askPanLogin(s, panQrId, panQrRetry) }, corner = Tokens.Corner.pill)
-                            .padding(horizontal = 14.dp, vertical = 8.dp)
-                    ) { Text("重新出码", color = Tokens.OnAccent, style = MaterialTheme.typography.labelMedium) }
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(Tokens.Corner.pill))
-                            .background(Tokens.Surface)
-                            .tvClickable(onClick = {
-                                panQrId = ""
-                                site?.let {
-                                    // 现在 /proxy?do=pan&action=config 由插件静态 proxy 真实提供（200），
-                                    // 网页登录就是插件自带的配置中心，扫不了码时可以进去手动登。
-                                    accountLauncher.launch(PluginActivity.intent(context, it, "", "panconfig"))
+            },
+            onClose = { closePanLogin() },
+            input = panInput?.let { it.copy(busy = panInputBusy) },
+            onKey = { c ->
+                val cur = panInput
+                if (cur != null) {
+                    panInput = when (cur.field) {
+                        com.nextmovie.ui.pan.PanField.PHONE ->
+                            if (cur.phone.length < 11) cur.copy(phone = cur.phone + c, error = "") else cur
+                        com.nextmovie.ui.pan.PanField.CODE ->
+                            if (cur.code.length < 6) cur.copy(code = cur.code + c, error = "") else cur
+                    }
+                }
+            },
+            onBackspace = {
+                val cur = panInput
+                if (cur != null) {
+                    panInput = when (cur.field) {
+                        com.nextmovie.ui.pan.PanField.PHONE -> cur.copy(phone = cur.phone.dropLast(1), error = "")
+                        com.nextmovie.ui.pan.PanField.CODE -> cur.copy(code = cur.code.dropLast(1), error = "")
+                    }
+                }
+            },
+            onClear = {
+                val cur = panInput
+                if (cur != null) {
+                    panInput = when (cur.field) {
+                        com.nextmovie.ui.pan.PanField.PHONE -> cur.copy(phone = "", error = "")
+                        com.nextmovie.ui.pan.PanField.CODE -> cur.copy(code = "", error = "")
+                    }
+                }
+            },
+            onPickField = { f ->
+                val cur = panInput
+                if (cur != null) panInput = cur.copy(field = f, error = "")
+            },
+            onSend = {
+                val cur = panInput
+                if (cur == null || panInputBusy) {
+                    // 忙的时候不重入
+                } else if (cur.phone.length < 11) {
+                    panInput = cur.copy(error = "先输入 11 位手机号")
+                } else {
+                    val panId = panQrId
+                    val phone = cur.phone
+                    panInputBusy = true
+                    panInput = cur.copy(error = "", busy = true)
+                    scope.launch(Dispatchers.IO) {
+                        val r = com.nextmovie.core.pan.PanBridge.smsSend(panId, phone)
+                        val ok = com.nextmovie.core.pan.PanBridge.isOk(r)
+                        val msg = com.nextmovie.core.pan.PanBridge.msgOf(r)
+                        android.util.Log.i("NextMoviePan", "sms-send pan=$panId ok=$ok msg=$msg")
+                        withContext(Dispatchers.Main) {
+                            panInputBusy = false
+                            panInput = panInput?.copy(
+                                sent = ok || panInput?.sent == true,
+                                field = if (ok) com.nextmovie.ui.pan.PanField.CODE else com.nextmovie.ui.pan.PanField.PHONE,
+                                countdown = if (ok) 60 else 0,
+                                busy = false,
+                                error = when {
+                                    ok -> ""
+                                    msg.isBlank() -> "验证码没发出去，检查手机号后再试"
+                                    else -> msg
+                                },
+                            )
+                            if (ok) startPanCountdown(240)
+                        }
+                    }
+                }
+            },
+            onSubmit = {
+                val cur = panInput
+                if (cur != null && !panInputBusy) {
+                    if (cur.phone.length < 11) {
+                        panInput = cur.copy(error = "先输入 11 位手机号")
+                    } else if (cur.code.length < 4) {
+                        panInput = cur.copy(error = "验证码位数不够")
+                    } else {
+                        val panId = panQrId
+                        val phone = cur.phone
+                        val code = cur.code
+                        panInputBusy = true
+                        panInput = cur.copy(error = "", busy = true)
+                        scope.launch(Dispatchers.IO) {
+                            val r = com.nextmovie.core.pan.PanBridge.smsLogin(panId, phone, code)
+                            val logged = com.nextmovie.core.pan.PanBridge.isOk(r)
+                            val msg = com.nextmovie.core.pan.PanBridge.msgOf(r)
+                            val visible = if (logged) {
+                                runCatching {
+                                    com.nextmovie.core.pan.PanBridge.refresh()?.let { com.nextmovie.core.pan.PanBridge.has(panId) }
+                                }.getOrNull() == true
+                            } else false
+                            android.util.Log.i("NextMoviePan", "sms-login pan=$panId ok=$logged visible=$visible msg=$msg")
+                            withContext(Dispatchers.Main) {
+                                panInputBusy = false
+                                if (logged || visible) {
+                                    finishPanLoginAndReplay()
+                                } else {
+                                    panInput = panInput?.copy(
+                                        busy = false,
+                                        error = msg.ifBlank { "验证码不正确，或插件还没拿到登录态" },
+                                    )
                                 }
-                            }, corner = Tokens.Corner.pill)
-                            .padding(horizontal = 14.dp, vertical = 8.dp)
-                    ) { Text("网页登录", color = Tokens.Text, style = MaterialTheme.typography.labelMedium) }
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(Tokens.Corner.pill))
-                            .background(Tokens.Surface)
-                            .tvClickable(onClick = { panQrId = "" }, corner = Tokens.Corner.pill)
-                            .padding(horizontal = 14.dp, vertical = 8.dp)
-                    ) { Text("关闭", color = Tokens.TextDim, style = MaterialTheme.typography.labelMedium) }
+                            }
+                        }
+                    }
                 }
+            },
+        )
             }
         }
     }

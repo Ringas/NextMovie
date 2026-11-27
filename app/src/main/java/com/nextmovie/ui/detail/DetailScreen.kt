@@ -71,6 +71,7 @@ import com.nextmovie.core.model.withMetadataFrom
 import com.nextmovie.ui.common.AmberChip
 import com.nextmovie.ui.common.BrandLogo
 import com.nextmovie.ui.common.GoldChip
+import com.nextmovie.ui.common.HistoryText
 import com.nextmovie.ui.common.MetaChip
 import com.nextmovie.ui.common.PosterTint
 import com.nextmovie.ui.common.TvPill
@@ -387,25 +388,26 @@ fun DetailScreen(
             },
             contentDescription = null,
             contentScale = ContentScale.Crop,
-            alpha = 0.62f,
+            alpha = 0.52f,
             modifier = Modifier.fillMaxSize()
         )
         Box(
             Modifier.fillMaxSize().background(
                 Brush.horizontalGradient(
-                    0f to Color(0xF00B1420),
-                    0.46f to Color(0xB80B1420),
-                    1f to Color(0x660B1420)
+                    0f to Color(0xFF05070B),
+                    0.46f to Color(0xF2050A12),
+                    0.72f to Color(0x99050A12),
+                    1f to Color(0x33050A12)
                 )
             )
         )
         Box(
             Modifier.fillMaxSize().background(
                 Brush.verticalGradient(
-                    0f to Color(0xB30B1420),
-                    0.26f to Color(0x470B1420),
-                    0.72f to Color(0x590B1420),
-                    1f to Color(0xF00B1420)
+                    0f to Color(0xB30A121D),
+                    0.24f to Color(0x3D0A121D),
+                    0.68f to Color(0x590A121D),
+                    1f to Color(0xFA0A121D)
                 )
             )
         )
@@ -470,15 +472,21 @@ fun DetailScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    MetaChip(if (sources.isEmpty()) site.name else active.name, highlight = true)
-                    vod.ratingBadges().forEach { GoldChip(it) }
+                    // 来源徽标只留站点名主体：「❤花卷 | 4K❤」这类站名里的分隔符/emoji/画质词
+                    // 全都不要，只抽前几个汉字，避免丑字挤在标题上方抢戏
+                    val rawSite = (if (sources.isEmpty()) site.name else active.name)
+                    val siteLabel = rawSite.filter { ch -> ch.code in 0x4E00..0x9FFF }
+                        .take(4).ifBlank { "来源" }
+                    MetaChip(siteLabel, highlight = true)
+                    // 一行放得下的信息才留：评分、来源画质、年份、地区、集数；云盘标在行尾
+                    vod.ratingBadges().take(1).forEach { MetaChip(it) }
                     vod.mediaBadges(line?.episodes?.firstOrNull()?.name.orEmpty(), line?.name.orEmpty())
+                        .take(1)
                         .forEach { MetaChip(it) }
                     vod.displayYear.takeIf { it.isNotBlank() }?.let { MetaChip(it) }
                     vod.area.takeIf { it.isNotBlank() }?.let { MetaChip(it) }
-                    vod.remark.takeIf { it.isNotBlank() }?.let { MetaChip(it.take(16)) }
                     if (line != null && totalEpisodes > 0) MetaChip("共 $totalEpisodes 集")
-                    if (detectDrive(line?.name.orEmpty()) != null) AmberChip("4K 云盘")
+                    if (detectDrive(line?.name.orEmpty()) != null) AmberChip("云盘直链")
                 }
                 Spacer(Modifier.height(14.dp))
                 Text(
@@ -494,10 +502,10 @@ fun DetailScreen(
                 if (resumeEntry != null) {
                     Spacer(Modifier.height(12.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(Tokens.Accent))
+                        Box(Modifier.size(6.dp).clip(RoundedCornerShape(3.dp)).background(Color(0xCCFFFFFF)))
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "上次观看：${resumeEntry.episodeName.ifBlank { "上次位置" }} · ${fmtMs(resumeEntry.positionMs)}",
+                            "上次观看：${HistoryText.episodeLabel(resumeEntry.episodeName, vod.name).ifBlank { "上次位置" }} · ${fmtMs(resumeEntry.positionMs)}",
                             color = Color(0xE6FFFFFF),
                             fontSize = 14.sp,
                             fontWeight = FontWeight.SemiBold
@@ -532,17 +540,29 @@ fun DetailScreen(
                 val overview = vod.displayOverview
                 if (overview.isNotBlank()) {
                     Spacer(Modifier.height(10.dp))
-                    Text(
-                        text = overview,
-                        color = Color(0xD6FFFFFF),
-                        fontSize = 16.sp,
-                        lineHeight = 26.sp,
-                        maxLines = if (synopsisExpanded) 8 else 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .mouseFocusable()
-                            .tvClickable(showRing = false, onClick = { synopsisExpanded = !synopsisExpanded })
-                    )
+                    Column {
+                        Text(
+                            text = overview,
+                            color = Color(0xD6FFFFFF),
+                            fontSize = 16.sp,
+                            lineHeight = 26.sp,
+                            maxLines = if (synopsisExpanded) 8 else 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.mouseFocusable()
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        // 两行截断必须给一个明确的展开入口，否则用户不知道后面还有内容
+                        Text(
+                            text = if (synopsisExpanded) "收起简介" else "展开全文",
+                            color = Color(0xB3FFFFFF),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier
+                                .mouseFocusable()
+                                .tvClickable(showRing = false, onClick = { synopsisExpanded = !synopsisExpanded })
+                                .padding(vertical = 2.dp)
+                        )
+                    }
                 }
                 Spacer(Modifier.height(24.dp))
                 FlowRow(
@@ -550,7 +570,8 @@ fun DetailScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     val ctaLabel = resumeEntry?.let {
-                        "▶ 续播 ${it.episodeName.ifBlank { "上次位置" }} (${fmtMs(it.positionMs)})"
+                        val ep = HistoryText.episodeLabel(it.episodeName, vod.name).ifBlank { "上次位置" }
+                        "▶ 续播 $ep（${fmtMs(it.positionMs)}）"
                     } ?: "▶ 立即播放"
                     Box(modifier = Modifier.focusRequester(playFocus)) {
                         TvPill(
@@ -627,8 +648,8 @@ fun DetailScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(Tokens.Corner.hero))
-                    .background(Tokens.Panel)
-                    .border(1.1.dp, Color(0x26FFFFFF), RoundedCornerShape(Tokens.Corner.hero))
+                    .background(Color(0xCC0B1119))
+                    .border(1.1.dp, Color(0x24FFFFFF), RoundedCornerShape(Tokens.Corner.hero))
                     .padding(start = 26.dp, end = 26.dp, top = 22.dp, bottom = 26.dp)
             ) {
                 when {

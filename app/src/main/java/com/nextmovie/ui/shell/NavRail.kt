@@ -69,21 +69,21 @@ fun NavRail(
             .width(92.dp)
             .fillMaxHeight()
             .background(Color(0xE60A1018))
-            .padding(vertical = 28.dp, horizontal = 12.dp),
+            .padding(vertical = 20.dp, horizontal = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         // 品牌点
         Box(
             Modifier
-                .size(36.dp)
+                .size(34.dp)
                 .clip(CircleShape)
                 .background(Tokens.Accent),
             contentAlignment = Alignment.Center,
         ) {
             Text("N", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(10.dp))
         ShellTab.entries.forEach { tab ->
             NavRailItem(
                 tab = tab,
@@ -92,11 +92,13 @@ fun NavRail(
             )
         }
         Spacer(Modifier.weight(1f))
+        // 底部状态只留一行：5 个入口 + 状态在 600dp 高的电视上正好不溢出
         Text(
-            text = status.take(8).ifBlank { "就绪" },
+            text = status.take(6).ifBlank { "就绪" },
             color = Tokens.TextGhost,
-            fontSize = 10.sp,
-            maxLines = 2,
+            fontSize = 9.5f.sp,
+            maxLines = 1,
+            modifier = Modifier.padding(top = 4.dp),
         )
     }
 }
@@ -131,16 +133,16 @@ private fun NavRailItem(
             .background(bg)
             .tvClickable(onClick = onClick)
             .onFocusChanged { focused = it.isFocused }
-            .padding(vertical = 12.dp),
+            .padding(vertical = 9.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Icon(
             imageVector = tab.icon,
             contentDescription = tab.title,
             tint = if (focused || selected) Color.White else Tokens.TextFaint,
-            modifier = Modifier.size(26.dp),
+            modifier = Modifier.size(24.dp),
         )
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(3.dp))
         Text(
             text = tab.title,
             color = if (focused || selected) Color.White else Tokens.TextFaint,

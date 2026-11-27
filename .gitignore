@@ -17,3 +17,7 @@ libnmabi.so
 *.log
 
 /artifacts/
+
+# 构建产物与分发目录不纳入版本库
+**/build/
+dist/

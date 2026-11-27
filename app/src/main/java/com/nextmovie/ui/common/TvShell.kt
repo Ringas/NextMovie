@@ -94,6 +94,24 @@ fun AmbientBackdrop(
                 if (posterSync && posterTint != null && posterTint.alpha > 0.01f) {
                     orb(posterTint, 0.22f, 0.50f, 0.42f, 0.68f)
                 }
+                // 电影级调色：中央留光、四周压暗（vignette），底部再压一层。
+                // 没有这一步，纯渐变在电视上会显得"发平、发脏"，海报和文字都不立体。
+                drawRect(
+                    Brush.radialGradient(
+                        0f to Color(0x00000000),
+                        0.58f to Color(0x2E000000),
+                        1f to Color(0xA6000000),
+                        center = Offset(size.width * 0.5f, size.height * 0.40f),
+                        radius = size.width * 0.78f
+                    )
+                )
+                drawRect(
+                    Brush.verticalGradient(
+                        0.30f to Color(0x00000000),
+                        0.72f to Color(0x3D000000),
+                        1f to Color(0x8A000000)
+                    )
+                )
             }
     )
 }
@@ -323,7 +341,9 @@ fun TvPill(
     destructive: Boolean = false,
     enabled: Boolean = true,
     autofocus: Boolean = false,
+    autofocusKey: Any? = Unit,
     preserveColor: Boolean = false,
+    quietSelected: Boolean = false,
     borderRadius: Dp = Tokens.Corner.pill,
     horizontalPadding: Dp = 18.dp,
     verticalPadding: Dp = 10.dp,
@@ -335,12 +355,15 @@ fun TvPill(
     val click = if (enabled) onClick else null
     // autofocus 之前只声明没落地，弹窗里的按钮因此拿不到焦点（表现就是弹窗关不掉）
     val focusRequester = remember { FocusRequester() }
-    LaunchedEffect(autofocus) {
-        if (autofocus) runCatching { focusRequester.requestFocus() }
+    LaunchedEffect(autofocus, autofocusKey) {
+        // 单次 requestFocus 会被顶栏的焦点恢复覆盖，交给重试版；
+        // autofocusKey 用来让「同一个按钮在换页后重新抢一次焦点」（设置子页共用同一个返回键）
+        if (autofocus) com.nextmovie.ui.common.focusWithRetries(focusRequester) { focused }
     }
     val bg: Color = when {
         prominent -> if (actual) Color.White else Color(0xF5F7F9FC)
         destructive -> if (actual) Color(0xFFE5484D) else Tokens.DangerDim
+        quietSelected && selected -> Color(0x1FFFFFFF)
         glass -> when {
             actual && !preserveColor -> Color.White
             selected -> Tokens.Accent.copy(alpha = 0.90f)
@@ -360,6 +383,7 @@ fun TvPill(
         prominent -> if (actual) Tokens.Accent else Color(0xD9FFFFFF)
         destructive -> if (actual) Color.White else Color(0x70FF6961)
         actual -> Color.White
+        quietSelected && selected -> Color(0xB3FFFFFF)
         selected -> Color(0x6BFFFFFF)
         else -> Tokens.GlassStroke
     }
@@ -430,15 +454,15 @@ fun GlassCard(
 fun MetaChip(text: String, highlight: Boolean = false, modifier: Modifier = Modifier) {
     Text(
         text = text,
-        color = if (highlight) Color(0xFFD6EAFF) else Color.White,
+        color = Color.White,
         fontSize = 13.sp,
         fontWeight = FontWeight.SemiBold,
         modifier = modifier
             .clip(RoundedCornerShape(999.dp))
-            .background(if (highlight) Tokens.Accent.copy(alpha = 0.28f) else Color(0x21FFFFFF))
+            .background(if (highlight) Color(0x2EFFFFFF) else Color(0x21FFFFFF))
             .border(
                 0.9.dp,
-                if (highlight) Tokens.Accent.copy(alpha = 0.65f) else Color(0x33FFFFFF),
+                if (highlight) Color(0x99FFFFFF) else Color(0x33FFFFFF),
                 RoundedCornerShape(999.dp)
             )
             .padding(horizontal = 12.dp, vertical = 5.dp)

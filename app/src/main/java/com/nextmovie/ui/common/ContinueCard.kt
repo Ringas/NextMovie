@@ -59,7 +59,8 @@ fun ContinueCard(
         label = "continueScale"
     )
     val pct = (entry.progress * 100).toInt().coerceIn(0, 100)
-    val sub = if (entry.episodeName.isBlank()) "继续播放 · 已看 $pct%" else "${entry.episodeName} · 已看 $pct%"
+    val label = HistoryText.episodeLabel(entry.episodeName, entry.name)
+    val sub = "${label.ifBlank { "继续播放" }} · 已看 $pct%"
     val outer = RoundedCornerShape(Tokens.Corner.card)
     val inner = RoundedCornerShape(Tokens.Corner.cardInner)
 
@@ -113,7 +114,7 @@ fun ContinueCard(
         Text(
             text = entry.name,
             color = Color.White,
-            fontSize = 17.sp,
+            fontSize = 15.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis

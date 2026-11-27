@@ -310,7 +310,7 @@ class PluginActivity : ComponentActivity() {
             item { Text(site.name + " · 账户与网盘", color = Tokens.Text, style = MaterialTheme.typography.headlineMedium) }
             item { Text(if (busy) "正在读取…" else status, color = Tokens.TextDim, style = MaterialTheme.typography.bodyLarge) }
             item {
-                SettingsButton(if (loginOpen) "网盘登录（点来源名出二维码）" else "网盘登录 · 夸克 / UC / 阿里 / 百度", enabled = !busy) {
+                SettingsButton(if (loginOpen) "网盘登录（点来源名出二维码）" else "网盘登录 · " + com.nextmovie.core.pan.PanProviders.all.joinToString(" / ") { it.label }, enabled = !busy) {
                     loginOpen = true
                 }
             }

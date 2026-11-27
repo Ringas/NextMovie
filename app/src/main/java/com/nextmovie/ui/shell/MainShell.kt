@@ -1,8 +1,8 @@
 package com.nextmovie.ui.shell
 
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -10,7 +10,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.unit.dp
 import com.nextmovie.ui.common.TvKeys
 import androidx.compose.ui.graphics.Color
 import com.nextmovie.core.AppRepository
@@ -56,9 +58,14 @@ fun MainShell(
 
     Box(Modifier.fillMaxSize()) {
         AmbientBackdrop(posterTint = tint)
-        Row(
+        // 内容区先组合、顶栏后组合：Android 把窗口首个焦点给「组合顺序里的第一个可聚焦节点」，
+        // 以前 TopBar 在上面，所以每次进 App / 切页焦点都先落在顶栏图标上（蓝框在导航里闪一下），
+        // 要按一次方向键才进内容。这里把内容放进 54dp 偏移的 Column、顶栏用 align 叠在上层，
+        // 视觉不变（内容本来就在顶栏下方），但首焦点自然落到内容区第一张卡。
+        androidx.compose.foundation.layout.Column(
             Modifier
                 .fillMaxSize()
+                .padding(top = 54.dp)
                 .onPreviewKeyEvent { e ->
                     val d = TvKeys.sectionDigit(e)
                     if (d != null && d in ShellTab.entries.indices) {
@@ -67,14 +74,6 @@ fun MainShell(
                     } else false
                 }
         ) {
-            NavRail(
-                selected = selected,
-                status = repo.configStatus()?.text ?: site.name,
-                onSelect = { t ->
-                    tab = t.ordinal
-                    if (t == ShellTab.Home) onHomeTabChanged(0)
-                },
-            )
             Box(Modifier.weight(1f).fillMaxSize()) {
                 when (selected) {
                     ShellTab.Home -> HomeScreen(
@@ -118,6 +117,15 @@ fun MainShell(
                 }
             }
         }
+        TopBar(
+            selected = selected,
+            status = repo.configStatus()?.text ?: site.name,
+            onSelect = { t ->
+                tab = t.ordinal
+                if (t == ShellTab.Home) onHomeTabChanged(0)
+            },
+            modifier = Modifier.align(Alignment.TopCenter),
+        )
     }
     if (pairing) {
         PairingDialog(onDismiss = { pairing = false }, onReceived = { pairing = false })

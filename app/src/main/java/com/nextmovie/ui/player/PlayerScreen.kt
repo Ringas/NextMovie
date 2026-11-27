@@ -704,12 +704,6 @@ fun PlayerScreen(
                                 maxLines = 1,
                                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                             )
-                            Text(
-                                text = "确认键暂停 · 左右快进退 · 上下打开控制栏",
-                                color = Color(0x8FFFFFFF),
-                                style = MaterialTheme.typography.labelSmall,
-                                modifier = Modifier.padding(top = 3.dp)
-                            )
                         }
                         Spacer(Modifier.weight(1f))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -781,20 +775,21 @@ fun PlayerScreen(
                         .background(
                             Brush.verticalGradient(
                                 0f to Color.Transparent,
-                                1f to Color(0xE6000000)
+                                0.55f to Color(0x66000000),
+                                1f to Color(0xC7000000)
                             )
                         )
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 40.dp, vertical = 30.dp)
+                            .padding(horizontal = 40.dp, vertical = 22.dp)
                     ) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(6.dp)
-                                .clip(RoundedCornerShape(3.dp))
+                                .height(3.dp)
+                                .clip(RoundedCornerShape(1.5.dp))
                                 .background(Color(0x24F3F0E9))
                         ) {
                             if (bufferedFraction > playedFraction) {
@@ -802,14 +797,14 @@ fun PlayerScreen(
                                     modifier = Modifier
                                         .fillMaxWidth(bufferedFraction)
                                         .fillMaxHeight()
-                                        .background(Color(0x59F3F0E9))
+                                        .background(Color(0x3DFFFFFF))
                                 )
                             }
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth(playedFraction)
                                     .fillMaxHeight()
-                                    .background(Tokens.Accent)
+                                    .background(Color(0xF2FFFFFF))
                             )
                         }
                         Row(
@@ -828,14 +823,6 @@ fun PlayerScreen(
                                 color = Color(0x66F3F0E9),
                                 style = MaterialTheme.typography.labelMedium
                             )
-                            if (duration > 0) {
-                                Spacer(Modifier.width(12.dp))
-                                Text(
-                                    text = "−" + fmt((duration - positionMs).coerceAtLeast(0L)),
-                                    color = Tokens.TextFaint,
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                            }
                             Spacer(Modifier.weight(1f))
                             if (nextEpisodeName != null) {
                                 Text(
@@ -845,11 +832,6 @@ fun PlayerScreen(
                                 )
                                 Spacer(Modifier.width(16.dp))
                             }
-                            Text(
-                                text = if (player.isPlaying) "▶ 播放中" else "❚❚ 已暂停",
-                                color = if (player.isPlaying) Tokens.Accent else Tokens.TextDim,
-                                style = MaterialTheme.typography.labelSmall
-                            )
                         }
                     }
                 }

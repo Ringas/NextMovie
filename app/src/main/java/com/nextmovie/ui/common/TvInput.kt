@@ -31,6 +31,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import com.nextmovie.ui.theme.Tokens
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -105,6 +106,39 @@ fun Modifier.mouseWheel(state: ScrollState): Modifier {
                 }
             }
         }
+    }
+}
+
+/**
+ * 进页面时把焦点落到内容区首行。
+ *
+ * 电视上首焦点默认给「组合顺序里的第一个可聚焦节点」，也就是顶栏——用户一进来先看到
+ * 顶栏那颗图标被蓝框框住，按方向键才掉进内容区，很像 bug。
+ *
+ * 顶栏在窗口拿到焦点后还会把焦点收回去一次，所以单次 requestFocus 会被覆盖；
+ * 这里按 120/360/700/1100ms 重试四次，一旦内容区真的拿到焦点就提前停手，
+ * 不会跟用户的方向键抢。
+ */
+@Composable
+fun AutoFocusOnEnter(
+    requester: FocusRequester,
+    isFocused: () -> Boolean,
+) {
+    LaunchedEffect(Unit) { focusWithRetries(requester, isFocused) }
+}
+
+/** 非 @Composable 版本，给已经在协程里（如 TvPill 的 LaunchedEffect）的地方用。 */
+suspend fun focusWithRetries(
+    requester: FocusRequester,
+    isFocused: () -> Boolean,
+) {
+    val stops = longArrayOf(120L, 360L, 700L, 1100L)
+    var waited = 0L
+    for (stop in stops) {
+        kotlinx.coroutines.delay(stop - waited)
+        waited = stop
+        if (waited >= 700L && isFocused()) return
+        runCatching { requester.requestFocus() }
     }
 }
 

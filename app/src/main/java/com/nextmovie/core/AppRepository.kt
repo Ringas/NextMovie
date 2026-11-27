@@ -52,7 +52,8 @@ class AppRepository(private val context: Context) {
     init {
         // 线路优选：把「是否已登录网盘」和「这条线路真实播成功过几次」喂给排序器
         com.nextmovie.core.match.SourceRanker.panLoggedIn = { pan ->
-            prefs.getString("pan_cookie_$pan", "").orEmpty().isNotBlank()
+            // 登录态以插件 /proxy?do=pan&action=status 为准（30s 缓存），不再读宿主旧 pref
+            runCatching { com.nextmovie.core.pan.PanBridge.has(pan) }.getOrDefault(false)
         }
         com.nextmovie.core.match.SourceRanker.lineStats = { siteKey, line ->
             val ok = prefs.getInt("line_ok_${siteKey}_$line", 0)
@@ -470,6 +471,7 @@ class AppRepository(private val context: Context) {
     }
 
     private fun recordConfigResult(ok: Boolean, text: String) {
+        com.nextmovie.core.log.AppLog.record("config", text)
         prefs.edit()
             .putString(KEY_CONFIG_STATUS, text.take(160))
             .putBoolean(KEY_CONFIG_STATUS_OK, ok)

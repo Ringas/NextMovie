@@ -36,6 +36,14 @@ data class AmbientPreset(
 
 object Ambient {
     val presets = listOf(
+        // V5「影院黑」：底色压到近黑，只留一团极弱的暖光。
+        // 海报成为屏上唯一的彩色，这是影院 UI 与"柔光桌面"最大的区别。
+        AmbientPreset(
+            id = "cinema", name = "影院黑金", subtitle = "近黑底片与一缕片门暖光",
+            baseStart = Color(0xFF05070B), baseMid = Color(0xFF07090F), baseEnd = Color(0xFF0A0B10),
+            orbPrimary = Color(0xFF1B2735), orbSecondary = Color(0xFF131A24), orbWarm = Color(0xFF6B4A2A),
+            accent = Color(0xFF4C9BFF)
+        ),
         AmbientPreset(
             id = "aurora", name = "极光青翠", subtitle = "翡翠湖光与晴空柔雾",
             baseStart = Color(0xFF0F2B3D), baseMid = Color(0xFF121F38), baseEnd = Color(0xFF1A1A3B),
@@ -90,12 +98,12 @@ object AmbientState {
     private const val KEY_INTENSITY = "intensity"
     private const val KEY_POSTER = "poster_sync"
 
-    var themeId by mutableStateOf("aurora")
+    var themeId by mutableStateOf("cinema")
         private set
     /** soft / standard / vivid */
-    var intensity by mutableStateOf("standard")
+    var intensity by mutableStateOf("soft")
         private set
-    var posterSync by mutableStateOf(true)
+    var posterSync by mutableStateOf(false)
         private set
 
     private var bound = false
@@ -104,9 +112,23 @@ object AmbientState {
         if (bound) return
         bound = true
         val p = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        themeId = p.getString(KEY_THEME, "aurora").orEmpty().ifBlank { "aurora" }
-        intensity = p.getString(KEY_INTENSITY, "standard").orEmpty().ifBlank { "standard" }
-        posterSync = p.getBoolean(KEY_POSTER, true)
+        // V5 迁移：默认从「柔光」切到「影院黑」，只强制一次，之后仍以用户选择为准
+        val migrated = p.getBoolean("cinema_v5", false)
+        if (!migrated) {
+            p.edit()
+                .putString(KEY_THEME, "cinema")
+                .putString(KEY_INTENSITY, "soft")
+                .putBoolean(KEY_POSTER, false)
+                .putBoolean("cinema_v5", true)
+                .apply()
+            themeId = "cinema"
+            intensity = "soft"
+            posterSync = false
+        } else {
+            themeId = p.getString(KEY_THEME, "cinema").orEmpty().ifBlank { "cinema" }
+            intensity = p.getString(KEY_INTENSITY, "soft").orEmpty().ifBlank { "soft" }
+            posterSync = p.getBoolean(KEY_POSTER, false)
+        }
     }
 
     fun setTheme(context: Context, id: String) {
@@ -141,21 +163,21 @@ object AmbientState {
  * 卡片圆角 16、聚焦描边 1.1dp → 2.5dp 变白，配一层主色辉光；缩放只做 1.045。
  */
 object Tokens {
-    // —— 底色 / 材质 ——
-    val Bg = Color(0xFF0F1A29)
-    val Surface = Color(0x18FFFFFF)        // white 9.5%
-    val SurfaceHigh = Color(0x23FFFFFF)    // white 13.5%
-    val SurfaceSunk = Color(0x08000000)
-    val GlassFill = Color(0x21FFFFFF)
-    val GlassStroke = Color(0x3DFFFFFF)
-    val Panel = Color(0xB80E1420)
-    val PanelSolid = Color(0xF2141720)
-    val PosterPlaceholder = Color(0xFF1A2232)
+    // —— 底色 / 材质 ——（V5 影院黑：近黑打底，层次靠白色半透明，不靠色相）
+    val Bg = Color(0xFF05070B)
+    val Surface = Color(0x14FFFFFF)        // white 8%
+    val SurfaceHigh = Color(0x21FFFFFF)    // white 13%
+    val SurfaceSunk = Color(0x66000000)
+    val GlassFill = Color(0x1AFFFFFF)
+    val GlassStroke = Color(0x33FFFFFF)
+    val Panel = Color(0xE60A0C12)
+    val PanelSolid = Color(0xF50A0C12)
+    val PosterPlaceholder = Color(0xFF11141B)
 
-    val Accent = Color(0xFF388FFA)
+    val Accent = Color(0xFF4C9BFF)
     val OnAccent = Color.White
-    val AccentDim = Color(0x38388FFA)
-    val AccentGlow = Color(0x52388FFA)
+    val AccentDim = Color(0x384C9BFF)
+    val AccentGlow = Color(0x524C9BFF)
     val Score = Color(0xFFF5C247)
     val ScoreInk = Color(0xFF0A0F18)
     val Amber = Color(0xFFF5A623)
@@ -184,8 +206,8 @@ object Tokens {
     val RowGap = 24.dp
     val CardWidth = 160.dp
     val CardHeight = 240.dp
-    val WideWidth = 268.dp
-    val WideHeight = 150.dp
+    val WideWidth = 208.dp
+    val WideHeight = 117.dp
     val Radius = 14.dp
 
     // —— 间距栅格 ——
@@ -233,9 +255,9 @@ private val TvColorScheme = darkColorScheme(
     secondary = Tokens.Accent,
     background = Tokens.Bg,
     onBackground = Tokens.Text,
-    surface = Color(0xFF141A26),
+    surface = Color(0xFF0B0E14),
     onSurface = Tokens.Text,
-    surfaceVariant = Color(0xFF1A2232),
+    surfaceVariant = Color(0xFF11141B),
     onSurfaceVariant = Tokens.TextDim,
     error = Tokens.Danger
 )
