@@ -355,10 +355,12 @@ fun TvPill(
     val click = if (enabled) onClick else null
     // autofocus 之前只声明没落地，弹窗里的按钮因此拿不到焦点（表现就是弹窗关不掉）
     val focusRequester = remember { FocusRequester() }
+    val hostView = androidx.compose.ui.platform.LocalView.current
     LaunchedEffect(autofocus, autofocusKey) {
         // 单次 requestFocus 会被顶栏的焦点恢复覆盖，交给重试版；
         // autofocusKey 用来让「同一个按钮在换页后重新抢一次焦点」（设置子页共用同一个返回键）
-        if (autofocus) com.nextmovie.ui.common.focusWithRetries(focusRequester) { focused }
+        // hostView 用来在触屏进入（touch mode）时先把窗口焦点抢回 ComposeView，否则请求会被静默丢弃
+        if (autofocus) com.nextmovie.ui.common.focusWithRetries(focusRequester, { focused }, hostView)
     }
     val bg: Color = when {
         prominent -> if (actual) Color.White else Color(0xF5F7F9FC)

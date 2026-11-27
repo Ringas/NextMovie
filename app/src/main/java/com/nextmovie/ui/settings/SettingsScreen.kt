@@ -179,13 +179,14 @@ private fun SettingsHome(repo: AppRepository, focusSignal: Int = 0, onOpen: (Set
     val site = repo.currentSite
     val firstRowFocus = remember { FocusRequester() }
     var firstRowFocused by remember { mutableStateOf(false) }
+    val hostView = androidx.compose.ui.platform.LocalView.current
     // 顶栏会先把焦点揽走，单次 requestFocus 会被覆盖；AutoFocusOnEnter 按时间点重试到真的落地
     AutoFocusOnEnter(firstRowFocus) { firstRowFocused }
     // 从顶栏齿轮进来时再补一次：AutoFocusOnEnter 可能刚好和顶栏换页撞在同一帧被吃掉
     LaunchedEffect(focusSignal) {
         if (focusSignal > 0) {
             kotlinx.coroutines.delay(150)
-            focusWithRetries(firstRowFocus) { firstRowFocused }
+            focusWithRetries(firstRowFocus, { firstRowFocused }, hostView)
         }
     }
     val siteName = site?.name?.filter { it.code in 0x4E00..0x9FFF }?.take(4)?.ifBlank { site.name } ?: "未选择"

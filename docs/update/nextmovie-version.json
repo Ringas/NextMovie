@@ -1,7 +1,7 @@
 {
-  "versionCode": 42,
-  "versionName": "0.6.26-dev",
-  "notes": "顶栏改为 D+B 融合（NEXT 字标 / 文字导航 / 站点·换源·设置）；首页去掉重复站点行",
+  "versionCode": 43,
+  "versionName": "0.6.27-dev",
+  "notes": "修复触屏进入时首焦点不落地：先把窗口焦点抢回 Compose，再请求页面内焦点，设置页首行直接可操作",
   "apk": "https://github.com/Ringas/NextMovie/releases",
   "page": "https://github.com/Ringas/NextMovie/releases"
 }

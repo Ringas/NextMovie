@@ -1,5 +1,6 @@
 package com.nextmovie.ui.common
 
+import android.view.View
 import androidx.compose.ui.composed
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
@@ -31,6 +32,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import com.nextmovie.ui.theme.Tokens
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -124,19 +126,37 @@ fun AutoFocusOnEnter(
     requester: FocusRequester,
     isFocused: () -> Boolean,
 ) {
-    LaunchedEffect(Unit) { focusWithRetries(requester, isFocused) }
+    val view = LocalView.current
+    LaunchedEffect(Unit) { focusWithRetries(requester, isFocused, view) }
+}
+
+/**
+ * 触屏（手指点 / adb tap）进入页面时，Android 处于 touch mode：窗口焦点不在 ComposeView 上，
+ * Compose 的 `requestFocus()` 会被静默丢弃，表现就是「点齿轮进设置，列表首行不亮」。
+ *
+ * 这里把宿主 View 标成「可在 touch mode 聚焦」，再用 `requestFocusFromTouch()` 把窗口焦点抢回来；
+ * 之后 Compose 的焦点请求才会真正落到节点上。遥控器按键本身会退出 touch mode，电视路径不受影响。
+ */
+fun ensureWindowFocusForCompose(view: View) {
+    runCatching {
+        if (!view.isFocusableInTouchMode) view.isFocusableInTouchMode = true
+        if (!view.hasWindowFocus() || !view.hasFocus()) view.requestFocusFromTouch()
+    }
 }
 
 /** 非 @Composable 版本，给已经在协程里（如 TvPill 的 LaunchedEffect）的地方用。 */
 suspend fun focusWithRetries(
     requester: FocusRequester,
     isFocused: () -> Boolean,
+    view: View? = null,
 ) {
     val stops = longArrayOf(120L, 360L, 700L, 1100L)
     var waited = 0L
     for (stop in stops) {
         kotlinx.coroutines.delay(stop - waited)
         waited = stop
+        // 前两次先确保窗口焦点回到 ComposeView，再请求页面内焦点
+        if (view != null && waited <= 360L) ensureWindowFocusForCompose(view)
         if (waited >= 700L && isFocused()) return
         runCatching { requester.requestFocus() }
     }
