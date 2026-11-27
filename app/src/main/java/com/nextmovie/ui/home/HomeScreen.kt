@@ -82,6 +82,7 @@ fun HomeScreen(
     onFocusIndexChanged: (Int) -> Unit = {},
     onSiteChanged: () -> Unit = {},
     onTint: (Color?) -> Unit = {},
+    switchSourceSignal: Int = 0,
 ) {
     val screenStartedAt = remember { System.nanoTime() }
     var vods by remember { mutableStateOf<List<Vod>>(emptyList()) }
@@ -232,6 +233,13 @@ fun HomeScreen(
         }
     }
 
+    // 顶栏「换源」：信号来一次就开一次站点选择器；同一按键漏到底层按钮时用时间闸挡掉
+    LaunchedEffect(switchSourceSignal) {
+        if (switchSourceSignal > 0 &&
+            android.os.SystemClock.elapsedRealtime() - pickerClosedAt > 250L
+        ) sitePicker = true
+    }
+
     if (pairing) {
         PairingDialog(
             onDismiss = { pairing = false },
@@ -270,44 +278,6 @@ fun HomeScreen(
             .fillMaxSize()
             .padding(start = 20.dp, end = 32.dp, top = 12.dp, bottom = 12.dp),
     ) {
-        // —— 顶栏：站点名 + 快捷操作 ——
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = site.name.filter { it.code in 0x4E00..0x9FFF }.take(4)
-                        .ifBlank { site.name.ifBlank { "NextMovie" } },
-                    color = Tokens.Text,
-                    fontSize = 23.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = when {
-                        loading -> "加载中… ${loadSecs}s"
-                        error != null -> "加载失败"
-                        display.isEmpty() -> "暂无内容"
-                        else -> "${display.size} 部影片"
-                    },
-                    color = Tokens.TextFaint,
-                    fontSize = 13.sp,
-                )
-            }
-            TvPill(
-                text = "换源",
-                glass = true,
-                horizontalPadding = 16.dp,
-                verticalPadding = 9.dp,
-                onClick = {
-                    if (android.os.SystemClock.elapsedRealtime() - pickerClosedAt > 250L) sitePicker = true
-                }
-            )
-        }
-
         Spacer(Modifier.height(9.dp))
 
         // —— 分类条 ——

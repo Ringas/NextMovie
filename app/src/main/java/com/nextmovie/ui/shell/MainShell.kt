@@ -53,6 +53,9 @@ fun MainShell(
     var tab by remember { mutableIntStateOf(initialTab.coerceIn(0, ShellTab.entries.lastIndex)) }
     androidx.compose.runtime.LaunchedEffect(tab) { onTabChanged(tab) }
     var tint by remember { mutableStateOf<Color?>(null) }
+    // 顶栏「换源」不改首页状态机，只递一个信号；首页收到后自己弹站点选择器
+    var switchSourceSignal by remember { mutableIntStateOf(0) }
+    var settingsEntrySignal by remember { mutableIntStateOf(0) }
     var pairing by remember { mutableStateOf(false) }
     val selected = ShellTab.entries.getOrElse(tab) { ShellTab.Home }
 
@@ -65,7 +68,7 @@ fun MainShell(
         androidx.compose.foundation.layout.Column(
             Modifier
                 .fillMaxSize()
-                .padding(top = 54.dp)
+                .padding(top = TopBarHeight)
                 .onPreviewKeyEvent { e ->
                     val d = TvKeys.sectionDigit(e)
                     if (d != null && d in ShellTab.entries.indices) {
@@ -91,6 +94,7 @@ fun MainShell(
                         onTabChanged = onHomeTabChanged,
                         onFocusIndexChanged = onHomeFocusIndexChanged,
                         onTint = { tint = it },
+                        switchSourceSignal = switchSourceSignal,
                     )
                     ShellTab.Search -> SearchScreen(
                         repo = repo,
@@ -113,17 +117,20 @@ fun MainShell(
                         repo = repo,
                         onBack = { tab = ShellTab.Home.ordinal },
                         onConfigLoaded = { tab = ShellTab.Home.ordinal },
+                        focusSignal = settingsEntrySignal,
                     )
                 }
             }
         }
         TopBar(
             selected = selected,
-            status = repo.configStatus()?.text ?: site.name,
+            siteName = site.name,
             onSelect = { t ->
                 tab = t.ordinal
+                if (t == ShellTab.Settings) settingsEntrySignal += 1
                 if (t == ShellTab.Home) onHomeTabChanged(0)
             },
+            onSwitchSite = { switchSourceSignal += 1 },
             modifier = Modifier.align(Alignment.TopCenter),
         )
     }

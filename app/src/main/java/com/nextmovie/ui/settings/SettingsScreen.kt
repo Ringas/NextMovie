@@ -70,6 +70,7 @@ import com.nextmovie.ui.player.engine.PlayerPrefs
 import com.nextmovie.ui.player.PlaybackSession
 import com.nextmovie.core.config.Site
 import com.nextmovie.ui.common.AutoFocusOnEnter
+import com.nextmovie.ui.common.focusWithRetries
 import com.nextmovie.ui.common.BrandLogo
 import com.nextmovie.ui.common.GlassCard
 import com.nextmovie.ui.common.TvPill
@@ -117,7 +118,7 @@ private enum class SettingsPage(val title: String) {
 }
 
 @Composable
-fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -> Unit) {
+fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -> Unit, focusSignal: Int = 0) {
     val context = LocalContext.current
     var page by remember { mutableStateOf(SettingsPage.Home) }
 
@@ -137,7 +138,7 @@ fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -
             .padding(start = 56.dp, end = 56.dp, top = 34.dp)
     ) {
         if (page == SettingsPage.Home) {
-            SettingsHome(repo) { page = it }
+            SettingsHome(repo, focusSignal) { page = it }
         } else {            Row(verticalAlignment = Alignment.CenterVertically) {
                 TvPill("‹ 设置", glass = true, autofocus = true, autofocusKey = page, onClick = { page = SettingsPage.Home })
                 Spacer(Modifier.width(18.dp))
@@ -165,7 +166,7 @@ fun SettingsScreen(repo: AppRepository, onBack: () -> Unit, onConfigLoaded: () -
 }
 
 @Composable
-private fun SettingsHome(repo: AppRepository, onOpen: (SettingsPage) -> Unit) {
+private fun SettingsHome(repo: AppRepository, focusSignal: Int = 0, onOpen: (SettingsPage) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var autoNext by remember { mutableStateOf(repo.autoNext) }
@@ -180,6 +181,13 @@ private fun SettingsHome(repo: AppRepository, onOpen: (SettingsPage) -> Unit) {
     var firstRowFocused by remember { mutableStateOf(false) }
     // 顶栏会先把焦点揽走，单次 requestFocus 会被覆盖；AutoFocusOnEnter 按时间点重试到真的落地
     AutoFocusOnEnter(firstRowFocus) { firstRowFocused }
+    // 从顶栏齿轮进来时再补一次：AutoFocusOnEnter 可能刚好和顶栏换页撞在同一帧被吃掉
+    LaunchedEffect(focusSignal) {
+        if (focusSignal > 0) {
+            kotlinx.coroutines.delay(150)
+            focusWithRetries(firstRowFocus) { firstRowFocused }
+        }
+    }
     val siteName = site?.name?.filter { it.code in 0x4E00..0x9FFF }?.take(4)?.ifBlank { site.name } ?: "未选择"
 
     Column(
@@ -190,7 +198,7 @@ private fun SettingsHome(repo: AppRepository, onOpen: (SettingsPage) -> Unit) {
     ) {
         Text("设置", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(6.dp))
-        Text("只留下会改变观影体验的开关；其余收进二级页", color = Tokens.TextFaint, fontSize = 13.sp)
+        Text("只留下会改变观影体验的开关；按返回键回首页", color = Tokens.TextFaint, fontSize = 13.sp)
         Spacer(Modifier.height(22.dp))
 
         // —— 播放 ——
