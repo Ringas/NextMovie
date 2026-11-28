@@ -187,6 +187,8 @@ object Tokens {
     val GreenText = Color(0xFF7CF0A4)
     val GreenDim = Color(0x3834C759)
     val Danger = Color(0xFFE5484D)
+    /** 「接口正常、线路失效」的黄点：和站点整体不可达的红点区分开。 */
+    val Warn = Color(0xFFE8A93B)
     val DangerDim = Color(0x38FF453A)
 
     // —— 文本 ——

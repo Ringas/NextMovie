@@ -36,6 +36,7 @@ object SourceHealthStore {
         TIMEOUT("连接超时"),
         RESET("连接被重置"),
         API("接口异常"),
+        PLAY("线路失效"),
         UNKNOWN("未测")
     }
 
@@ -52,6 +53,7 @@ object SourceHealthStore {
     /** 缓存有效期：域名复活/挂掉都按天变化，一天一刷足够，避免每次启动都打一轮网络。 */
     private const val TTL_MS = 24L * 60 * 60 * 1000
     private const val SITE_PREFIX = "site@"
+    private const val PLAY_PREFIX = "play@"
     const val DEFAULT_TIMEOUT_MS = 2_000
 
     private val DNS_POOL = java.util.concurrent.Executors.newCachedThreadPool { r ->
@@ -118,7 +120,51 @@ object SourceHealthStore {
         if (siteKey.isBlank()) return
         synchronized(lock) {
             cache.remove(SITE_PREFIX + siteKey)
+            cache.remove(PLAY_PREFIX + siteKey)
             persistLocked()
+        }
+    }
+
+    /**
+     * 「片库活着、首集线路死了」是采集站最常见的腐烂姿势：接口秒回 118 万条，
+     * 点播放却发现 m3u8 域名已经不通。这里单独记一笔，别和「站点不可达」混成一个红点。
+     */
+    fun markPlayDead(siteKey: String, note: String = "播放线路不可达") {
+        if (siteKey.isBlank()) return
+        synchronized(lock) {
+            cache[PLAY_PREFIX + siteKey] = State(
+                host = PLAY_PREFIX + siteKey,
+                status = Status.PLAY,
+                note = note,
+                latencyMs = -1,
+                atMs = System.currentTimeMillis()
+            )
+            persistLocked()
+        }
+    }
+
+    fun playDead(siteKey: String): State? {
+        if (siteKey.isBlank()) return null
+        val now = System.currentTimeMillis()
+        return synchronized(lock) {
+            cache[PLAY_PREFIX + siteKey]
+                ?.takeIf { it.status == Status.PLAY && now - it.atMs < TTL_MS }
+        }
+    }
+
+    fun playDeadSnapshot(): Map<String, State> = synchronized(lock) {
+        val now = System.currentTimeMillis()
+        cache.entries
+            .filter { it.key.startsWith(PLAY_PREFIX) }
+            .filter { it.value.status == Status.PLAY && now - it.value.atMs < TTL_MS }
+            .associate { it.key.removePrefix(PLAY_PREFIX) to it.value }
+    }
+
+    /** 这条源真播成功过一次，之前的「线路失效」结论就该作废。 */
+    fun clearPlayDead(siteKey: String) {
+        if (siteKey.isBlank()) return
+        synchronized(lock) {
+            if (cache.remove(PLAY_PREFIX + siteKey) != null) persistLocked()
         }
     }
 

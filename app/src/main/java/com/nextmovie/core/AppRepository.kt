@@ -114,6 +114,10 @@ class AppRepository(private val context: Context) {
     var extraSites: List<com.nextmovie.core.config.Site> by mutableStateOf(emptyList())
         private set
 
+    /** 站点 key → 备注：接口正常但取不到播放线路（换源面板黄点，别和「站点不可达」的红点混）。 */
+    var playDeadSites: Map<String, String> by mutableStateOf(emptyMap())
+        private set
+
     private var healthScanning = false
 
     init {
@@ -121,6 +125,8 @@ class AppRepository(private val context: Context) {
         extraSites = com.nextmovie.core.config.ExtraSites.load(context)
         // 盘上已有站点结论就先铺上去，避免「重启后换源面板红点消失、点进去又白等一轮」
         siteHealth = com.nextmovie.core.config.SourceHealthStore.siteSnapshot()
+        playDeadSites = com.nextmovie.core.config.SourceHealthStore.playDeadSnapshot()
+            .mapValues { it.value.note.ifBlank { "播放线路不可达" } }
         tmdb.token = prefs.getString(KEY_TMDB_TOKEN, "").orEmpty()
         applyTmdbRoute()
         applyDnsRoute()
@@ -1053,6 +1059,7 @@ class AppRepository(private val context: Context) {
                                         ?.episodes?.firstOrNull()?.url.orEmpty()
                                     if (!playlistAlive(headUrl)) {
                                         miss = "dead-cdn"
+                                        markPlayDead(candidate)
                                         return@let null
                                     }
                                 }
@@ -1178,6 +1185,12 @@ class AppRepository(private val context: Context) {
         return ok
     }
 
+    /** 记一笔「这家接口能用、但线路取不到」，换源面板据此给黄点，真播成功后自动撤销。 */
+    private fun markPlayDead(site: com.nextmovie.core.config.Site, note: String = "播放线路不可达") {
+        com.nextmovie.core.config.SourceHealthStore.markPlayDead(site.key, note)
+        playDeadSites = playDeadSites + (site.key to note)
+    }
+
     private suspend fun <T> detailAttempt(block: suspend () -> T): T? = try {        block()
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
@@ -1230,6 +1243,10 @@ class AppRepository(private val context: Context) {
     /** 起播成功/失败都要回写：聚合排序靠这个逐步收敛到"哪个源真的能播"。 */
     fun recordPlayOutcome(siteKey: String, ok: Boolean, lineName: String = "") {
         if (siteKey.isBlank()) return
+        if (ok) {
+            com.nextmovie.core.config.SourceHealthStore.clearPlayDead(siteKey)
+            if (playDeadSites.containsKey(siteKey)) playDeadSites = playDeadSites - siteKey
+        }
         val k = (if (ok) "stat_ok_" else "stat_fail_") + siteKey
         val edit = prefs.edit().putInt(k, prefs.getInt(k, 0) + 1)
         if (lineName.isNotBlank()) {

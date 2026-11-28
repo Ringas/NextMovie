@@ -262,6 +262,7 @@ fun HomeScreen(
             sites = repo.sites,
             currentKey = site.key,
             health = repo.siteHealth,
+            playDead = repo.playDeadSites,
             onPick = { picked ->
                 sitePicker = false
                 repo.selectSite(picked.key)
@@ -522,6 +523,7 @@ private fun SitePickerDialog(
     sites: List<Site>,
     currentKey: String,
     health: Map<String, com.nextmovie.core.config.SourceHealthStore.State> = emptyMap(),
+    playDead: Map<String, String> = emptyMap(),
     onPick: (Site) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -548,6 +550,37 @@ private fun SitePickerDialog(
                 )
             }
             Spacer(Modifier.height(16.dp))
+            // 图例只在真的有红点/黄点时出现，别让 95 个站名下面永远挂一行说明
+            run {
+                val hasDead = sites.any { health[it.key]?.dead == true }
+                val hasLineDead = sites.any { !(health[it.key]?.dead == true) && playDead.containsKey(it.key) }
+                if (hasDead || hasLineDead) {
+                    androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (hasDead) {
+                            androidx.compose.foundation.layout.Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(Tokens.Danger)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            androidx.compose.material3.Text("站点不可达", fontSize = 11.sp, color = Tokens.TextFaint)
+                            Spacer(Modifier.width(16.dp))
+                        }
+                        if (hasLineDead) {
+                            androidx.compose.foundation.layout.Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(Tokens.Warn)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            androidx.compose.material3.Text("接口正常但线路取不到", fontSize = 11.sp, color = Tokens.TextFaint)
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                }
+            }
             val gridState = rememberLazyGridState()
             LazyVerticalGrid(
                 columns = GridCells.Fixed(3),
@@ -558,6 +591,8 @@ private fun SitePickerDialog(
             ) {
                 itemsIndexed(sites, key = { _, s -> s.key }) { _, s ->
                     val dead = health[s.key]?.dead == true
+                    // 接口活、线路死：给黄点而不是红点，用户仍然可以点进去，只是心里有数
+                    val lineDead = !dead && playDead.containsKey(s.key)
                     TvPill(
                         glass = true,
                         selected = s.key == currentKey,
@@ -570,14 +605,7 @@ private fun SitePickerDialog(
                         androidx.compose.foundation.layout.Row(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            // 站名普遍很长，小一号字才放得下 5–6 个汉字而不被省略号吃掉
-                            androidx.compose.material3.Text(
-                                text = siteLabel(s.name),
-                                fontSize = 13.sp,
-                                maxLines = 1,
-                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                            )
-                            // 死源不再靠用户逐个点开才发现：标题前一个小红点，长站名也不会把它挤掉
+                            // 标记放在名字前面：长站名会吃掉尾部空间，点放后面就被省略号挤没了
                             if (dead) {
                                 androidx.compose.foundation.layout.Box(
                                     modifier = Modifier
@@ -586,7 +614,23 @@ private fun SitePickerDialog(
                                         .background(Tokens.Danger)
                                 )
                                 Spacer(Modifier.width(5.dp))
+                            } else if (lineDead) {
+                                androidx.compose.foundation.layout.Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(Tokens.Warn)
+                                )
+                                Spacer(Modifier.width(5.dp))
                             }
+                            // 站名普遍很长，小一号字才放得下 5–6 个汉字而不被省略号吃掉
+                            androidx.compose.material3.Text(
+                                text = siteLabel(s.name),
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                color = if (lineDead) Tokens.TextDim else Tokens.Text,
+                            )
                         }
                     }
                 }
