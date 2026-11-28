@@ -38,6 +38,7 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -458,6 +459,9 @@ private fun SourcesCard(repo: AppRepository, onConfigLoaded: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
     var subscriptions by remember { mutableStateOf(repo.savedSubscriptions()) }
+    var poolCount by remember { mutableIntStateOf(repo.extraSites.size) }
+    var poolBusy by remember { mutableStateOf(false) }
+    val poolSize = remember { com.nextmovie.core.config.CmsPool.entries(context).size }
     var includeLibrary by remember { mutableStateOf(false) }
     val exportBackup = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/json")
@@ -541,6 +545,82 @@ private fun SourcesCard(repo: AppRepository, onConfigLoaded: () -> Unit) {
             })
             TvPill("导入备份", glass = true, onClick = { importBackup.launch(arrayOf("application/json", "text/plain")) })
             TvPill("包含收藏和历史", selected = includeLibrary, glass = true, onClick = { includeLibrary = !includeLibrary })
+        }
+        /* ---- 内置 CMS 直连源池 ---- */
+        Spacer(Modifier.height(20.dp))
+        HLine()
+        Spacer(Modifier.height(16.dp))
+        Text("直连片源池（CMS）", color = Tokens.TextDim, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "内置 ${poolSize} 个苹果 CMS 直连接口，独立于订阅、不依赖插件与 JS 引擎；片库大、首屏快。",
+            color = Tokens.TextFaint,
+            fontSize = 13.sp
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            TvPill(
+                text = when {
+                    poolBusy -> "导入中…"
+                    poolCount > 0 -> "已导入 $poolCount 站"
+                    else -> "导入 $poolSize 个直连源"
+                },
+                prominent = poolCount == 0,
+                glass = poolCount > 0,
+                enabled = !busy && !poolBusy,
+                onClick = {
+                    if (poolCount > 0 || poolBusy) return@TvPill
+                    poolBusy = true
+                    message = "正在并入直连源…"
+                    scope.launch {
+                        val n = runCatching { repo.importCmsPool() }.getOrDefault(0)
+                        poolCount = repo.extraSites.size
+                        poolBusy = false
+                        status = repo.configStatus()
+                        message = if (n > 0) "已并入 $n 个 CMS 直连源，片源列表共 ${repo.sites.size} 个站点" else "导入失败，检查资产是否完整"
+                        if (n > 0) onConfigLoaded()
+                    }
+                }
+            )
+            if (poolCount > 0) {
+                TvPill("移除", glass = true, enabled = !busy && !poolBusy, onClick = {
+                    repo.removeCmsPool()
+                    poolCount = 0
+                    status = repo.configStatus()
+                    message = "已移除直连源池"
+                    onConfigLoaded()
+                })
+            }
+        }
+        if (poolCount > 0) {
+            Spacer(Modifier.height(10.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                repo.extraSites.chunked(3).forEach { row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        row.forEach { site ->
+                            val state = repo.siteHealth[site.key]
+                            val dead = state?.dead == true
+                            TvPill(
+                                text = (if (dead) "✕ " else "") + site.name,
+                                selected = repo.currentSite?.key == site.key,
+                                glass = repo.currentSite?.key != site.key,
+                                horizontalPadding = 14.dp,
+                                onClick = {
+                                    repo.selectSite(site.key)
+                                    status = repo.configStatus()
+                                    onConfigLoaded()
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "接口探活后台进行（并发 2），失败会自动打叉，不影响当前播放。",
+                color = Tokens.TextFaint,
+                fontSize = 12.5.sp
+            )
         }
         if (subscriptions.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))

@@ -35,6 +35,7 @@ object SourceHealthStore {
         TLS("证书/加密握手失败"),
         TIMEOUT("连接超时"),
         RESET("连接被重置"),
+        API("接口异常"),
         UNKNOWN("未测")
     }
 
@@ -108,6 +109,15 @@ object SourceHealthStore {
         if (siteKey.isBlank()) return
         synchronized(lock) {
             cache[SITE_PREFIX + siteKey] = state
+            persistLocked()
+        }
+    }
+
+    /** 站点被移除时一并清掉它的结论，避免换源面板留下已不存在的红点。 */
+    fun forgetSite(siteKey: String) {
+        if (siteKey.isBlank()) return
+        synchronized(lock) {
+            cache.remove(SITE_PREFIX + siteKey)
             persistLocked()
         }
     }

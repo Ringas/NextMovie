@@ -8,6 +8,7 @@ import com.nextmovie.core.cms.CmsSiteClient
 import com.nextmovie.core.config.ConfigBundle
 import com.nextmovie.core.config.ConfigRepository
 import com.nextmovie.core.config.HealthReport
+import com.nextmovie.core.config.ProbeStatus
 import com.nextmovie.core.config.Site
 import com.nextmovie.core.config.SiteHealth
 import com.nextmovie.core.config.SiteSelector
@@ -109,10 +110,15 @@ class AppRepository(private val context: Context) {
     var siteHealth: Map<String, com.nextmovie.core.config.SourceHealthStore.State> by mutableStateOf(emptyMap())
         private set
 
+    /** 已导入的内置 CMS 源池（外挂站点，独立于订阅存盘）。 */
+    var extraSites: List<com.nextmovie.core.config.Site> by mutableStateOf(emptyList())
+        private set
+
     private var healthScanning = false
 
     init {
         com.nextmovie.core.config.SourceHealthStore.bind(context)
+        extraSites = com.nextmovie.core.config.ExtraSites.load(context)
         // 盘上已有站点结论就先铺上去，避免「重启后换源面板红点消失、点进去又白等一轮」
         siteHealth = com.nextmovie.core.config.SourceHealthStore.siteSnapshot()
         tmdb.token = prefs.getString(KEY_TMDB_TOKEN, "").orEmpty()
@@ -412,7 +418,8 @@ class AppRepository(private val context: Context) {
                     }.awaitAll()
                 }
                 // 结果按「站点 key」建索引给 UI 用（探活缓存本身是按 host 存的，两者不能混）
-                siteHealth = targets.zip(results)
+                // 用加法合并而不是整体覆盖：CMS 源池的探活结论不能被 JS 扫描冲掉
+                siteHealth = siteHealth + targets.zip(results)
                     .mapNotNull { (site, health) -> health?.let { site.key to it } }
                     .toMap()
                 siteHealth.forEach { (key, state) ->
@@ -433,8 +440,66 @@ class AppRepository(private val context: Context) {
         }
     }
 
-    /** 单站：ext 文本（缓存优先）→ host → DNS/TLS 探测。任一步失败按「未测」处理，不误伤站点。 */
-    private suspend fun probeJsSiteHealth(site: Site): com.nextmovie.core.config.SourceHealthStore.State? {
+    /* ---------------- 内置 CMS 直连源池 ---------------- */
+
+    /** 导入内置 CMS 源池：落盘、并入当前站点列表、后台跑一次接口探活。返回导入数量。 */
+    suspend fun importCmsPool(): Int {
+        val list = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            com.nextmovie.core.config.CmsPool.import(context)
+        }
+        if (list.isEmpty()) return 0
+        extraSites = list
+        // 先摘掉上一次导入的同源站点再合并，避免重复导入后翻倍
+        val base = sites.filter { it.origin != com.nextmovie.core.config.CmsPool.ORIGIN }
+        sites = com.nextmovie.core.config.ExtraSites.merge(base, list)
+        prewarmCurrentSite("cms-pool-import")
+        recordConfigResult(true, "✓ 已并入 ${list.size} 个 CMS 直连源（共 ${sites.size} 个站点）")
+        prefetchScope.launch { probeCmsExtrasHealth() }
+        return list.size
+    }
+
+    /** 移除内置 CMS 源池。 */
+    fun removeCmsPool() {
+        val removedKeys = extraSites.map { it.key }
+        com.nextmovie.core.config.CmsPool.clear(context)
+        extraSites = emptyList()
+        sites = sites.filter { it.origin != com.nextmovie.core.config.CmsPool.ORIGIN }
+        siteHealth = siteHealth - removedKeys
+        removedKeys.forEach { com.nextmovie.core.config.SourceHealthStore.forgetSite(it) }
+        recordConfigResult(true, "已移除内置 CMS 源池（剩 ${sites.size} 个站点）")
+    }
+
+    /** 内置源池探活：只测接口通不通（4s 超时、并发 2），不拉片库，不跟首屏和播放抢带宽。 */
+    private suspend fun probeCmsExtrasHealth() {
+        val targets = extraSites
+        if (targets.isEmpty()) return
+        val started = System.nanoTime()
+        val report = runCatching {
+            SiteHealth.probe(targets, http, cmsLimit = targets.size, concurrency = 2)
+        }.getOrNull() ?: return
+        val now = System.currentTimeMillis()
+        val map = report.probes.mapNotNull { p ->
+            val site = targets.firstOrNull { it.key == p.siteKey } ?: return@mapNotNull null
+            val ok = p.status == ProbeStatus.OK || p.status == ProbeStatus.SLOW
+            p.siteKey to com.nextmovie.core.config.SourceHealthStore.State(
+                host = site.api,
+                status = if (ok) com.nextmovie.core.config.SourceHealthStore.Status.OK
+                else com.nextmovie.core.config.SourceHealthStore.Status.API,
+                note = if (ok) "接口可达 ${p.latencyMs}ms" else "接口异常：${p.detail.take(40)}",
+                latencyMs = p.latencyMs,
+                atMs = now
+            )
+        }.toMap()
+        siteHealth = siteHealth + map
+        map.forEach { (key, state) -> com.nextmovie.core.config.SourceHealthStore.rememberSite(key, state) }
+        android.util.Log.i(
+            "NextMovieHealth",
+            "cms-pool 共 ${targets.size} 站 可达 ${report.probeOk} 失败 ${report.probeFail} " +
+                "${(System.nanoTime() - started) / 1_000_000}ms"
+        )
+    }
+
+    /** 单站：ext 文本（缓存优先）→ host → DNS/TLS 探测。任一步失败按「未测」处理，不误伤站点。 */    private suspend fun probeJsSiteHealth(site: Site): com.nextmovie.core.config.SourceHealthStore.State? {
         val ext = runCatching {
             withTimeoutOrNull(1_500) {
                 withContext(kotlinx.coroutines.Dispatchers.IO) { http.text(site.ext) }
@@ -537,7 +602,7 @@ class AppRepository(private val context: Context) {
             throw e
         }
         if (generation != configGeneration.get()) throw kotlinx.coroutines.CancellationException("新的配置已替换此请求")
-        sites = bundle.sites
+        sites = com.nextmovie.core.config.ExtraSites.merge(bundle.sites, extraSites)
         parses = bundle.parses
         withContext(kotlinx.coroutines.Dispatchers.IO) { saveConfigSnapshot(url.trim()) }
         runCatching {
@@ -939,11 +1004,13 @@ class AppRepository(private val context: Context) {
                 sites.filter { it.isPlayable && it.searchable && it.runtimeKey != site.runtimeKey }
                     .filterNot { isDiscoveryOnly(it) }
                     .sortedWith(
-                        compareByDescending<Site> { lineScore(it) }
+                        // 直连 CMS 站只要一次 HTTP 就能给出线路，跨站补源优先试它们；
+                        // 订阅里的 JS 站动辄 3–8s 且常被反爬挡掉，排在后面。
+                        compareByDescending<Site> { if (it.isCms) 1 else 0 }
+                            .thenByDescending { lineScore(it) }
                             .thenByDescending { sourceSuccessRate(it.key) }
-                            .thenBy { if (it.isCms) 0 else 1 }
                     )
-                    .take(crossSiteLimit.coerceAtLeast(6))
+                    .take(crossSiteLimit.coerceAtLeast(8))
             )
         }
         val replies = Channel<SourceDetail?>(candidates.size.coerceAtLeast(1))
@@ -955,10 +1022,13 @@ class AppRepository(private val context: Context) {
                 // 不再让当前源抢占：全站搜索的每一个候选都同时起跑。
                 gate.withPermit {
                     val startedAt = System.nanoTime()
+                    var miss = "timeout"
                     val hit = withTimeoutOrNull(
                         when {
                             index == 0 && candidate.isSpider && candidate.runtimeKey !in warmSites -> 15_000L
                             index == 0 -> 8_000L
+                            // 直连 CMS 站给 7s：设备侧到部分采集站单次要 4–6s，4.5s 会误杀可用源。
+                            candidate.isCms -> 7_000L
                             else -> 4_500L
                         }
                     ) {
@@ -966,17 +1036,32 @@ class AppRepository(private val context: Context) {
                         detailAttempt {
                             val resolved: VodDetail? =
                                 if (index == 0 && vod.id.isNotBlank() && !vod.id.startsWith("msearch:", true)) detail(candidate, vod.id, altId = vod.name)
-                                else keyword.takeIf { it.isNotBlank() }
-                                    ?.let { matchingVideo(candidate, it, vod.displayYear) }
-                                    ?.let { detail(candidate, it.id, it.name) }
+                                else {
+                                    val matched = keyword.takeIf { it.isNotBlank() }
+                                        ?.let { matchingVideo(candidate, it, vod.displayYear) }
+                                    if (matched == null) miss = "empty"
+                                    matched?.let { detail(candidate, it.id, it.name) }
+                                }
+                            if (resolved == null || resolved.lines.isEmpty()) {
+                                if (miss != "empty") miss = "noplay"
+                            }
                             resolved?.takeIf { it.lines.isNotEmpty() }?.let { resolvedDetail ->
+                                val bestIndex = com.nextmovie.core.match.SourceRanker.bestLineIndex(resolvedDetail, site.key)
+                                // 跨站补源：先确认这家真能取到首个播放列表，避免把「片库正常、CDN 已死」的源排上屏。
+                                if (index > 0) {
+                                    val headUrl = resolvedDetail.lines.getOrNull(bestIndex)
+                                        ?.episodes?.firstOrNull()?.url.orEmpty()
+                                    if (!playlistAlive(headUrl)) {
+                                        miss = "dead-cdn"
+                                        return@let null
+                                    }
+                                }
                                 val quality = com.nextmovie.core.match.SourceRanker.sourceScore(
                                     candidate,
                                     resolvedDetail,
                                     sourceSuccessRate(candidate.key),
                                     candidate.runtimeKey == site.runtimeKey
                                 )
-                                val bestIndex = com.nextmovie.core.match.SourceRanker.bestLineIndex(resolvedDetail, site.key)
                                 // Read known quality without putting a CDN request on the detail path.
                                 val probeUrl = resolvedDetail.lines.getOrNull(bestIndex)
                                     ?.episodes?.firstOrNull()?.url.orEmpty()
@@ -1021,7 +1106,7 @@ class AppRepository(private val context: Context) {
                     }
                     android.util.Log.i(
                         "NextMovieTiming",
-                        "agg-site ${candidate.name} ${if (hit == null) "fail" else "ok lines=${hit.detail.lines.size}"} " +
+                        "agg-site ${candidate.name} ${if (hit == null) "fail:$miss" else "ok lines=${hit.detail.lines.size}"} " +
                             "${(System.nanoTime() - startedAt) / 1_000_000}ms"
                     )
                     replies.send(hit)
@@ -1051,7 +1136,7 @@ class AppRepository(private val context: Context) {
     private fun keywordVariants(keyword: String): List<String> {
         val out = LinkedHashSet<String>()
         out.add(keyword)
-        for (sep in listOf("：", ":", "·", " - ", "（", "(")) {
+        for (sep in listOf("：", ":", "，", ",", "、", "·", " - ", "（", "(")) {
             out.add(keyword.substringBefore(sep).trim())
         }
         return out.filter { it.isNotBlank() && it.length >= 2 }
@@ -1074,8 +1159,26 @@ class AppRepository(private val context: Context) {
             ?: ranked.firstOrNull()?.first
     }
 
-    private suspend fun <T> detailAttempt(block: suspend () -> T): T? = try {
-        block()
+    private val playlistAliveCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Boolean>>()
+
+    /**
+     * 跨站补源的线路来源五花八门：采集站接口常常正常返回、但首集 CDN 域名已经死了。
+     * 上屏前一集 m3u8 花 2.5s 验一下，失败就别把死线路塞给播放器。结果缓存 30 分钟。
+     */
+    private suspend fun playlistAlive(url: String): Boolean {
+        if (url.isBlank()) return false
+        if (!url.contains(".m3u8", true)) return true
+        val now = System.currentTimeMillis()
+        playlistAliveCache[url]?.let { (at, ok) -> if (now - at < 30 * 60_000L) return ok }
+        if (playlistAliveCache.size > 400) playlistAliveCache.clear()
+        val ok = runCatching {
+            http.text(url, callTimeoutMs = 2500).trimStart().startsWith("#EXTM3U")
+        }.getOrDefault(false)
+        playlistAliveCache[url] = now to ok
+        return ok
+    }
+
+    private suspend fun <T> detailAttempt(block: suspend () -> T): T? = try {        block()
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
     } catch (_: Exception) {
@@ -1350,7 +1453,7 @@ class AppRepository(private val context: Context) {
         }
         if (restored.isEmpty()) return@withContext false
         withContext(kotlinx.coroutines.Dispatchers.Main) {
-            sites = restored
+            sites = com.nextmovie.core.config.ExtraSites.merge(restored, extraSites)
             parses = com.nextmovie.core.config.ConfigBundle.fromJson(json, "").parses
             currentSite = SiteSelector.pick(sites, prefs.getString(KEY_SITE_KEY, "").orEmpty(), prefs.getBoolean(KEY_SITE_MANUAL, false))
         }

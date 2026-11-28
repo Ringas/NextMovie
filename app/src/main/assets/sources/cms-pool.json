@@ -1,0 +1,48 @@
+{
+  "updated": "2026-11-28",
+  "note": "公开的苹果 CMS V10 采集接口（provide/vod）。宿主只做协议解析，不加载第三方字节码、不内置任何影视内容；接口随时可能换域名或失效，导入后由健康探针标记。",
+  "stations": [
+    {
+      "key": "cms_hongniu",
+      "name": "红牛资源",
+      "api": "https://www.hongniuzy2.com/api.php/provide/vod/",
+      "total": 118905,
+      "verified": "直出 m3u8"
+    },
+    {
+      "key": "cms_modu",
+      "name": "魔都资源",
+      "api": "https://caiji.moduapi.cc/api.php/provide/vod/",
+      "total": 92534,
+      "verified": "直出 m3u8"
+    },
+    {
+      "key": "cms_360",
+      "name": "360资源",
+      "api": "https://360zy.com/api.php/provide/vod/",
+      "total": 76004,
+      "verified": "直出 m3u8"
+    },
+    {
+      "key": "cms_wujin",
+      "name": "无尽资源",
+      "api": "https://api.wujinapi.com/api.php/provide/vod/",
+      "total": 126106,
+      "verified": "直出 m3u8（少数集为分享页）"
+    },
+    {
+      "key": "cms_feifan",
+      "name": "非凡资源",
+      "api": "http://cj.ffzyapi.com/api.php/provide/vod/",
+      "total": 99328,
+      "verified": "分享页可解析出 m3u8"
+    },
+    {
+      "key": "cms_dytt",
+      "name": "电影天堂资源",
+      "api": "http://caiji.dyttzyapi.com/api.php/provide/vod/",
+      "total": 85330,
+      "verified": "分享页可解析出 m3u8"
+    }
+  ]
+}
