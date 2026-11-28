@@ -128,13 +128,18 @@ class JsSpider(
 
         // 模板模块：drpy2 的 init 第一行就是 模板.getMubans()，给空对象即可放行
         if (url.contains("模板") || url.contains("XUKQ", true)) {
+            val lib = assetSrc("js/lib/muban.js").orEmpty()
             return buildString {
-                append("var __tpl={getMubans:function(){return {}},getMuban:function(){return {}},")
-                append("getMubanRule:function(){return ''},render:function(){return ''},getMubanList:function(){return []}};\n")
+                if (lib.contains("getMubans")) {
+                    append(lib.replace(Regex("""export\s+default[^;]*;"""),
+                        "var __tpl={muban:muban,getMubans:function(){return muban},getMuban:function(){return muban}};"))
+                    append("\ntry{globalThis.__nmMuban=__tpl.muban;}catch(e){}\n")
+                } else {
+                    append("var __tpl={getMubans:function(){return {}},getMuban:function(){return {}}});\n")
+                }
                 append("export default __tpl;\n")
                 valid.filter { it != "模板" }.forEach { append("export const ").append(it).append(" = __tpl;\n") }
-                if (valid.isEmpty() || valid.none { it == "模板" }) append("export const 模板 = __tpl;\n")
-                else append("export const 模板 = __tpl;\n")
+                append("export const 模板 = __tpl;\n")
             }
         }
 
@@ -327,9 +332,20 @@ class JsSpider(
         val cheerioScript = cheerio
             .replace("export default", "var cheerio =")
             .replace(Regex("""\bexport\s+"""), "")
+        // 模板库：drpy2 的 ext 大多以 muban.mxpro.二级.xxx=... 的形式补模板，
+        // 空桩会让这类站直接 ReferenceError('muban')。这里内联真实 模板.js，
+        // 并让 getMubans() 永远返回同一个实例，宿主改的 muban 引擎能立刻看见。
+        val mubanLib = assetSrc("js/lib/muban.js").orEmpty()
+        val mubanScript = if (mubanLib.contains("getMubans")) {
+            mubanLib.replace(Regex("""export\s+default[^;]*;"""),
+                "var __tplLib={muban:muban,getMubans:function(){return muban},getMuban:function(){return muban}};")
+        } else {
+            "var __tplLib={getMubans:function(){return {}},getMuban:function(){return {}}};"
+        }
         val stub = "" +
-            "var \u6a21\u677f={getMubans:function(){return {}},getMuban:function(){return {}}," +
-            "getMubanRule:function(){return ''},render:function(){return ''},getMubanList:function(){return []}};\n" +
+            "var \u6a21\u677f=(function(){\n$mubanScript\n" +
+            "try{globalThis.__nmMuban=__tplLib.muban||__tplLib.getMubans();}catch(e){}\n" +
+            "return __tplLib;})();\n" +
             "var gbkTool=new Proxy(function(){},{get:function(t,k){if(typeof k==='symbol')return undefined;return gbkTool;}," +
             "apply:function(){return gbkTool;}});\n" +
             "globalThis.\u6a21\u677f=\u6a21\u677f;globalThis.gbkTool=gbkTool;\n"
@@ -411,7 +427,7 @@ class JsSpider(
                 }.also { if (it.contains("var rule")) diskPut("ext:" + ext, it) }
             }
         }.getOrNull()
-        val body = text?.takeIf { it.contains("var rule") }?.replaceFirst("var rule", "rule")
+        val body = text?.takeIf { it.contains("var rule") || it.contains("muban") }?.replaceFirst("var rule", "rule")
         if (body.isNullOrBlank()) {
             Log.w("NextMovieJs", "ext 规则文本不可用，按 URL 交给引擎")
             ctx.set("__nmInitExt", ext)
@@ -419,7 +435,7 @@ class JsSpider(
         }
         runCatching {
             ctx.executeVoidScript(
-                "(function(){var rule={};\n$body\nglobalThis.__nmInitExt = rule;\n" +
+                "(function(){var rule={};var muban=globalThis.__nmMuban||{};\n$body\nglobalThis.__nmInitExt = rule;\n" +
                     "try{for(var k in rule){var v=rule[k];" +
                     "if(typeof v==='string'&&v.indexOf('js:')===0){" +
                     "rule[k]=v.replace(/[^\\x00-\\x7f]/g,function(c){return String.fromCharCode(92)+'u'+('0000'+c.charCodeAt(0).toString(16)).slice(-4);});" +
