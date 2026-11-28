@@ -46,6 +46,103 @@ class JsSpider(
     private var context: JSContext? = null
     private val localStore = LinkedHashMap<String, String>()
     private val localPrefix = "js." + site.key.hashCode().toString(16) + "."
+    private val moduleCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** 专供 ESM 外链模块：短超时 + 结果缓存，避免 5 个死链把一次调用拖到 30s+ */
+    private val moduleHttp by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(1500, TimeUnit.MILLISECONDS)
+            .readTimeout(2000, TimeUnit.MILLISECONDS)
+            .callTimeout(1200, TimeUnit.MILLISECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+    }
+
+    private fun assetText(path: String): String? = runCatching {
+        val ctx = appContext ?: return@runCatching null
+        ctx.assets.open(path).bufferedReader().use { it.readText() }
+    }.getOrNull()
+
+    /** 入口脚本里声明的 import（url → 具名导出列表），用于给失败的外链模块造占位导出 */
+    private val declaredImports: Map<String, List<String>> by lazy {
+        val out = LinkedHashMap<String, MutableList<String>>()
+        var from = 0
+        while (true) {
+            val at = code.indexOf("import", from)
+            if (at < 0) break
+            from = at + 6
+            val semi = code.indexOf(';', at)
+            val end = if (semi < 0) code.length else semi
+            if (end - at > 400) continue          // 不是 import 语句，跳过
+            val stmt = code.substring(at, end)
+            val quoted = Regex("\"([^\"]+)\"|'([^']+)'").find(stmt)
+            val url = quoted?.let { it.groupValues[1].ifBlank { it.groupValues[2] } }.orEmpty()
+            if (url.isEmpty() || !url.contains("/")) continue
+            val names = out.getOrPut(url) { mutableListOf() }
+            val bs = stmt.indexOf('{')
+            val be = stmt.indexOf('}')
+            if (bs in 0 until be) {
+                stmt.substring(bs + 1, be).split(',').forEach { raw ->
+                    val n = raw.substringBefore(" as ").trim()
+                    if (n.isNotEmpty() && n != "default") names.add(n)
+                }
+            }
+        }
+        out.mapValues { it.value.distinct() }
+    }
+
+    /** 远端模块缺声明里的导出时补上占位，保证 ESM 链接阶段不报 "Could not find export" */
+    private fun patchModuleExports(url: String, body: String): String {
+        val lower = body.trimStart().lowercase()
+        val looksHtml = lower.startsWith("<") || lower.startsWith("<!doctype")
+        if (looksHtml) return stubModuleFor(url)
+        val sb = StringBuilder(body)
+        val needDefault = !Regex("""export\s+default""").containsMatchIn(body)
+        if (needDefault) sb.append("\nexport default {};\n")
+        declaredImports[url].orEmpty().forEach { n ->
+            val escaped = Regex.escape(n)
+            if (Regex("""export\s+(const|let|var|function|class)\s+$escaped\b""").containsMatchIn(body)) return@forEach
+            if (Regex("""export\s*\{[^}]*\b$escaped\b""").containsMatchIn(body)) return@forEach
+            val binding = Regex("""(?:^|[^\w$])(?:var|let|const|function|class)\s+$escaped\b""").containsMatchIn(body)
+            if (binding) {
+                // 模块里有定义但没导出：补一行 export { x }
+                sb.append("\nexport { ").append(n).append(" };\n")
+            } else {
+                sb.append("\nexport const ").append(n).append(" = undefined;\n")
+            }
+        }
+        Log.d("NextMovieJs", "模块已适配 $url ${body.length}B")
+        return sb.toString()
+    }
+
+    private fun stubModuleFor(url: String): String {
+        Log.d("NextMovieJs", "stub url=$url names=${declaredImports[url]}")
+        val names = declaredImports[url].orEmpty()
+        val ident = Regex("""^[A-Za-z_$\u4e00-\u9fa5][A-Za-z0-9_$\u4e00-\u9fa5]*$""")
+        val valid = names.filter { ident.matches(it) }
+
+        // 模板模块：drpy2 的 init 第一行就是 模板.getMubans()，给空对象即可放行
+        if (url.contains("模板") || url.contains("XUKQ", true)) {
+            return buildString {
+                append("var __tpl={getMubans:function(){return {}},getMuban:function(){return {}},")
+                append("getMubanRule:function(){return ''},render:function(){return ''},getMubanList:function(){return []}};\n")
+                append("export default __tpl;\n")
+                valid.filter { it != "模板" }.forEach { append("export const ").append(it).append(" = __tpl;\n") }
+                if (valid.isEmpty() || valid.none { it == "模板" }) append("export const 模板 = __tpl;\n")
+                else append("export const 模板 = __tpl;\n")
+            }
+        }
+
+        // 通用桩：可调用 + 任意取属性都返回自身，避免下游只得到 "not a function"
+        return buildString {
+            append("var __nmP=new Proxy(function(){return __nmP;},{")
+            append("get:function(t,k){if(typeof k==='symbol')return undefined;return __nmP;},")
+            append("apply:function(){return __nmP;}});\n")
+            append("export default __nmP;\n")
+            valid.forEach { append("export const ").append(it).append(" = __nmP;\n") }
+        }
+    }
     private val http by lazy {
         val ms = site.timeoutMs.takeIf { it > 0 } ?: 20_000
         OkHttpClient.Builder()
@@ -99,17 +196,43 @@ class JsSpider(
         val isModule = JsScriptSupport.isEsModule(code, scriptUrl)
         val ctx = if (isModule) object : com.quickjs.ES6Module(rt) {
             override fun convertModuleName(base: String, name: String): String {
+                // assets:// 是宿主内置资产协议（cheerio / crypto-js 等），不做 URL 解析，原样交给 getModuleScript
+                if (name.startsWith("assets://")) return name
                 val resolved = runCatching { base.toHttpUrl().resolve(name)?.toString() }.getOrNull()
                     ?: runCatching { scriptUrl.toHttpUrl().resolve(name)?.toString() }.getOrNull()
                 return resolved ?: name
             }
+
             override fun getModuleScript(name: String): String {
+                Log.d("NextMovieJs", "getModuleScript $name")
                 if (name == scriptUrl) return code
-                val request = Request.Builder().url(name).header("User-Agent", defaultUa()).build()
-                return http.newCall(request).execute().use { response ->
-                    check(response.isSuccessful) { "模块请求失败 HTTP ${response.code} @ $name" }
-                    response.body?.string().orEmpty()
+                if (name.startsWith("assets://")) {
+                    val path = name.removePrefix("assets://")
+                    val src = assetText(path)
+                    if (src == null) {
+                        Log.w("NextMovieJs", "内置资产缺失 $path，按占位模块继续")
+                        return stubModuleFor(name)
+                    }
+                    // crypto-js 是 UMD：在模块作用域里没有 this/exports，必须包一层把它挂到 globalThis
+                    return if (path.contains("crypto")) wrapCryptoJs(src) else src
                 }
+                // 外链 ESM 模块走独立短超时：down.nigx.cn 这类 CDN 常年挂，不能吃掉整次调用的预算
+                moduleCache[name]?.let { return it }
+                val body = runCatching {
+                    val request = Request.Builder().url(name).header("User-Agent", defaultUa()).build()
+                    moduleHttp.newCall(request).execute().use { response ->
+                        check(response.isSuccessful) { "HTTP ${response.code}" }
+                        response.body?.string().orEmpty().ifBlank { stubModuleFor(name) }
+                    }
+                }.getOrElse { failure ->
+                    // 外链模块挂掉不能拖死整站：按入口脚本声明的具名导出生成占位模块
+                    Log.w("NextMovieJs", "模块不可用 $name：${failure.message}，按占位模块继续")
+                    stubModuleFor(name)
+                }
+                // 有些 CDN 会返回 HTML/空壳而不是模块：按入口声明的导出补齐，避免链接期 SyntaxError
+                val fixed = patchModuleExports(name, body)
+                moduleCache[name] = fixed
+                return fixed
             }
         } else rt.createContext()
         try {
@@ -131,7 +254,8 @@ class JsSpider(
             } else {
                 ctx.executeVoidScript(JsScriptSupport.sanitizeExports(code), scriptUrl)
             }
-            ctx.set("__nmInitExt", site.ext)
+            Log.d("NextMovieJs", "init ext=「${site.ext}」")
+            setInitExt(ctx, site.ext)
             ctx.executeVoidScript(INIT_SCRIPT, "init")
             awaitResult(ctx)
         } catch (failure: Throwable) {
@@ -145,6 +269,49 @@ class JsSpider(
         return ctx
     }
 
+    /**
+     * drpy2 的 init 里用 `eval("(function(){rule = {...}})()")` 装载 ext，
+     * 但 QuickJS 里这次 eval 是间接求值，赋值落在全局而不是模块内的 rule → 规则永远是空壳。
+     * 宿主先自己求值成对象再交给引擎，engine 走 `typeof ext == "object"` 分支直接赋值。
+     */
+    private fun setInitExt(ctx: JSContext, ext: String) {
+        if (!ext.startsWith("http", true)) {
+            ctx.set("__nmInitExt", ext)
+            return
+        }
+        val text = runCatching {
+            moduleCache[ext]?.takeIf { it.contains("rule") } ?: run {
+                val request = Request.Builder().url(ext).header("User-Agent", defaultUa()).build()
+                http.newCall(request).execute().use { response ->
+                    check(response.isSuccessful) { "HTTP ${response.code}" }
+                    response.body?.string().orEmpty()
+                }
+            }
+        }.getOrNull()
+        val body = text?.takeIf { it.contains("var rule") }?.replaceFirst("var rule", "rule")
+        if (body.isNullOrBlank()) {
+            Log.w("NextMovieJs", "ext 规则文本不可用，按 URL 交给引擎")
+            ctx.set("__nmInitExt", ext)
+            return
+        }
+        runCatching {
+            ctx.executeVoidScript(
+                "(function(){var rule={};\n$body\nglobalThis.__nmInitExt = rule;\n" +
+                    "try{for(var k in rule){var v=rule[k];" +
+                    "if(typeof v==='string'&&v.indexOf('js:')===0){" +
+                    "rule[k]=v.replace(/[^\\x00-\\x7f]/g,function(c){return String.fromCharCode(92)+'u'+('0000'+c.charCodeAt(0).toString(16)).slice(-4);});" +
+                    "}}}catch(e){}" +
+                    "})()",
+                "ext"
+            )
+            val title = ctx.executeStringScript("String(globalThis.__nmInitExt && globalThis.__nmInitExt.title || '')", "extTitle")
+            Log.d("NextMovieJs", "ext 规则已求值 title=「$title」")
+        }.onFailure { failure ->
+            Log.w("NextMovieJs", "ext 规则求值失败，回退 URL：${failure.message}")
+            ctx.set("__nmInitExt", ext)
+        }
+    }
+
     private fun registerBridge(ctx: JSContext) {
         ctx.registerJavaMethod(object : JavaCallback {
             override fun invoke(thisObj: JSObject?, args: JSArray?): Any =
@@ -154,8 +321,14 @@ class JsSpider(
             override fun invoke(thisObj: JSObject?, args: JSArray?): Any {
                 val url = runCatching { args?.getString(0).orEmpty() }.getOrDefault("")
                 val optJson = runCatching { args?.getString(1).orEmpty() }.getOrDefault("")
-                return runCatching { fetchSync(url, optJson) }.getOrElse {
-                    Log.w("NextMovieJs", "request 失败 ${it.message}")
+                return runCatching { fetchSync(url, optJson) }.also { result ->
+                    run {
+                val env = runCatching { result.getOrThrow() }.getOrDefault("")
+                val content = runCatching { JSONObject(env).optString("content") }.getOrDefault("")
+                Log.d("NextMovieJs", "request ${url.take(100)} -> env=${env.length}B content=${content.length}B head=${content.take(60).replace("\n", " ")}")
+            }
+                }.getOrElse {
+                    Log.w("NextMovieJs", "request 失败 ${url.take(120)}：${it.message}")
                     JSONObject().put("code", 0).put("content", "").put("headers", JSONObject()).toString()
                 }
             }
@@ -403,6 +576,19 @@ class JsSpider(
     }
 
     companion object {
+        /** Application 注入，用于读取 APK 内置的 assets://js/lib 模块（cheerio / crypto-js） */
+        @Volatile var appContext: android.content.Context? = null
+
+        private const val EMPTY_MODULE = "export default {};"
+
+        /** crypto-js 是 UMD：ESM 作用域没有 this/exports，包一层并挂到 globalThis */
+        private fun wrapCryptoJs(src: String): String =
+            "var __nmMod={exports:{}};var module=__nmMod,exports=__nmMod.exports,define=void 0;\n" +
+                "(function(){\n" + src + "\n}).call(globalThis);\n" +
+                "var __nmCJ=(__nmMod.exports&&(__nmMod.exports.CryptoJS||__nmMod.exports))||globalThis.CryptoJS;\n" +
+                "globalThis.CryptoJS=__nmCJ;\n" +
+                "export default __nmCJ;"
+
         /** 单个 JS 调用（含定时器等待）的总时限；drpy 站点常见 1–2 次请求 + 重试，25s 够用。 */
         private const val RESULT_TIMEOUT_MS = 25_000L
 
@@ -419,8 +605,14 @@ class JsSpider(
         private val INIT_SCRIPT = """
 (function(){
   var owner = typeof __spider !== 'undefined' ? __spider : null;
-  if (owner && typeof owner.init === 'function') __nmSettle(owner.init(__nmInitExt));
-  else __nmSettle(typeof init === 'function' ? init(__nmInitExt) : null);
+  try {
+    if (owner && typeof owner.init === 'function') __nmSettle(owner.init(__nmInitExt));
+    else __nmSettle(typeof init === 'function' ? init(__nmInitExt) : null);
+  } catch (e) {
+    __nmLog('init异常: ' + (e && e.message ? e.message : e) + ' @ ' + (e && e.stack ? e.stack.split('\n')[1] : ''));
+    __nmSettle(null);
+  }
+  try { __nmLog('rule=' + JSON.stringify(owner && owner.getRule ? owner.getRule('') : null).slice(0, 160)); } catch (e) {}
 })()
         """.trimIndent()
 
@@ -461,6 +653,12 @@ class JsSpider(
 var __nmResult;
 var __nmDefaultHeaders = {};
 var VODS = [];
+// 部分 UMD 库（crypto-js / cheerio 生态）在模块里会用 window / self / global 做根对象
+try {
+  globalThis.window = globalThis.window || globalThis;
+  globalThis.self = globalThis.self || globalThis;
+  globalThis.global = globalThis.global || globalThis;
+} catch (e) {}
 var HOST = (typeof __nmHost === 'string' && __nmHost) ? __nmHost : '';
 var MY_URL = HOST;
 var __nmTimers = {};
@@ -569,17 +767,25 @@ function __nmMergeOpt(opt) {
   opt.headers = headers;
   return opt;
 }
+// CatVod/TVBox 系 JS 宿主里 request() 返回的是响应正文文本（引擎会直接 eval / 正则处理），
+// 不是 JSON 信封；需要状态码/头信息时用 requestJson()。
 var request = function(url, opt){
   opt = __nmMergeOpt(opt);
   var raw = __nmRequest(String(url), JSON.stringify(opt));
-  var obj;
-  try { obj = JSON.parse(raw); } catch (e) {
-    obj = {code: 0, content: '', headers: {}};
+  if (opt && opt.asJson === true) {
+    var obj;
+    try { obj = JSON.parse(raw); } catch (e) { obj = {code: 0, content: '', headers: {}}; }
+    return obj;
   }
-  if (opt && (opt.onlyString === true || opt.onlyChars === true || opt.toString === true)) {
-    return obj.content || '';
-  }
-  return obj;
+  var env;
+  try { env = JSON.parse(raw); } catch (e) { return String(raw); }
+  if (!env || typeof env.content !== 'string') return '';
+  return env.content;
+};
+var requestJson = function(url, opt){
+  opt = __nmMergeOpt(opt || {});
+  opt.asJson = true;
+  return request(url, opt);
 };
 var fetch = request;
 var req = request;
@@ -610,8 +816,10 @@ var local = {
   delete: function(key){ return __nmLocal(String(key), ''); }
 };
 var require = function(path){
-  var r = request(path, {});
-  var code = (r && r.content) ? r.content : '';
+  path = String(path);
+  // 内置模块名（crypto/fs/path…）不是 URL，返回 undefined 让调用方走降级分支
+  if (!/^(https?:|\/)/i.test(path)) return undefined;
+  var code = request(path, {});
   if (!code) throw new Error('require failed: ' + path);
   var module = {exports: {}};
   var exports = module.exports;

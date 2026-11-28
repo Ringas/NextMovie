@@ -18,6 +18,8 @@ class NextMovieApp : Application() {
             )
         }
         com.github.catvod.Runtime.set(this)
+        // JS 宿主读内置 assets://js/lib 模块（cheerio / crypto-js）需要 Context
+        com.nextmovie.core.spider.JsSpider.appContext = this
         // 插件扫码登录走 Runtime.dialog(options, callback)（FongMi 的 SpiderDialog）：
         // 宿主不装这个 handler，插件弹框直接失败，action 只回 "{}"。
         com.github.catvod.Runtime.setDialog { options, callback ->
