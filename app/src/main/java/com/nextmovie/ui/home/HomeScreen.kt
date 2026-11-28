@@ -281,13 +281,16 @@ fun HomeScreen(
         Spacer(Modifier.height(9.dp))
 
         // —— 分类条 ——
+        // 第 0 颗必须是「推荐」：tab==0 在数据层是「首页/推荐」，以前的芯片直接从 cats[0] 开始排，
+        // 结果是点第一颗（等于 tab=0）什么都不发生，看起来像触屏没响应。
         if (cats.isNotEmpty()) {
+            val chips = remember(cats) { listOf("" to "推荐") + cats }
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 contentPadding = PaddingValues(end = 8.dp),
             ) {
-                items(cats.size) { index ->
-                    val name = cats[index].second.ifBlank { cats[index].first }
+                items(chips.size) { index ->
+                    val name = chips[index].second.ifBlank { chips[index].first }
                     val selected = index == tab
                     TvPill(
                         text = name,
@@ -297,8 +300,10 @@ fun HomeScreen(
                         horizontalPadding = 16.dp,
                         verticalPadding = 8.dp,
                         onClick = {
-                            tab = index
-                            onTabChanged(index)
+                            if (tab != index) {
+                                tab = index
+                                onTabChanged(index)
+                            }
                         },
                     )
                 }
