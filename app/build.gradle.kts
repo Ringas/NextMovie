@@ -18,8 +18,8 @@ android {
         // targetSdk 33 时这条路径会被 linker 直接拒掉（"not accessible for the namespace"）。
         // 我们是侧载的 TV 播放器，不依赖 Play 的 targetSdk 要求，28 是这类宿主应用的标准做法。
         targetSdk = 28
-        versionCode = 43
-        versionName = "0.6.27-dev"
+        versionCode = 44
+        versionName = "0.6.28-dev"
     }
 
     // tv   -> armeabi-v7a：交付给电视盒子（多数盒子是 32 位 ARM，v7a 兼容面最广）
@@ -96,6 +96,8 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3")
     // `.js` 站点宿主：TVBox 生态里约 10% 的站点是 JS 脚本，需要在本地跑 JS
     implementation("io.github.taoweiji.quickjs:quickjs-android:1.4.6")
+    // drpy / xBPQ 的 pdfh/pdfa 选择器桥：用 Jsoup 的 CSS + :eq()/:contains() 承接
+    implementation("org.jsoup:jsoup:1.17.2")
     implementation("net.java.dev.jna:jna:5.17.0@aar")
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.coil.compose)

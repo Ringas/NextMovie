@@ -30,4 +30,16 @@ internal object QuickJsJobs {
         }
         error("Promise 任务数超过限制")
     }
+
+    /**
+     * 只推进一次微任务队列，返回状态：1 = 执行了一个 job，0 = 当前没有待执行 job，-1 = 出错。
+     *
+     * 定时器场景下 host 需要自己驱动循环：没有 job 时睡几毫秒、到点再灌入回调，
+     * 不能像 [complete] 那样「没有 job 就判死」。
+     */
+    fun step(runtime: QuickJS): Int {
+        val pointer = Pointer(runtimePointer.getLong(runtime))
+        val jobContext = PointerByReference()
+        return runCatching { executePendingJob.invokeInt(arrayOf(pointer, jobContext)) }.getOrDefault(-1)
+    }
 }

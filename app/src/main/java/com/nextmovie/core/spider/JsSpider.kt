@@ -26,11 +26,16 @@ import java.util.zip.GZIPInputStream
 /**
  * TVBox `.js` 站点宿主（QuickJS）。
  * 长名/短名、ESM、request 兼容、setResult/local/gzip；完整 drpy+cheerio 仍可能依赖外链失败。
+ *
+ * Tier 1（运行时补齐）：setTimeout / setInterval / sleep、local 落盘、HOST / MY_URL / input、
+ * cache(getCache/setCache) 别名。
+ * Tier 2（选择器补齐）：pdfh / pdfa / pd，走 [JsSelector]（Jsoup CSS + drpy `&&` 语义）。
  */
 class JsSpider(
     private val site: Site,
     private val code: String,
-    private val scriptUrl: String
+    private val scriptUrl: String,
+    private val store: android.content.SharedPreferences? = null
 ) : Spider() {
 
     @Volatile private var note: String? = null
@@ -40,6 +45,7 @@ class JsSpider(
     private var runtime: QuickJS? = null
     private var context: JSContext? = null
     private val localStore = LinkedHashMap<String, String>()
+    private val localPrefix = "js." + site.key.hashCode().toString(16) + "."
     private val http by lazy {
         val ms = site.timeoutMs.takeIf { it > 0 } ?: 20_000
         OkHttpClient.Builder()
@@ -174,19 +180,51 @@ class JsSpider(
                 val value = runCatching {
                     if ((args?.length() ?: 0) > 1) args?.getString(1) else null
                 }.getOrNull()
-                if (value == null) return localStore[key].orEmpty()
-                if (value.isEmpty()) localStore.remove(key)
-                else {
+                if (value == null) return readLocal(key)
+                if (value.isEmpty()) {
+                    localStore.remove(key)
+                    runCatching { store?.edit()?.remove(localPrefix + key)?.apply() }
+                } else {
                     if (localStore.size > 64) localStore.remove(localStore.keys.first())
                     localStore[key] = value
+                    // 落盘：drpy 的登录态/接口 token 常靠 local 活着，只在内存会一重启就废
+                    runCatching { store?.edit()?.putString(localPrefix + key, value)?.apply() }
                 }
                 return value
             }
         }, "__nmLocal")
         ctx.registerJavaMethod(object : JavaCallback {
+            override fun invoke(thisObj: JSObject?, args: JSArray?): Any = System.currentTimeMillis()
+        }, "__nmNow")
+        ctx.registerJavaMethod(object : JavaCallback {
+            override fun invoke(thisObj: JSObject?, args: JSArray?): Any {
+                val html = runCatching { args?.getString(0).orEmpty() }.getOrDefault("")
+                val rule = runCatching { args?.getString(1).orEmpty() }.getOrDefault("")
+                return runCatching { JsSelector.pdfh(html, rule, scriptUrl) }.getOrElse {
+                    Log.w("NextMovieJs", "pdfh 失败 rule=$rule ${it.message}")
+                    ""
+                }
+            }
+        }, "__nmPdfh")
+        ctx.registerJavaMethod(object : JavaCallback {
+            override fun invoke(thisObj: JSObject?, args: JSArray?): Any {
+                val html = runCatching { args?.getString(0).orEmpty() }.getOrDefault("")
+                val rule = runCatching { args?.getString(1).orEmpty() }.getOrDefault("")
+                return runCatching { JsSelector.pdfa(html, rule, scriptUrl) }.getOrElse {
+                    Log.w("NextMovieJs", "pdfa 失败 rule=$rule ${it.message}")
+                    "[]"
+                }
+            }
+        }, "__nmPdfa")
+        ctx.registerJavaMethod(object : JavaCallback {
             override fun invoke(thisObj: JSObject?, args: JSArray?): Any =
                 gunzipOrSelf(runCatching { args?.getString(0).orEmpty() }.getOrDefault(""))
         }, "__nmGunzip")
+        // 插件普遍把站点根域名存在 HOST / MY_URL 里拼接口地址；之前恒为空串导致 URL 全错
+        ctx.set("__nmHost", runCatching {
+            Regex("^(https?://[^/]+)/").find(scriptUrl)?.value
+                ?: (scriptUrl.substringBefore('?').substringBeforeLast('/', "") + "/")
+        }.getOrDefault(""))
         ctx.executeScript(BOOTSTRAP, "bootstrap.js")
         ctx.set("__nmSiteHeaders", JSONObject(site.headers).toString())
         ctx.set("__nmScriptUrl", scriptUrl)
@@ -195,6 +233,9 @@ class JsSpider(
             "site-headers"
         )
     }
+
+    private fun readLocal(key: String): String =
+        localStore[key] ?: runCatching { store?.getString(localPrefix + key, "").orEmpty() }.getOrDefault("")
 
     private fun md5(text: String): String =
         MessageDigest.getInstance("MD5").digest(text.toByteArray()).joinToString("") { "%02x".format(it) }
@@ -315,14 +356,56 @@ class JsSpider(
 
     private fun awaitResult(ctx: JSContext): String {
         fun readResult() = ctx.executeStringScript("__nmResult || ''", "result").orEmpty()
-        val raw = readResult().ifEmpty { QuickJsJobs.complete(ctx.quickJS, ::readResult) }
+        val raw = readResult().ifEmpty { pump(ctx, ::readResult) }
         if (raw.isBlank()) return ""
         val result = JSONObject(raw)
         check(!result.has("error")) { result.optString("error") }
         return result.optString("value")
     }
 
+    /**
+     * 驱动 Promise 微任务 + 定时器，直到脚本给出结果。
+     *
+     * 早期版本直接调 [QuickJsJobs.complete]：它只要发现「没有待执行 job」就判失败，
+     * 于是所有用 `await sleep(300)` / `setTimeout` 的插件都会立刻报「依赖宿主未提供的异步 API」。
+     * 这里改成「有 job 就推 job，没 job 就推定时器，两者都没有才睡 2ms 再试」。
+     */
+    private fun pump(ctx: JSContext, readResult: () -> String): String {
+        val deadline = System.nanoTime() + RESULT_TIMEOUT_MS * 1_000_000L
+        var idle = 0
+        repeat(60_000) {
+            readResult().takeIf { it.isNotEmpty() }?.let { return it }
+            check(!Thread.currentThread().isInterrupted) { "JS 线程被中断" }
+            check(System.nanoTime() < deadline) {
+                "JS 执行超时 ${RESULT_TIMEOUT_MS / 1000}s：脚本可能在等宿主没有提供的 API"
+            }
+            val status = QuickJsJobs.step(ctx.quickJS)
+            check(status >= 0) { "JavaScript 任务执行失败" }
+            var progressed = status != 0
+            if (!progressed) {
+                val fired = runCatching {
+                    ctx.executeStringScript("(typeof __nmTick === 'function' ? __nmTick() : 0)", "tick")
+                        .toIntOrNull()
+                }.getOrNull() ?: 0
+                progressed = fired > 0
+            }
+            if (progressed) {
+                idle = 0
+            } else {
+                idle++
+                check(idle < 6000) {
+                    "Promise 未完成，脚本可能依赖宿主未提供的异步 API（已支持 setTimeout/setInterval/pdfh）"
+                }
+                Thread.sleep(2)
+            }
+        }
+        error("JS 任务数超过限制")
+    }
+
     companion object {
+        /** 单个 JS 调用（含定时器等待）的总时限；drpy 站点常见 1–2 次请求 + 重试，25s 够用。 */
+        private const val RESULT_TIMEOUT_MS = 25_000L
+
         private fun aliasOf(name: String): String = when (name) {
             "homeContent" -> "home"
             "homeVideoContent" -> "homeVod"
@@ -344,6 +427,15 @@ class JsSpider(
         private val SCRIPT_CALL = """
 (function(){
   var args = JSON.parse(__nmArgs);
+  var __nmMethod = '@NAME@';
+  var input = {};
+  try {
+    if (__nmMethod === 'categoryContent') { input.tid = args[0]; input.pg = args[1]; input.filter = args[2]; input.extend = args[3] || {}; }
+    else if (__nmMethod === 'detailContent') { input.ids = args[0]; input.id = (args[0] && args[0][0]) || ''; }
+    else if (__nmMethod === 'searchContent') { input.wd = args[0]; input.key = args[0]; input.quick = args[1]; input.pg = args[2] || '1'; }
+    else if (__nmMethod === 'playerContent') { input.flag = args[0]; input.id = args[1]; input.vipFlags = args[2] || []; }
+    else if (__nmMethod === 'homeContent') { input.filter = args[0]; }
+  } catch (e) {}
   var owner = typeof __spider !== 'undefined' ? __spider : null;
   var method = owner && (owner['@NAME@'] || owner['@ALIAS@']);
   var shortDetail = owner && !owner['@NAME@'] && method === owner.detail;
@@ -369,7 +461,60 @@ class JsSpider(
 var __nmResult;
 var __nmDefaultHeaders = {};
 var VODS = [];
-var HOST = '';
+var HOST = (typeof __nmHost === 'string' && __nmHost) ? __nmHost : '';
+var MY_URL = HOST;
+var __nmTimers = {};
+var __nmTimerSeq = 1;
+function setTimeout(fn, ms) {
+  var id = __nmTimerSeq++;
+  __nmTimers[id] = {fn: fn, at: __nmNow() + (ms || 0), every: 0,
+    args: Array.prototype.slice.call(arguments, 2)};
+  return id;
+}
+function setInterval(fn, ms) {
+  var id = __nmTimerSeq++;
+  var every = Math.max(1, ms || 0);
+  __nmTimers[id] = {fn: fn, at: __nmNow() + every, every: every,
+    args: Array.prototype.slice.call(arguments, 2)};
+  return id;
+}
+function clearTimeout(id) { delete __nmTimers[id]; }
+var clearInterval = clearTimeout;
+function __nmTick() {
+  var now = __nmNow();
+  var due = [];
+  var pending = 0;
+  for (var id in __nmTimers) {
+    var t = __nmTimers[id];
+    if (!t) continue;
+    if (t.at <= now) due.push(id); else pending++;
+  }
+  for (var i = 0; i < due.length; i++) {
+    var key = due[i];
+    var timer = __nmTimers[key];
+    if (!timer) continue;
+    if (timer.every > 0) timer.at = now + timer.every; else delete __nmTimers[key];
+    try { timer.fn.apply(null, timer.args || []); } catch (e) { __nmLog('[timer] ' + e); }
+  }
+  return due.length > 0 ? 1 : (pending > 0 ? 2 : 0);
+}
+function sleep(ms) { return new Promise(function(resolve){ setTimeout(resolve, ms || 0); }); }
+function pdfh(html, rule) {
+  return __nmPdfh(String(html == null ? '' : html), String(rule == null ? '' : rule));
+}
+function pdfa(html, rule) {
+  var raw = __nmPdfa(String(html == null ? '' : html), String(rule == null ? '' : rule));
+  try { var arr = JSON.parse(raw); return arr && arr.length ? arr : []; } catch (e) { return []; }
+}
+var pd = pdfh;
+var pq = pdfa;
+var cache = {
+  get: function(k, d){ return local.get(k, d); },
+  set: function(k, v){ return local.set(k, v); },
+  delete: function(k){ return local.delete(k); }
+};
+var getCache = cache.get;
+var setCache = cache.set;
 function __nmSettle(value) {
   __nmResult = null;
   function finish(result) {
@@ -479,7 +624,8 @@ var require = function(path){
 
 class JsSpiderLoader(
     private val http: com.nextmovie.core.net.Http,
-    private val cacheDir: java.io.File? = null
+    private val cacheDir: java.io.File? = null,
+    private val store: android.content.SharedPreferences? = null
 ) {
     private val cache = java.util.concurrent.ConcurrentHashMap<String, Spider>()
 
@@ -494,7 +640,7 @@ class JsSpiderLoader(
         }
         if (code.isBlank()) throw JarSpiderLoader.SpiderLoadException("「${site.name}」JS 脚本内容为空")
         storeScript(url, code)
-        val spider = JsSpider(site, code, url)
+        val spider = JsSpider(site, code, url, store)
         cache[site.runtimeKey] = spider
         Log.i("NextMovieJs", "site=${site.name} 脚本 ${code.length}B")
         return spider

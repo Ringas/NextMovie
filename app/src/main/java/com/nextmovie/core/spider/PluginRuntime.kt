@@ -10,7 +10,15 @@ object PluginRuntime {
     private var users = 0
     @Synchronized fun acquire(context: Context): Engines {
         users++
-        return engines ?: Engines(JarSpiderLoader(context.applicationContext, Http()), JsSpiderLoader(Http(), java.io.File(context.applicationContext.filesDir, "js-cache"))).also { engines = it }
+        return engines ?: Engines(
+            JarSpiderLoader(context.applicationContext, Http()),
+            JsSpiderLoader(
+                Http(),
+                java.io.File(context.applicationContext.filesDir, "js-cache"),
+                // JS 插件的 local 要落盘，否则登录态 / 接口 token 一重启就丢
+                context.applicationContext.getSharedPreferences("js_local", Context.MODE_PRIVATE)
+            )
+        ).also { engines = it }
     }
     @Synchronized fun release() {
         users = (users - 1).coerceAtLeast(0)

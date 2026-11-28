@@ -1,7 +1,7 @@
 {
-  "versionCode": 43,
-  "versionName": "0.6.27-dev",
-  "notes": "修复触屏进入时首焦点不落地：先把窗口焦点抢回 Compose，再请求页面内焦点，设置页首行直接可操作",
+  "versionCode": 44,
+  "versionName": "0.6.28-dev",
+  "notes": "JS 插件宿主补齐 Tier1+Tier2：setTimeout/setInterval/sleep、local 落盘、HOST/MY_URL/input、pdfh/pdfa/pd（Jsoup CSS + && 与 ||）",
   "apk": "https://github.com/Ringas/NextMovie/releases",
   "page": "https://github.com/Ringas/NextMovie/releases"
 }
