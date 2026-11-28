@@ -35,8 +35,12 @@ class JsSpider(
     private val site: Site,
     private val code: String,
     private val scriptUrl: String,
-    private val store: android.content.SharedPreferences? = null
+    private val store: android.content.SharedPreferences? = null,
+    cacheDir: java.io.File? = null
 ) : Spider() {
+    /** 模块与 ext 规则文本的磁盘缓存：冷启动不再重新下载，第二次进站 init 能压到 2s 内 */
+    private val diskDir: java.io.File? = cacheDir?.let { java.io.File(it, "js-modules") }
+
 
     @Volatile private var note: String? = null
     fun asyncNote(): String? = note
@@ -193,7 +197,11 @@ class JsSpider(
         context?.let { return it }
         runCatching { System.loadLibrary("quickjs-android") }
         val rt = QuickJS.createRuntime()
-        val isModule = JsScriptSupport.isEsModule(code, scriptUrl)
+        // drpy2 这类引擎带 ESM import，但它在模块里做的 eval 会被 QuickJS 按字节截断（含中文时直接
+        // "unexpected end of input"），且 eval 看不到函数局部变量。宿主把引擎降级成普通脚本执行：
+        // 内联 cheerio/crypto、去掉 import/export，eval 回到普通作用域，规则里 js: 代码块才能正常工作。
+        val engineScript = scriptEngineSource(code)
+        val isModule = engineScript == null && JsScriptSupport.isEsModule(code, scriptUrl)
         val ctx = if (isModule) object : com.quickjs.ES6Module(rt) {
             override fun convertModuleName(base: String, name: String): String {
                 // assets:// 是宿主内置资产协议（cheerio / crypto-js 等），不做 URL 解析，原样交给 getModuleScript
@@ -218,6 +226,7 @@ class JsSpider(
                 }
                 // 外链 ESM 模块走独立短超时：down.nigx.cn 这类 CDN 常年挂，不能吃掉整次调用的预算
                 moduleCache[name]?.let { return it }
+                diskGet("mod:" + name)?.let { moduleCache[name] = it; return it }
                 val body = runCatching {
                     val request = Request.Builder().url(name).header("User-Agent", defaultUa()).build()
                     moduleHttp.newCall(request).execute().use { response ->
@@ -232,12 +241,20 @@ class JsSpider(
                 // 有些 CDN 会返回 HTML/空壳而不是模块：按入口声明的导出补齐，避免链接期 SyntaxError
                 val fixed = patchModuleExports(name, body)
                 moduleCache[name] = fixed
+                if (!body.isNullOrBlank()) diskPut("mod:" + name, fixed)
                 return fixed
             }
         } else rt.createContext()
         try {
             registerBridge(ctx)
-            if (ctx is com.quickjs.ES6Module) {
+            if (engineScript != null) {
+                // 引擎体里有 `let VODS/VOD/TABS` 这类顶层声明，直接铺在全局会和 bootstrap 的 var
+                // 重名（redeclaration of 'VODS'）；包一层 IIFE 后它们成为闭包变量，
+                // 引擎函数里的 eval 仍能看见自己的局部变量，互不冲突。
+                ctx.executeVoidScript("var global=globalThis;(function(){\n" + engineScript + "\n})();", scriptUrl)
+                Log.d("NextMovieJs", "引擎已就绪 __spider=" +
+                    (ctx.executeStringScript("typeof globalThis.__spider", "chk") ?: "?"))
+            } else if (ctx is com.quickjs.ES6Module) {
                 val entry = JSONObject.quote(scriptUrl)
                 ctx.executeModuleScript(
                     """
@@ -269,23 +286,129 @@ class JsSpider(
         return ctx
     }
 
+    /** 资产路径读取（assets/js/ 下），供引擎脚本化内联使用 */
+    private fun diskKey(key: String): String =
+        MessageDigest.getInstance("MD5").digest(key.toByteArray()).joinToString("") { "%02x".format(it) }
+
+    private fun diskGet(key: String): String? = runCatching {
+        val dir = diskDir ?: return null
+        val f = java.io.File(dir, diskKey(key) + ".txt")
+        if (!f.exists() || f.length() <= 0) return null
+        if (System.currentTimeMillis() - f.lastModified() > 24L * 60 * 60 * 1000) return null
+        f.readText().takeIf { it.isNotBlank() }
+    }.getOrNull()
+
+    private fun diskPut(key: String, text: String) {
+        runCatching {
+            val dir = diskDir ?: return
+            dir.mkdirs()
+            val f = java.io.File(dir, diskKey(key) + ".txt")
+            f.writeText(text)
+            f.setLastModified(System.currentTimeMillis())
+        }
+    }
+
+    private fun assetSrc(path: String): String? = runCatching {
+        appContext?.assets?.open(path)?.bufferedReader()?.use { it.readText() }
+    }.getOrNull()
+
+    /**
+     * 把 drpy2 这类 ESM 引擎转成普通脚本：内联 cheerio / crypto-js，去 import、去 export default。
+     * 返回 null 表示这不是引擎（保持 ESM 路径不变）。
+     */
+    private fun scriptEngineSource(code: String): String? {
+        if (!code.contains("export default") || !code.contains("runMain")) return null
+        val cheerio = assetSrc("js/lib/cheerio.min.js") ?: return null
+        val crypto = assetSrc("js/lib/crypto-js.js").orEmpty()
+        val body = code
+            .replace(Regex("""import[^;]*;"""), "")
+            .replaceFirst("export default", "globalThis.__spider=")
+            .let { patchEngineEvals(it) }
+        val cheerioScript = cheerio
+            .replace("export default", "var cheerio =")
+            .replace(Regex("""\bexport\s+"""), "")
+        val stub = "" +
+            "var \u6a21\u677f={getMubans:function(){return {}},getMuban:function(){return {}}," +
+            "getMubanRule:function(){return ''},render:function(){return ''},getMubanList:function(){return []}};\n" +
+            "var gbkTool=new Proxy(function(){},{get:function(t,k){if(typeof k==='symbol')return undefined;return gbkTool;}," +
+            "apply:function(){return gbkTool;}});\n" +
+            "globalThis.\u6a21\u677f=\u6a21\u677f;globalThis.gbkTool=gbkTool;\n"
+        Log.d("NextMovieJs", "引擎脚本化 ${code.length}B cheerio=${cheerioScript.length}B crypto=${crypto.length}B")
+        return cheerioScript + "\n;\n" + crypto + "\n;\n" + stub + body
+    }
+
     /**
      * drpy2 的 init 里用 `eval("(function(){rule = {...}})()")` 装载 ext，
      * 但 QuickJS 里这次 eval 是间接求值，赋值落在全局而不是模块内的 rule → 规则永远是空壳。
      * 宿主先自己求值成对象再交给引擎，engine 走 `typeof ext == "object"` 分支直接赋值。
      */
+    /** 把 drpy 里 eval(js代码) 的调用点换成 __nmApplyJs，并把结果同步回引擎闭包变量 */
+    private fun patchEngineEvals(body: String): String {
+        var out = body
+        out = out.replace(
+            "var input=homeObj.MY_URL;try{eval(homeObj.class_parse.replace(\"js:\",\"\"))",
+            "var input=homeObj.MY_URL;try{var __r=__nmApplyJs(homeObj.class_parse.replace(\"js:\",\"\")," +
+                "{input:input,rule:rule,MY_URL:MY_URL,HOST:HOST,VODS:VODS});input=__r.input"
+        )
+        out = out.replace(
+            "var input=MY_URL;HOST=rule.host;eval(p.replace(\"js:\",\"\"));d=VODS",
+            "var input=MY_URL;HOST=rule.host;var __r=__nmApplyJs(p.replace(\"js:\",\"\")," +
+                "{input:input,HOST:HOST,MY_URL:MY_URL,rule:rule,VODS:VODS,VOD:VOD,TABS:TABS,LISTS:LISTS});" +
+                "input=__r.input;HOST=__r.HOST;VODS=(globalThis.VODS&&globalThis.VODS.length)?globalThis.VODS:__r.VODS;VOD=__r.VOD;d=VODS"
+        )
+        out = out.replace(
+            "const MY_PAGE=cateObj.pg;var desc=\"\";eval(p.trim().replace(\"js:\",\"\"));d=VODS",
+            "const MY_PAGE=cateObj.pg;var desc=\"\";var __r=__nmApplyJs(p.trim().replace(\"js:\",\"\")," +
+                "{input:input,MY_URL:MY_URL,rule:rule,VODS:VODS,VOD:VOD,TABS:TABS,LISTS:LISTS});" +
+                "input=__r.input;VODS=(globalThis.VODS&&globalThis.VODS.length)?globalThis.VODS:__r.VODS;VOD=__r.VOD;d=VODS"
+        )
+        out = out.replace(
+            "var detailUrl=rule.detailUrl||\"\";eval(p.trim().replace(\"js:\",\"\"));d=VODS",
+            "var detailUrl=rule.detailUrl||\"\";var __r=__nmApplyJs(p.trim().replace(\"js:\",\"\")," +
+                "{input:input,rule:rule,VODS:VODS,VOD:VOD,MY_URL:MY_URL});" +
+                "input=__r.input;VODS=(globalThis.VODS&&globalThis.VODS.length)?globalThis.VODS:__r.VODS;VOD=__r.VOD;d=VODS"
+        )
+        out = out.replace(
+            "var play_url=\"\";eval(p.trim().replace(\"js:\",\"\"));vod=VOD;",
+            "var play_url=\"\";var __r=__nmApplyJs(p.trim().replace(\"js:\",\"\")," +
+                "{input:input,rule:rule,VOD:VOD,VODS:VODS,MY_URL:MY_URL,play_url:play_url});" +
+                "input=__r.input;VOD=__r.VOD;play_url=__r.play_url||play_url;vod=VOD;"
+        )
+        out = out.replace(
+            "var input=MY_URL;eval(p.tabs.replace(\"js:\",\"\"));playFrom=TABS",
+            "var input=MY_URL;var __r=__nmApplyJs(p.tabs.replace(\"js:\",\"\")," +
+                "{input:input,rule:rule,TABS:TABS,MY_URL:MY_URL,HOST:HOST});" +
+                "input=__r.input;playFrom=__r.TABS"
+        )
+        out = out.replace(
+            "try{var input=MY_URL;var play_url=\"\";eval(p.lists.replace(\"js:\",\"\"));",
+            "try{var input=MY_URL;var play_url=\"\";var __r=__nmApplyJs(p.lists.replace(\"js:\",\"\")," +
+                "{input:input,rule:rule,LISTS:LISTS,MY_URL:MY_URL,play_url:play_url});" +
+                "input=__r.input;play_url=__r.play_url||play_url;LISTS=__r.LISTS;"
+        )
+        out = out.replace(
+            "var input=it.vod_pic;eval(rule.图片替换.trim().replace(\"js:\",\"\"));it.vod_pic=input",
+            "var input=it.vod_pic;var __r=__nmApplyJs(rule.图片替换.trim().replace(\"js:\",\"\")," +
+                "{input:input,rule:rule});it.vod_pic=__r.input"
+        )
+        Log.d("NextMovieJs", "js 块改写 " + (body.length - out.length))
+        return out
+    }
+
     private fun setInitExt(ctx: JSContext, ext: String) {
         if (!ext.startsWith("http", true)) {
             ctx.set("__nmInitExt", ext)
             return
         }
         val text = runCatching {
-            moduleCache[ext]?.takeIf { it.contains("rule") } ?: run {
+            moduleCache[ext]?.takeIf { it.contains("rule") }
+                ?: diskGet("ext:" + ext)?.takeIf { it.contains("rule") }
+                ?: run {
                 val request = Request.Builder().url(ext).header("User-Agent", defaultUa()).build()
                 http.newCall(request).execute().use { response ->
                     check(response.isSuccessful) { "HTTP ${response.code}" }
                     response.body?.string().orEmpty()
-                }
+                }.also { if (it.contains("var rule")) diskPut("ext:" + ext, it) }
             }
         }.getOrNull()
         val body = text?.takeIf { it.contains("var rule") }?.replaceFirst("var rule", "rule")
@@ -613,6 +736,7 @@ class JsSpider(
     __nmSettle(null);
   }
   try { __nmLog('rule=' + JSON.stringify(owner && owner.getRule ? owner.getRule('') : null).slice(0, 160)); } catch (e) {}
+
 })()
         """.trimIndent()
 
@@ -653,6 +777,25 @@ class JsSpider(
 var __nmResult;
 var __nmDefaultHeaders = {};
 var VODS = [];
+// drpy 的 js 规则块原本用直接 eval：QuickJS 里长代码会被截断成 unexpected end of input。
+// 改成 new Function + with 注入引擎局部（input / VOD / TABS / LISTS…），跑完调用点同步回闭包。
+function __nmApplyJs(src, scope) {
+  scope = scope || {};
+  if (typeof src !== 'string') return scope;
+  var keys = [];
+  var vals = [];
+  for (var k in scope) { if (Object.prototype.hasOwnProperty.call(scope, k)) { keys.push(k); vals.push(scope[k]); } }
+  var assign = '';
+  for (var i = 0; i < keys.length; i++) assign += '__o["' + keys[i] + '"]=' + keys[i] + ';';
+  try {
+    var text = 'var __o={};\n' + src + '\n;' + assign + '\nreturn __o;';
+    var res = new Function(keys.join(','), text).apply(null, vals);
+    if (res) for (var k2 in res) scope[k2] = res[k2];
+  } catch (e) {
+    __nmLog('[js块] ' + (e && e.message ? e.message : e) + ' len=' + src.length);
+  }
+  return scope;
+}
 // 部分 UMD 库（crypto-js / cheerio 生态）在模块里会用 window / self / global 做根对象
 try {
   globalThis.window = globalThis.window || globalThis;
@@ -848,7 +991,7 @@ class JsSpiderLoader(
         }
         if (code.isBlank()) throw JarSpiderLoader.SpiderLoadException("「${site.name}」JS 脚本内容为空")
         storeScript(url, code)
-        val spider = JsSpider(site, code, url, store)
+        val spider = JsSpider(site, code, url, store, cacheDir)
         cache[site.runtimeKey] = spider
         Log.i("NextMovieJs", "site=${site.name} 脚本 ${code.length}B")
         return spider

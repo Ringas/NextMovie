@@ -83,14 +83,17 @@ object VodParser {
     }
 
     fun fromJson(o: JSONObject): Vod? {
-        val id = text(o, "vod_id", "id")
-        val name = o.optString("vod_name", o.optString("name", "")).trim()
+        // drpy 引擎的 js 规则块返回的是 {title,img,desc,url} 这套短键，得一起认
+        val id = text(o, "vod_id", "id", "url")
+        val name = o.optString("vod_name", o.optString("name", o.optString("title", ""))).trim()
+        // 站点常塞占位卡（id=no_data / undefined 之类），点进去必然详情失败，直接丢弃
+        if (id.lowercase() in setOf("no_data", "undefined", "null", "none")) return null
         if (id.isEmpty() && name.isEmpty()) return null
         return Vod(
             id = id.ifEmpty { name },
             name = name,
-            pic = normalizePic(text(o, "vod_pic", "pic")),
-            remark = text(o, "vod_remarks", "remark"),
+            pic = normalizePic(text(o, "vod_pic", "pic", "img")),
+            remark = text(o, "vod_remarks", "remark", "desc"),
             year = text(o, "vod_year", "year"),
             area = text(o, "vod_area", "area"),
             typeName = text(o, "vod_class", "type_name"),
