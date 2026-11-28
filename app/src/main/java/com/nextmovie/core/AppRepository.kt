@@ -27,6 +27,7 @@ import com.nextmovie.core.poster.PosterResolver
 import com.nextmovie.core.spider.SpiderHost
 import com.nextmovie.core.tmdb.TmdbClient
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.cancel
@@ -101,7 +102,19 @@ class AppRepository(private val context: Context) {
     var currentSite: Site? by mutableStateOf(null)
         private set
 
+    /**
+     * 源健康度快照（key=站点 key，value=域名探测结果）。
+     * 换源面板据此给死源打「失效」标，JS 站 init 命中缓存即快速失败。
+     */
+    var siteHealth: Map<String, com.nextmovie.core.config.SourceHealthStore.State> by mutableStateOf(emptyMap())
+        private set
+
+    private var healthScanning = false
+
     init {
+        com.nextmovie.core.config.SourceHealthStore.bind(context)
+        // 盘上已有站点结论就先铺上去，避免「重启后换源面板红点消失、点进去又白等一轮」
+        siteHealth = com.nextmovie.core.config.SourceHealthStore.siteSnapshot()
         tmdb.token = prefs.getString(KEY_TMDB_TOKEN, "").orEmpty()
         applyTmdbRoute()
         applyDnsRoute()
@@ -374,6 +387,90 @@ class AppRepository(private val context: Context) {
         }
     }
 
+    /**
+     * JS 源域名健康扫描（P0）。
+     *
+     * 只对 `.js` 站做：拉一次 ext 规则文本（1.5s 短超时，命中磁盘缓存时不再走网），
+     * 取规则里的 `host:`，然后做 DNS + TLS 探测（2s）。并发固定 2，启动后延迟 1.5s 才开始，
+     * 确保不跟首屏渲染、也不跟播放抢带宽。
+     */
+    fun scanJsSourceHealth(reason: String = "startup", limit: Int = 20, concurrency: Int = 2) {
+        if (healthScanning) return
+        val targets = sites
+            .filter { it.isJavaScript && it.ext.startsWith("http", true) }
+            .take(limit)
+        if (targets.isEmpty()) return
+        healthScanning = true
+        val started = System.nanoTime()
+        prefetchScope.launch {
+            try {
+                kotlinx.coroutines.delay(1500)
+                val sem = Semaphore(concurrency.coerceAtLeast(1))
+                val results = coroutineScope {
+                    targets.map { site ->
+                        async<com.nextmovie.core.config.SourceHealthStore.State?> { sem.withPermit { probeJsSiteHealth(site) } }
+                    }.awaitAll()
+                }
+                // 结果按「站点 key」建索引给 UI 用（探活缓存本身是按 host 存的，两者不能混）
+                siteHealth = targets.zip(results)
+                    .mapNotNull { (site, health) -> health?.let { site.key to it } }
+                    .toMap()
+                siteHealth.forEach { (key, state) ->
+                    com.nextmovie.core.config.SourceHealthStore.rememberSite(key, state)
+                }
+                val dead = results.filter { it?.dead == true }.size
+                val ok = results.filter { it?.status == com.nextmovie.core.config.SourceHealthStore.Status.OK }.size
+                android.util.Log.i(
+                    "NextMovieHealth",
+                    "health-scan $reason 共 ${targets.size} 站 可达 $ok 失效 $dead " +
+                        "${(System.nanoTime() - started) / 1_000_000}ms"
+                )
+            } catch (e: Throwable) {
+                android.util.Log.w("NextMovieHealth", "health-scan 失败 ${e.message}")
+            } finally {
+                healthScanning = false
+            }
+        }
+    }
+
+    /** 单站：ext 文本（缓存优先）→ host → DNS/TLS 探测。任一步失败按「未测」处理，不误伤站点。 */
+    private suspend fun probeJsSiteHealth(site: Site): com.nextmovie.core.config.SourceHealthStore.State? {
+        val ext = runCatching {
+            withTimeoutOrNull(1_500) {
+                withContext(kotlinx.coroutines.Dispatchers.IO) { http.text(site.ext) }
+            }
+        }.getOrNull() ?: return null
+        val host = com.nextmovie.core.config.SourceHealthStore.hostFromExt(ext) ?: return null
+        val cached = com.nextmovie.core.config.SourceHealthStore.cached(host)
+        // 已有 24h 内的结论就不再打网络，扫描一轮只补新站
+        if (cached != null) return cached
+        val state = com.nextmovie.core.config.SourceHealthStore.check(host)
+        android.util.Log.d(
+            "NextMovieHealth",
+            "probe site=${site.name} host=$host ${state.status.label} ${state.latencyMs}ms ${state.note}"
+        )
+        return state
+    }
+
+    /** 当前站点是否是「已判死」的源：给 UI 提示用，不改站点选择。 */
+    /** 进首页时兜底触发一次扫描：配置命中快照时不会重走 loadConfig，健康度不能因此永远空着。 */
+    fun ensureHealthScan(reason: String) {
+        val jsSites = sites.count { it.isJavaScript && it.ext.startsWith("http", true) }
+        if (siteHealth.size >= jsSites.coerceAtMost(20)) return
+        scanJsSourceHealth(reason)
+    }
+
+    fun isSiteDead(site: Site?): Boolean = deadNote(site) != null
+
+    /** 死源时返回一句人能看懂的原因，供首页直接顶掉「这个分类还没有内容」这种误导文案。 */
+    fun deadNote(site: Site?): String? {
+        val s = site ?: return null
+        val st = siteHealth[s.key] ?: return null
+        if (!st.dead) return null
+        val host = st.host.substringAfter("://").substringBefore('/')
+        return "${st.status.label}（$host）"
+    }
+
     fun prewarmCurrentSite(reason: String = "startup") {
         val site = currentSite ?: return
         if (!site.isSpider || !site.isPlayable || site.runtimeKey in warmSites) return
@@ -457,6 +554,7 @@ class AppRepository(private val context: Context) {
         currentSite?.let { prefs.edit().putString(KEY_SITE_KEY, it.key).putBoolean(KEY_SITE_PLUGIN, it.isSpider && it.isPlayable).apply() }
         recordConfigResult(true, "✓ 已加载 ${sites.size} 个站点")
         prefetchSpiderJar("config-loaded")
+        scanJsSourceHealth("config-loaded")
         prewarmCurrentSite("config-loaded")
         return sites.size
     }

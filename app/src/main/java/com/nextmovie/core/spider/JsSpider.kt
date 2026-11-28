@@ -163,6 +163,33 @@ class JsSpider(
             .build()
     }
 
+    /** 已确认证书有问题的站点域名（进程内记忆，避免每条请求都先失败一次）。 */
+    private val LENIENT_HOSTS = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /** 证书链有问题的源站（自签/过期/缺中间证书）：严格握手失败后按兼容模式重试一次。 */
+    private val lenientHttp by lazy { com.nextmovie.core.net.TlsCompat.run { http.withLenientTls() } }
+
+    /**
+     * 站点抓取统一走这里。只对 TLS 类异常降级，DNS/超时/重置照常抛给上层，
+     * 免得把「真死站」也拖成慢响应。
+     */
+    private inline fun <T> execNet(request: okhttp3.Request, block: (okhttp3.Response) -> T): T {
+        // 站点一旦被判定为「证书有问题」，后续请求直接走宽松握手，不再先失败一次再重试。
+        // 否则每个请求都要多花一次 TLS 握手，首屏 8s 预算很容易被吃掉（在线之家实测 8.5s）。
+        val host = request.url.host
+        if (LENIENT_HOSTS.containsKey(host)) {
+            return lenientHttp.newCall(request).execute().use(block)
+        }
+        return try {
+            http.newCall(request).execute().use(block)
+        } catch (e: java.io.IOException) {
+            if (!com.nextmovie.core.net.TlsCompat.isTlsProblem(e)) throw e
+            LENIENT_HOSTS[host] = true
+            Log.w("NextMovieJs", "证书校验失败，改用兼容模式（本站后续直接宽松握手）：$host")
+            lenientHttp.newCall(request).execute().use(block)
+        }
+    }
+
     override fun homeContent(filter: Boolean): String = call("homeContent", filter)
     override fun homeVideoContent(): String = call("homeVideoContent")
     override fun categoryContent(
@@ -348,7 +375,19 @@ class JsSpider(
             "return __tplLib;})();\n" +
             "var gbkTool=new Proxy(function(){},{get:function(t,k){if(typeof k==='symbol')return undefined;return gbkTool;}," +
             "apply:function(){return gbkTool;}});\n" +
-            "globalThis.\u6a21\u677f=\u6a21\u677f;globalThis.gbkTool=gbkTool;\n"
+            "globalThis.\u6a21\u677f=\u6a21\u677f;globalThis.gbkTool=gbkTool;\n" +
+            // TVBox 生态把 rstrip/lstrip/strip 当 String 内置方法用（引擎里就有 rule.host.rstrip("/")），
+            // QuickJS 没有这些扩展，直接 TypeError，而 drpy2 的 init 又没 catch 住外层，
+            // 结果就是 rule.host 变空、整个站点一个条目都出不来（蛋蛋剧就是这么挂的）。
+            "function __nmStrip(s,chars,mode){\n" +
+            "var t=String(s==null?'':s);var set=(chars==null||chars==='')?' \\t\\r\\n':String(chars);\n" +
+            "var skip=function(ch){return set.indexOf(ch)<0};var a=0,b=t.length;\n" +
+            "if(mode!=='r'){while(a<b&&skip(t.charAt(a)))a++}\n" +
+            "if(mode!=='l'){while(b>a&&skip(t.charAt(b-1)))b--}\n" +
+            "return t.substring(a,b)}\n" +
+            "try{String.prototype.rstrip=function(c){return __nmStrip(this,c,'r')};\n" +
+            "String.prototype.lstrip=function(c){return __nmStrip(this,c,'l')};\n" +
+            "String.prototype.strip=function(c){return __nmStrip(this,c,'b')};}catch(e){}\n"
         Log.d("NextMovieJs", "引擎脚本化 ${code.length}B cheerio=${cheerioScript.length}B crypto=${crypto.length}B")
         return cheerioScript + "\n;\n" + crypto + "\n;\n" + stub + body
     }
@@ -365,6 +404,18 @@ class JsSpider(
             "var input=homeObj.MY_URL;try{eval(homeObj.class_parse.replace(\"js:\",\"\"))",
             "var input=homeObj.MY_URL;try{var __r=__nmApplyJs(homeObj.class_parse.replace(\"js:\",\"\")," +
                 "{input:input,rule:rule,MY_URL:MY_URL,HOST:HOST,VODS:VODS});input=__r.input"
+        )
+        // hostJs：drpy2 用直接 eval 执行，在 QuickJS 里既看不到局部变量、也改不回 HOST。
+        // 改成 __nmApplyJs + 显式回写，并用宿主从 ext 里读到的 host 兜底。
+        out = out.replace(
+            "rule.host=(rule.host||\"\").rstrip(\"/\");HOST=rule.host;",
+            "rule.host=(rule.host||\"\").rstrip(\"/\");" +
+                "HOST=rule.host||(typeof __nmExtHost==='string'?__nmExtHost:'');"
+        )
+        out = out.replace(
+            "try{eval(rule.hostJs);rule.host=HOST.rstrip(\"/\")}",
+            "try{var __hs=__nmApplyJs(rule.hostJs,{HOST:HOST,rule:rule,MY_URL:MY_URL});" +
+                "HOST=(__hs&&__hs.HOST)||HOST;rule.host=String(HOST||\"\").rstrip(\"/\")}"
         )
         out = out.replace(
             "var input=MY_URL;HOST=rule.host;eval(p.replace(\"js:\",\"\"));d=VODS",
@@ -421,12 +472,28 @@ class JsSpider(
                 ?: diskGet("ext:" + ext)?.takeIf { it.contains("rule") }
                 ?: run {
                 val request = Request.Builder().url(ext).header("User-Agent", defaultUa()).build()
-                http.newCall(request).execute().use { response ->
+                execNet(request) { response ->
                     check(response.isSuccessful) { "HTTP ${response.code}" }
                     response.body?.string().orEmpty()
                 }.also { if (it.contains("var rule")) diskPut("ext:" + ext, it) }
             }
         }.getOrNull()
+        // 源健康度预检：域名已判死（DNS/证书/超时）就直接失败，不再让用户干等 15s。
+        // 只读盘上缓存，零额外网络开销；缓存由 AppRepository 的后台扫描写入。
+        val deadHost = text?.let { com.nextmovie.core.config.SourceHealthStore.hostFromExt(it) }
+            ?.let { host -> com.nextmovie.core.config.SourceHealthStore.cached(host)?.takeIf { it.dead } }
+        if (deadHost != null) {
+            Log.w("NextMovieJs", "源已失效 host=${deadHost.host} ${deadHost.status.label} ${deadHost.note}")
+            throw IllegalStateException(
+                "源已失效：${deadHost.status.label}" + if (deadHost.note.isNotBlank()) "（${deadHost.note}）" else ""
+            )
+        }
+        // 引擎的 rule.host 在某些路径下会被清空（hostJs 依赖它取地址），
+        // 宿主额外存一份 ext 里声明的 host 作为兜底。
+        runCatching {
+            val declared = text?.let { com.nextmovie.core.config.SourceHealthStore.hostFromExt(it) }
+            ctx.set("__nmExtHost", declared?.let { "https://" + it } ?: "")
+        }
         val body = text?.takeIf { it.contains("var rule") || it.contains("muban") }?.replaceFirst("var rule", "rule")
         if (body.isNullOrBlank()) {
             Log.w("NextMovieJs", "ext 规则文本不可用，按 URL 交给引擎")
@@ -444,7 +511,10 @@ class JsSpider(
                 "ext"
             )
             val title = ctx.executeStringScript("String(globalThis.__nmInitExt && globalThis.__nmInitExt.title || '')", "extTitle")
-            Log.d("NextMovieJs", "ext 规则已求值 title=「$title」")
+            val host = ctx.executeStringScript(
+                "String(globalThis.__nmInitExt && globalThis.__nmInitExt.host || '<none>')", "extHost"
+            )
+            Log.d("NextMovieJs", "ext 规则已求值 title=「$title」 host=「$host」")
         }.onFailure { failure ->
             Log.w("NextMovieJs", "ext 规则求值失败，回退 URL：${failure.message}")
             ctx.set("__nmInitExt", ext)
@@ -589,7 +659,7 @@ class JsSpider(
             builder.method(method, null)
         }
 
-        http.newCall(builder.build()).execute().use { resp ->
+        execNet(builder.build()) { resp ->
             var bytes = resp.body?.bytes() ?: ByteArray(0)
             val encoding = resp.header("Content-Encoding").orEmpty()
             if (encoding.contains("gzip", true) ||

@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -120,6 +121,7 @@ fun HomeScreen(
         backgroundReady.complete(Unit)
     }
     LaunchedEffect(site.runtimeKey) {
+        repo.ensureHealthScan("home")
         continueList = repo.history.list().take(12)
         // 首页快照存在时说明来源已预热过，分类可以等；没有快照时分类与首页并行抓，
         // 否则冷启动要多等一次插件往返。
@@ -143,6 +145,12 @@ fun HomeScreen(
         loading = true
         error = null
         warming = false
+        // 已知死域直接把原因摆出来，不要再等引擎跑一轮空结果
+        repo.deadNote(site)?.let {
+            error = "源已失效：$it"
+            loading = false
+            return@LaunchedEffect
+        }
         try {
             val cat = cats.getOrNull(tab)
             // 冷启动没有快照：首页与分类并行发起，别让两次插件往返串行叠成 16s
@@ -253,6 +261,7 @@ fun HomeScreen(
         SitePickerDialog(
             sites = repo.sites,
             currentKey = site.key,
+            health = repo.siteHealth,
             onPick = { picked ->
                 sitePicker = false
                 repo.selectSite(picked.key)
@@ -331,6 +340,49 @@ fun HomeScreen(
                         }
                     }
                     Spacer(Modifier.height(12.dp))
+                }
+                // 死源提示条：站点明明连不上时，别让旧快照「看起来一切正常」，
+                // 直接把原因和下一步摆在首屏（点换源或点重试）。
+                val deadReason = repo.deadNote(site)
+                if (deadReason != null) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 10.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Tokens.PanelSolid)
+                            .border(1.dp, Tokens.Danger.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                    ) {
+                        Box(
+                            Modifier
+                                .size(8.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Tokens.Danger),
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            "源已失效：$deadReason",
+                            color = Tokens.Text,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            "换一个可用源继续",
+                            color = Tokens.TextDim,
+                            fontSize = 13.sp,
+                        )
+                        Spacer(Modifier.weight(1f))
+                        TvPill(
+                            text = "换源",
+                            glass = true,
+                            horizontalPadding = 16.dp,
+                            verticalPadding = 7.dp,
+                            onClick = { sitePicker = true },
+                        )
+                    }
                 }
                 LoadingStage(loadSecs, warming, warmTries, warmSince)
             }
@@ -456,13 +508,20 @@ private fun EmptyStage(siteReason: String?, onOpenSettings: () -> Unit) {
 }
 
 /** 站点名普遍是「🐮【免费分享】🐮」这类装饰串，弹窗里只留 2–6 个汉字才认得出 */
-private fun siteLabel(name: String): String =
-    name.filter { it.code in 0x4E00..0x9FFF }.take(6).ifBlank { name.take(8) }
+private fun siteLabel(name: String): String {
+    // 配置里的名字常写成「影视 | 酷云77[js]」：先去掉类型前缀与脚本后缀，再按汉字截断，
+    // 否则过滤 CJK 后只剩「影视」这种谁也认不出的标签。
+    val cleaned = name.substringAfter('|').substringBefore('[')
+        .replace("影视", "").replace("搜索", "").trim()
+    val cjk = cleaned.filter { it.code in 0x4E00..0x9FFF || it.isLetterOrDigit() }.trim()
+    return cjk.take(10).ifBlank { name.take(10) }
+}
 
 @Composable
 private fun SitePickerDialog(
     sites: List<Site>,
     currentKey: String,
+    health: Map<String, com.nextmovie.core.config.SourceHealthStore.State> = emptyMap(),
     onPick: (Site) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -498,6 +557,7 @@ private fun SitePickerDialog(
                 modifier = Modifier.fillMaxSize().mouseWheel(gridState),
             ) {
                 itemsIndexed(sites, key = { _, s -> s.key }) { _, s ->
+                    val dead = health[s.key]?.dead == true
                     TvPill(
                         glass = true,
                         selected = s.key == currentKey,
@@ -507,13 +567,27 @@ private fun SitePickerDialog(
                         verticalPadding = 10.dp,
                         onClick = { onPick(s) },
                     ) {
-                        // 站名普遍很长，小一号字才放得下 5–6 个汉字而不被省略号吃掉
-                        androidx.compose.material3.Text(
-                            text = siteLabel(s.name),
-                            fontSize = 13.sp,
-                            maxLines = 1,
-                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                        )
+                        androidx.compose.foundation.layout.Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            // 站名普遍很长，小一号字才放得下 5–6 个汉字而不被省略号吃掉
+                            androidx.compose.material3.Text(
+                                text = siteLabel(s.name),
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                            )
+                            // 死源不再靠用户逐个点开才发现：标题前一个小红点，长站名也不会把它挤掉
+                            if (dead) {
+                                androidx.compose.foundation.layout.Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(Tokens.Danger)
+                                )
+                                Spacer(Modifier.width(5.dp))
+                            }
+                        }
                     }
                 }
             }
